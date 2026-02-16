@@ -1,0 +1,12 @@
+[package]
+name = "gang-capability-diagnostics"
+description = "Reference diagnostic capability for Ganglion — collects system and ROS diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+ciborium = { workspace = true }

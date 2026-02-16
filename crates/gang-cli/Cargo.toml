@@ -1,0 +1,24 @@
+[package]
+name = "gang"
+description = "CLI for Ganglion — reach, observe, and act on ROS 2 robots behind hostile networks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "gang"
+path = "src/main.rs"
+
+[dependencies]
+gang-core = { path = "../gang-core" }
+gang-libp2p = { path = "../gang-libp2p" }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+hex = "0.4"
+blake3 = { workspace = true }

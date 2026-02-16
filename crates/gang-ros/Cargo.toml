@@ -1,0 +1,19 @@
+[package]
+name = "gang-ros"
+description = "ROS 2 integration broker for Ganglion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gang-core = { path = "../gang-core" }
+gang-libp2p = { path = "../gang-libp2p" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"

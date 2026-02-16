@@ -1,0 +1,73 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gang-core",
+    "crates/gang-wasm-host",
+    "crates/gang-libp2p",
+    "crates/gang-ros",
+    "crates/gang-cli",
+    "crates/gang-capability-diagnostics",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/tafy-labs/ganglion"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+ciborium = "0.2"
+serde_json = "1"
+
+# Crypto
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+rand = "0.8"
+blake3 = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Configuration
+toml = "0.8"
+
+# libp2p
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "tcp",
+    "quic",
+    "noise",
+    "yamux",
+    "identify",
+    "ping",
+    "kad",
+    "relay",
+    "dcutr",
+    "macros",
+    "dns",
+    "serde",
+] }
+
+# WASM runtime
+wasmtime = { version = "29", features = ["component-model"] }
+wasmtime-wasi = "29"
+
+# Testing
+tempfile = "3"
