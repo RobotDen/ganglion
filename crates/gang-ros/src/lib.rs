@@ -1,1 +1,5 @@
-// ROS 2 integration broker — implementation follows in Phase 4
+pub mod diagnostics;
+pub mod filesystem;
+pub mod logs;
+pub mod ros;
+pub mod agent;
