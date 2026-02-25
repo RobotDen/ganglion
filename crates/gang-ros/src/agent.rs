@@ -1,14 +1,14 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 use gang_core::audit::{AuditLog, AuditRecord, CapabilityIoStats, ExitStatus};
 use gang_core::broker::CapabilityBroker;
 use gang_core::capability::{CapabilityGroup, InstalledCapability};
-use gang_core::error::{CapabilityError, ManifestError, PolicyError};
+use gang_core::error::{CapabilityError, ManifestError};
 use gang_core::identity::{Keypair, PeerId};
 use gang_core::manifest::{SignedManifest, TrustStore};
 use gang_core::policy::Policy;
@@ -16,7 +16,6 @@ use gang_core::policy::Policy;
 use crate::diagnostics::DiagnosticsBroker;
 use crate::filesystem::{FsBroker, FsRule};
 use crate::logs::LogStreamBroker;
-use crate::ros::RosInterfaceBroker;
 
 /// The robot agent — the central process running on a deployed robot.
 /// Manages installed capabilities, brokers, policy enforcement, and audit logging.
@@ -374,7 +373,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn test_config(dir: &Path) -> AgentConfig {
+    fn test_config(dir: &std::path::Path) -> AgentConfig {
         AgentConfig {
             key_path: dir.join("identity.key"),
             policy_path: None, // permissive

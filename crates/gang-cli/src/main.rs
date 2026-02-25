@@ -1,3 +1,5 @@
+mod commands;
+
 use clap::{Parser, Subcommand};
 
 /// gang — reach, observe, and act on ROS 2 robots behind hostile networks.
@@ -20,26 +22,43 @@ struct Cli {
 }
 
 #[derive(Clone, clap::ValueEnum)]
-enum OutputFormat {
+pub enum OutputFormat {
     Text,
     Json,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Establish a session with a robot via relay.
-    Connect {
-        /// Robot name or peer ID.
-        robot: String,
+    /// Manage peer identity.
+    Identity {
+        #[command(subcommand)]
+        action: IdentityAction,
     },
 
-    /// List reachable robots in the fleet.
-    List,
+    /// Sign a WASM component with your identity key.
+    Sign {
+        /// Path to the .wasm component to sign.
+        wasm_path: String,
+        /// Path to the signing key (default: ~/.gang/identity.key).
+        #[arg(long)]
+        key: Option<String>,
+        /// Component name (default: derived from filename).
+        #[arg(long)]
+        name: Option<String>,
+        /// Component version.
+        #[arg(long, default_value = "0.1.0")]
+        version: String,
+    },
 
-    /// List capabilities installed on a robot.
-    Caps {
-        /// Robot name or peer ID.
-        robot: String,
+    /// Run the robot agent (for development/testing).
+    /// Starts a local Ganglion agent that listens for operator connections.
+    Agent {
+        /// Path to the agent config file.
+        #[arg(long)]
+        config: Option<String>,
+        /// Directory for capabilities and state (default: /tmp/gang-agent).
+        #[arg(long, default_value = "/tmp/gang-agent")]
+        data_dir: String,
     },
 
     /// Deploy a signed capability to a robot.
@@ -48,6 +67,9 @@ enum Commands {
         robot: String,
         /// Path to the signed .wasm component.
         wasm_path: String,
+        /// Path to the manifest (.manifest.cbor), auto-detected if adjacent.
+        #[arg(long)]
+        manifest: Option<String>,
     },
 
     /// Invoke an installed capability on a robot.
@@ -60,6 +82,12 @@ enum Commands {
         args: Vec<String>,
     },
 
+    /// List capabilities installed on a robot.
+    Caps {
+        /// Robot name or peer ID.
+        robot: String,
+    },
+
     /// Stream robot logs.
     Logs {
         /// Robot name or peer ID.
@@ -69,25 +97,22 @@ enum Commands {
         follow: bool,
     },
 
-    /// Sign a WASM component with your identity key.
-    Sign {
-        /// Path to the .wasm component to sign.
-        wasm_path: String,
-        /// Path to the signing key (default: ~/.gang/identity.key).
-        #[arg(long)]
-        key: Option<String>,
-    },
+    /// Run a local end-to-end demo: start agent, deploy diagnostics, invoke.
+    Demo,
 
-    /// Manage peer identity.
-    Identity {
-        #[command(subcommand)]
-        action: IdentityAction,
-    },
-
-    /// Run a local test harness scenario.
+    /// Run a local test harness scenario (requires Docker).
     TestArchetype {
-        /// Archetype to test: open-warehouse, nat-office, enterprise-dmz, mobile-cgnat.
+        /// Archetype: open-warehouse, nat-office, enterprise-dmz, mobile-cgnat.
         archetype: String,
+    },
+
+    /// List reachable robots in the fleet.
+    List,
+
+    /// Establish a session with a robot via relay.
+    Connect {
+        /// Robot name or peer ID.
+        robot: String,
     },
 }
 
@@ -111,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
     let filter = match cli.verbose {
         0 => "gang=info",
         1 => "gang=debug",
-        _ => "gang=trace,gang_core=trace",
+        _ => "gang=trace,gang_core=trace,gang_ros=trace",
     };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -119,136 +144,46 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Identity { action } => match action {
-            IdentityAction::Show => cmd_identity_show().await?,
-            IdentityAction::Generate { force } => cmd_identity_generate(force).await?,
+            IdentityAction::Show => commands::identity_show().await?,
+            IdentityAction::Generate { force } => commands::identity_generate(force).await?,
         },
-        Commands::Connect { robot } => {
-            tracing::info!("Connecting to {robot}...");
-            eprintln!("gang connect: not yet implemented (Phase 2)");
+        Commands::Sign {
+            wasm_path,
+            key,
+            name,
+            version,
+        } => commands::sign(&wasm_path, key.as_deref(), name.as_deref(), &version).await?,
+        Commands::Agent { config, data_dir } => {
+            commands::agent(config.as_deref(), &data_dir).await?
         }
-        Commands::List => {
-            eprintln!("gang list: not yet implemented (Phase 2)");
-        }
-        Commands::Caps { robot } => {
-            tracing::info!("Listing capabilities on {robot}...");
-            eprintln!("gang caps: not yet implemented (Phase 5)");
-        }
-        Commands::Deploy { robot, wasm_path } => {
-            tracing::info!("Deploying {wasm_path} to {robot}...");
-            eprintln!("gang deploy: not yet implemented (Phase 5)");
-        }
+        Commands::Deploy {
+            robot,
+            wasm_path,
+            manifest,
+        } => commands::deploy(&robot, &wasm_path, manifest.as_deref(), &cli.format).await?,
         Commands::Run {
             robot,
             cap_name,
             args,
-        } => {
-            tracing::info!("Running {cap_name} on {robot} with args {args:?}...");
-            eprintln!("gang run: not yet implemented (Phase 5)");
-        }
-        Commands::Logs { robot, follow } => {
-            tracing::info!("Streaming logs from {robot} (follow={follow})...");
-            eprintln!("gang logs: not yet implemented (Phase 4)");
-        }
-        Commands::Sign { wasm_path, key } => {
-            cmd_sign(&wasm_path, key.as_deref()).await?;
+        } => commands::run(&robot, &cap_name, &args, &cli.format).await?,
+        Commands::Caps { robot } => commands::caps(&robot, &cli.format).await?,
+        Commands::Demo => commands::demo(&cli.format).await?,
+        Commands::Logs { robot: _, follow: _ } => {
+            eprintln!("gang logs: requires a running relay connection (not yet implemented)");
+            eprintln!("Use `gang demo` for a self-contained local demo.");
         }
         Commands::TestArchetype { archetype } => {
-            tracing::info!("Testing archetype: {archetype}...");
-            eprintln!("gang test-archetype: not yet implemented (Phase 7)");
+            commands::test_archetype(&archetype).await?
+        }
+        Commands::List => {
+            eprintln!("gang list: requires a running relay connection (not yet implemented)");
+            eprintln!("Use `gang demo` for a self-contained local demo.");
+        }
+        Commands::Connect { robot: _ } => {
+            eprintln!("gang connect: requires a running relay (not yet implemented)");
+            eprintln!("Use `gang demo` for a self-contained local demo.");
         }
     }
 
-    Ok(())
-}
-
-async fn cmd_identity_show() -> anyhow::Result<()> {
-    let key_path = gang_core::identity::default_key_path();
-    if !key_path.exists() {
-        eprintln!(
-            "No identity found. Run `gang identity generate` first.\n\
-             Expected key at: {}",
-            key_path.display()
-        );
-        std::process::exit(1);
-    }
-
-    let keypair = gang_core::identity::Keypair::load(&key_path)?;
-    println!("Peer ID:    {}", keypair.peer_id());
-    println!("Public key: {}", hex::encode(keypair.public_key().as_bytes()));
-    println!("Key file:   {}", key_path.display());
-    Ok(())
-}
-
-async fn cmd_identity_generate(force: bool) -> anyhow::Result<()> {
-    let key_path = gang_core::identity::default_key_path();
-    if key_path.exists() && !force {
-        eprintln!(
-            "Identity already exists at {}.\n\
-             Use --force to overwrite.",
-            key_path.display()
-        );
-        std::process::exit(1);
-    }
-
-    let keypair = gang_core::identity::Keypair::generate();
-    keypair.save(&key_path)?;
-    println!("Generated new identity:");
-    println!("  Peer ID:  {}", keypair.peer_id());
-    println!("  Key file: {}", key_path.display());
-    Ok(())
-}
-
-async fn cmd_sign(wasm_path: &str, key_path: Option<&str>) -> anyhow::Result<()> {
-    use gang_core::capability::CapabilityGroup;
-    use gang_core::manifest::{ComponentManifest, ResourceLimits, SignedManifest};
-
-    let key_path = key_path
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(gang_core::identity::default_key_path);
-
-    if !key_path.exists() {
-        anyhow::bail!(
-            "Key not found at {}. Run `gang identity generate` first.",
-            key_path.display()
-        );
-    }
-
-    let wasm_path = std::path::Path::new(wasm_path);
-    if !wasm_path.exists() {
-        anyhow::bail!("Component not found: {}", wasm_path.display());
-    }
-
-    let keypair = gang_core::identity::Keypair::load(&key_path)?;
-    let component_bytes = std::fs::read(wasm_path)?;
-    let component_hash = blake3::hash(&component_bytes).to_hex().to_string();
-
-    // For now, create a manifest with diagnostics capabilities.
-    // In a real workflow, the manifest would be specified separately or
-    // inferred from the component's WIT imports.
-    let name = wasm_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown");
-
-    let manifest = ComponentManifest {
-        name: name.into(),
-        version: "0.1.0".into(),
-        declared_capabilities: vec![CapabilityGroup::DiagnosticsCollect {
-            version: "1.0".into(),
-        }],
-        author_peer_id: keypair.peer_id(),
-        component_hash,
-        limits: ResourceLimits::default(),
-    };
-
-    let signed = SignedManifest::sign(&manifest, &keypair)?;
-    let manifest_path = wasm_path.with_extension("manifest.cbor");
-    let cbor = signed.to_cbor()?;
-    std::fs::write(&manifest_path, &cbor)?;
-
-    println!("Signed component: {}", wasm_path.display());
-    println!("  Manifest: {}", manifest_path.display());
-    println!("  Author:   {}", keypair.peer_id());
-    println!("  Hash:     {}", manifest.component_hash);
     Ok(())
 }

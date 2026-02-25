@@ -123,7 +123,7 @@ impl CapabilityBroker for RosInterfaceBroker {
             }
             BrokerOperation::ServiceCall {
                 ref service,
-                ref request,
+                request: _,
             } => {
                 self.check_access(service, true)?;
 
