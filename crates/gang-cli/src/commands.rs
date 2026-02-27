@@ -500,36 +500,141 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
         }
     }
 
-    println!("Test archetype: {archetype}");
-    println!("Docker-compose scenarios are not yet implemented.");
-    println!("Use `gang demo` for a self-contained local demo.");
+    println!("============================================");
+    println!("  Ganglion Test Harness: {archetype}");
+    println!("============================================");
     println!();
-    println!("The test harness will simulate:");
+
+    // Describe what this archetype simulates
     match archetype {
         "open-warehouse" => {
-            println!("  - Flat L2, no NAT, permissive DHCP");
+            println!("Scenario: Flat L2, no NAT, permissive DHCP");
             println!("  - Direct TCP/QUIC connection between operator and robot");
-            println!("  - No relay needed");
+            println!("  - Multicast works, no relay needed");
         }
         "nat-office" => {
-            println!("  - Single consumer NAT, no inbound ports");
+            println!("Scenario: Single consumer NAT, no inbound ports");
             println!("  - Robot dials out to relay");
             println!("  - Operator connects via relay, DCUtR upgrade attempted");
         }
         "enterprise-dmz" => {
-            println!("  - VLAN isolation, restricted outbound ports");
-            println!("  - TLS inspection proxy");
-            println!("  - Robot connects outbound on 443 only");
+            println!("Scenario: VLAN isolation, restricted outbound ports");
+            println!("  - TLS inspection proxy, TCP 443 outbound only");
+            println!("  - Robot connects through firewall to relay");
         }
         "mobile-cgnat" => {
-            println!("  - Symmetric NAT, CGNAT, IP rotation");
+            println!("Scenario: Symmetric NAT, CGNAT, IP rotation");
             println!("  - Relay-only connectivity (DCUtR fails on symmetric NAT)");
-            println!("  - Intermittent connectivity simulation");
+            println!("  - Simulated cellular conditions: jitter, packet loss");
         }
         _ => unreachable!(),
     }
+    println!();
+
+    // Locate the test-harness directory relative to the binary or CWD.
+    // Search order: ./test-harness, ../test-harness, ../../test-harness
+    let scenario_dir = find_scenario_dir(archetype)?;
+    let compose_file = scenario_dir.join("docker-compose.yml");
+
+    if !compose_file.exists() {
+        anyhow::bail!(
+            "docker-compose.yml not found at {}\n\
+             Make sure you're running from the Ganglion repo root.",
+            compose_file.display()
+        );
+    }
+
+    let project_name = format!("ganglion-{archetype}");
+
+    // Build
+    println!("Building container images...");
+    let build_status = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-p", &project_name,
+            "-f", &compose_file.to_string_lossy(),
+            "build",
+        ])
+        .status()?;
+
+    if !build_status.success() {
+        anyhow::bail!("Docker build failed. Check output above.");
+    }
+
+    // Start
+    println!();
+    println!("Starting {archetype} scenario...");
+    let up_status = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-p", &project_name,
+            "-f", &compose_file.to_string_lossy(),
+            "up", "-d",
+        ])
+        .status()?;
+
+    if !up_status.success() {
+        anyhow::bail!("Failed to start scenario. Check output above.");
+    }
+
+    // Wait for stabilization
+    println!("Waiting for services to stabilize...");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Show service status
+    println!();
+    let _ = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-p", &project_name,
+            "-f", &compose_file.to_string_lossy(),
+            "ps",
+        ])
+        .status();
+
+    // Show logs
+    println!();
+    println!("=== Service logs ===");
+    let _ = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-p", &project_name,
+            "-f", &compose_file.to_string_lossy(),
+            "logs", "--tail", "20",
+        ])
+        .status();
+
+    println!();
+    println!("============================================");
+    println!("  Scenario {archetype} is running");
+    println!("============================================");
+    println!();
+    println!("Inspect manually:");
+    println!("  docker compose -p {project_name} -f {} exec robot bash",
+             compose_file.display());
+    println!("  docker compose -p {project_name} -f {} logs -f",
+             compose_file.display());
+    println!();
+    println!("Tear down:");
+    println!("  docker compose -p {project_name} -f {} down -v",
+             compose_file.display());
 
     Ok(())
+}
+
+/// Find the test-harness scenario directory by searching upward from CWD.
+fn find_scenario_dir(archetype: &str) -> anyhow::Result<std::path::PathBuf> {
+    let cwd = std::env::current_dir()?;
+    for ancestor in cwd.ancestors() {
+        let candidate = ancestor.join("test-harness").join(archetype);
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!(
+        "Could not find test-harness/{archetype} directory.\n\
+         Run this command from within the Ganglion repository."
+    )
 }
 
 /// Pretty-print diagnostics output for human consumption.

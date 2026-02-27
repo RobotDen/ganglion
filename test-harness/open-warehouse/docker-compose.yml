@@ -1,0 +1,55 @@
+# Scenario 1: Open Warehouse
+# Flat L2, permissive DHCP, no real egress controls.
+# Direct TCP/QUIC connection between operator and robot.
+# Multicast works. No relay needed.
+
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["agent", "--data-dir", "/data"]
+    volumes:
+      - relay-data:/data
+    networks:
+      warehouse:
+        ipv4_address: 172.20.0.10
+
+  robot:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["agent", "--data-dir", "/data"]
+    volumes:
+      - robot-data:/data
+    networks:
+      warehouse:
+        ipv4_address: 172.20.0.20
+    depends_on:
+      - relay
+
+  operator:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["demo"]
+    volumes:
+      - operator-data:/data
+    networks:
+      warehouse:
+        ipv4_address: 172.20.0.30
+    depends_on:
+      - relay
+      - robot
+
+networks:
+  warehouse:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+volumes:
+  relay-data:
+  robot-data:
+  operator-data:

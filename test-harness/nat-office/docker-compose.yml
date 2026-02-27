@@ -1,0 +1,121 @@
+# Scenario 2: NAT'd Office
+# Single consumer NAT, no inbound ports, DHCP rotation.
+# Robot dials out to relay. Operator connects via relay.
+# DCUtR hole-punch upgrade attempted.
+
+services:
+  # Relay lives on the "internet" — directly reachable by both sides.
+  relay:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["agent", "--data-dir", "/data"]
+    volumes:
+      - relay-data:/data
+    networks:
+      internet:
+        ipv4_address: 10.0.0.10
+
+  # Robot sits behind a NAT gateway. It can reach the internet but
+  # nothing on the internet can initiate a connection to it.
+  robot:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["agent", "--data-dir", "/data"]
+    volumes:
+      - robot-data:/data
+    networks:
+      robot-lan:
+        ipv4_address: 192.168.1.20
+    depends_on:
+      - nat-gateway
+      - relay
+
+  # Operator also sits behind a separate NAT (typical home/office).
+  operator:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["demo"]
+    volumes:
+      - operator-data:/data
+    networks:
+      operator-lan:
+        ipv4_address: 192.168.2.30
+    depends_on:
+      - nat-gateway-operator
+      - relay
+      - robot
+
+  # NAT gateway for the robot LAN.
+  # Uses iptables MASQUERADE to simulate a consumer router.
+  nat-gateway:
+    image: debian:bookworm-slim
+    cap_add:
+      - NET_ADMIN
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apt-get update -qq && apt-get install -y -qq iptables iproute2 > /dev/null 2>&1
+        sysctl -w net.ipv4.ip_forward=1
+        iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+        iptables -A FORWARD -i eth1 -o eth0 -j ACCEPT
+        iptables -A FORWARD -i eth0 -o eth1 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        # Block unsolicited inbound to robot LAN
+        iptables -A FORWARD -i eth0 -o eth1 -m state --state NEW -j DROP
+        echo "NAT gateway (robot) ready"
+        sleep infinity
+    networks:
+      internet:
+        ipv4_address: 10.0.0.20
+      robot-lan:
+        ipv4_address: 192.168.1.1
+
+  # NAT gateway for the operator LAN.
+  nat-gateway-operator:
+    image: debian:bookworm-slim
+    cap_add:
+      - NET_ADMIN
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apt-get update -qq && apt-get install -y -qq iptables iproute2 > /dev/null 2>&1
+        sysctl -w net.ipv4.ip_forward=1
+        iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+        iptables -A FORWARD -i eth1 -o eth0 -j ACCEPT
+        iptables -A FORWARD -i eth0 -o eth1 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -A FORWARD -i eth0 -o eth1 -m state --state NEW -j DROP
+        echo "NAT gateway (operator) ready"
+        sleep infinity
+    networks:
+      internet:
+        ipv4_address: 10.0.0.30
+      operator-lan:
+        ipv4_address: 192.168.2.1
+
+networks:
+  internet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/24
+  robot-lan:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+  operator-lan:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 192.168.2.0/24
+
+volumes:
+  relay-data:
+  robot-data:
+  operator-data:

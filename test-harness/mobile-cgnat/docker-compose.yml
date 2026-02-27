@@ -1,0 +1,131 @@
+# Scenario 4: Mobile / CGNAT
+# Symmetric NAT, carrier-grade NAT, IP rotation, intermittent connectivity.
+# Relay-only connectivity — DCUtR will fail against symmetric NAT.
+# Simulates cellular network conditions: jitter, packet loss, IP changes.
+
+services:
+  # Relay on the public internet.
+  relay:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["agent", "--data-dir", "/data"]
+    volumes:
+      - relay-data:/data
+    networks:
+      internet:
+        ipv4_address: 10.2.0.10
+
+  # Robot behind CGNAT — double NAT (carrier + local).
+  robot:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["agent", "--data-dir", "/data"]
+    volumes:
+      - robot-data:/data
+    networks:
+      cgnat-inner:
+        ipv4_address: 10.64.0.20
+    depends_on:
+      - cgnat-outer
+      - cgnat-inner-nat
+      - relay
+
+  # Operator has normal internet access.
+  operator:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["demo"]
+    volumes:
+      - operator-data:/data
+    networks:
+      internet:
+        ipv4_address: 10.2.0.30
+    depends_on:
+      - relay
+      - robot
+
+  # Inner NAT: local network NAT (e.g., mobile hotspot or site router).
+  cgnat-inner-nat:
+    image: debian:bookworm-slim
+    cap_add:
+      - NET_ADMIN
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apt-get update -qq && apt-get install -y -qq iptables iproute2 > /dev/null 2>&1
+        sysctl -w net.ipv4.ip_forward=1
+        iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+        iptables -A FORWARD -i eth1 -o eth0 -j ACCEPT
+        iptables -A FORWARD -i eth0 -o eth1 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -A FORWARD -i eth0 -o eth1 -m state --state NEW -j DROP
+
+        # Simulate mobile network conditions on the inner interface
+        # 50ms base latency, 30ms jitter, 2% packet loss
+        tc qdisc add dev eth1 root netem delay 50ms 30ms loss 2%
+
+        echo "Inner NAT (local router) ready"
+        sleep infinity
+    networks:
+      cgnat-pool:
+        ipv4_address: 100.64.0.20
+      cgnat-inner:
+        ipv4_address: 10.64.0.1
+
+  # Outer NAT: carrier-grade NAT. Symmetric — different mapping per destination.
+  # Uses --random flag to simulate symmetric NAT behavior.
+  cgnat-outer:
+    image: debian:bookworm-slim
+    cap_add:
+      - NET_ADMIN
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apt-get update -qq && apt-get install -y -qq iptables iproute2 > /dev/null 2>&1
+        sysctl -w net.ipv4.ip_forward=1
+
+        # Symmetric NAT: --random ensures different external port per destination
+        iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE --random
+
+        iptables -A FORWARD -i eth1 -o eth0 -j ACCEPT
+        iptables -A FORWARD -i eth0 -o eth1 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -A FORWARD -i eth0 -o eth1 -m state --state NEW -j DROP
+
+        # Additional jitter at the carrier level
+        tc qdisc add dev eth0 root netem delay 20ms 10ms loss 0.5%
+
+        echo "CGNAT (carrier symmetric NAT) ready"
+        sleep infinity
+    networks:
+      internet:
+        ipv4_address: 10.2.0.20
+      cgnat-pool:
+        ipv4_address: 100.64.0.1
+
+networks:
+  internet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.2.0.0/24
+  cgnat-pool:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 100.64.0.0/24
+  cgnat-inner:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.64.0.0/24
+
+volumes:
+  relay-data:
+  robot-data:
+  operator-data:
