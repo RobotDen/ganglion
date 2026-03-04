@@ -1,0 +1,100 @@
+// Ganglion WIT capability interface definitions — v0.1
+//
+// All WASM components interact with the host through these interfaces.
+// A component declares which interfaces it needs in its signed manifest.
+// The host only links declared interfaces; undeclared imports trap.
+
+package ganglion:capability@0.1.0;
+
+/// ROS 2 interface — topic subscribe, service call, parameter access.
+/// Pattern-gated: each operation is checked against the manifest's declared patterns.
+interface ros-interface {
+    /// A single ROS topic/service/parameter listing entry.
+    record ros-entry {
+        name: string,
+        entry-type: string,
+    }
+
+    /// List all available topics, services, and nodes.
+    list-ros: func() -> result<list<ros-entry>, string>;
+
+    /// Subscribe to a topic and get current data.
+    /// Returns serialized message data.
+    topic-subscribe: func(topic: string) -> result<list<u8>, string>;
+
+    /// Call a ROS service with a serialized request.
+    service-call: func(service: string, request: list<u8>) -> result<list<u8>, string>;
+
+    /// Get a parameter value.
+    param-get: func(name: string) -> result<list<u8>, string>;
+}
+
+/// Log streaming — enumerate sources and stream log lines.
+/// Source-pattern gated.
+interface logs-stream {
+    /// A log source descriptor.
+    record log-source {
+        name: string,
+        source-type: string,
+    }
+
+    /// List available log sources.
+    list-sources: func() -> result<list<log-source>, string>;
+
+    /// Stream log lines from a source matching a pattern.
+    /// Returns matching log lines.
+    stream-logs: func(source: string, pattern: string) -> result<list<string>, string>;
+}
+
+/// Bounded filesystem access — path-pattern gated with read/write flags.
+interface fs-bounded {
+    /// File metadata.
+    record file-stat {
+        size: u64,
+        is-dir: bool,
+        is-file: bool,
+        modified: u64,
+    }
+
+    /// Read a file's contents.
+    read-file: func(path: string) -> result<list<u8>, string>;
+
+    /// Write data to a file.
+    write-file: func(path: string, data: list<u8>) -> result<_, string>;
+
+    /// List directory contents.
+    list-dir: func(path: string) -> result<list<string>, string>;
+
+    /// Get file metadata.
+    stat-file: func(path: string) -> result<file-stat, string>;
+}
+
+/// Structured diagnostic collection — system info, processes, network.
+interface diagnostics-collect {
+    /// Key-value diagnostic entry.
+    record diagnostic-entry {
+        key: string,
+        value: string,
+    }
+
+    /// Collect system information (hostname, OS, arch, memory, etc.).
+    system-info: func() -> result<list<diagnostic-entry>, string>;
+
+    /// List running processes.
+    process-list: func() -> result<list<string>, string>;
+
+    /// Collect network state (interfaces, routes, connections).
+    network-state: func() -> result<list<diagnostic-entry>, string>;
+}
+
+/// The world that Ganglion capabilities target.
+/// A component imports whichever interfaces it needs.
+world ganglion-capability {
+    import ros-interface;
+    import logs-stream;
+    import fs-bounded;
+    import diagnostics-collect;
+
+    /// The capability's entry point. Returns serialized result data.
+    export run: func(args: list<string>) -> result<list<u8>, string>;
+}
