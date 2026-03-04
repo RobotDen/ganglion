@@ -3,6 +3,21 @@
 **Status:** Active — tracks implementation from v0.1 through v0.4
 **Source of truth:** [DesignSpec.md](./DesignSpec.md)
 
+### Progress (v0.1)
+
+| Phase | Status | Tests | Commit |
+|-------|--------|-------|--------|
+| 1. Repo scaffolding & core traits | Done | 23 | `8355084` |
+| 2. Connectivity layer (libp2p) | Done | — | `e4ed53d` |
+| 3. WASM runtime (Layer 2) | Done | 10 | `5767545` |
+| 4. Native brokers (Layer 3) | Done | 19 | `51ceb47` |
+| 5. Reference capability | Done (native) | — | `99e8ac1` |
+| 6. CLI completion | Done | — | `99e8ac1` |
+| 7. Test harness | Done | — | `416a4fc` |
+| 8. Documentation | Done | — | `15e2be4` |
+
+**Total: 52 tests passing across 4 crates.**
+
 ---
 
 ## Repository layout

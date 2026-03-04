@@ -11,6 +11,7 @@ All notable changes to Ganglion will be documented in this file.
 - **ROS 2 integration** (`gang-ros`): Diagnostics broker (system info, processes, network state), filesystem broker with symlink jail, log stream broker with source pattern filtering, ROS interface broker (topic subscribe, service call, param get).
 - **Robot agent** (`gang-ros`): Deploy/invoke lifecycle with signature verification, trust store checking, policy evaluation, and audit logging.
 - **CLI** (`gang`): Full command set — identity, sign, agent, deploy, run, caps, logs, demo, test-archetype, list, connect. Self-contained `gang demo` for zero-dependency end-to-end demonstration.
+- **WASM runtime** (`gang-wasm-host`): Wasmtime component model with fuel metering, epoch-based wall-clock deadlines, capability declaration enforcement, and WIT interface definitions for all four v0.1 capability groups.
 - **Test harness**: Four Docker-compose scenarios simulating open warehouse, NAT'd office, enterprise DMZ, and mobile/CGNAT network archetypes with tc/netem and iptables.
 - **Documentation**: Design specification, implementation plan, quickstart guide, validation framework.
-- **42 passing tests** across gang-core (23) and gang-ros (19).
+- **52 passing tests** across gang-core (23), gang-ros (19), and gang-wasm-host (10).
