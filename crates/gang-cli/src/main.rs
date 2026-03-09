@@ -106,6 +106,18 @@ enum Commands {
         archetype: String,
     },
 
+    /// Diagnose network environment — detect archetype and recommend transport config.
+    Diagnose {
+        /// Robot name or peer ID (optional — if omitted, probes local network).
+        robot: Option<String>,
+    },
+
+    /// Show per-transport statistics for a connected peer.
+    TransportStats {
+        /// Robot name or peer ID.
+        robot: String,
+    },
+
     /// List reachable robots in the fleet.
     List,
 
@@ -113,6 +125,9 @@ enum Commands {
     Connect {
         /// Robot name or peer ID.
         robot: String,
+        /// Preferred transport order for happy-eyeballs selection.
+        #[arg(long, value_delimiter = ',')]
+        prefer_transport: Option<Vec<String>>,
     },
 }
 
@@ -175,11 +190,17 @@ async fn main() -> anyhow::Result<()> {
         Commands::TestArchetype { archetype } => {
             commands::test_archetype(&archetype).await?
         }
+        Commands::Diagnose { robot } => {
+            commands::diagnose(robot.as_deref(), &cli.format).await?
+        }
+        Commands::TransportStats { robot } => {
+            commands::transport_stats(&robot, &cli.format).await?
+        }
         Commands::List => {
             eprintln!("gang list: requires a running relay connection (not yet implemented)");
             eprintln!("Use `gang demo` for a self-contained local demo.");
         }
-        Commands::Connect { robot: _ } => {
+        Commands::Connect { robot: _, prefer_transport: _ } => {
             eprintln!("gang connect: requires a running relay (not yet implemented)");
             eprintln!("Use `gang demo` for a self-contained local demo.");
         }

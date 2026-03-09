@@ -12,7 +12,7 @@ use gang_core::identity::{Keypair, PeerId};
 use gang_core::protocol::ProtocolId;
 use gang_core::transport::{
     GanglionStream, PresenceInfo, StreamHandler, TransportCapabilities, TransportEvent,
-    TransportAdapter,
+    TransportAdapter, TransportStats,
 };
 
 use crate::config::Libp2pConfig;
@@ -44,6 +44,24 @@ struct PeerConnection {
     libp2p_peer_id: Libp2pPeerId,
     via_relay: bool,
     connected_at: std::time::Instant,
+    /// Which transport was used (tcp, quic, relay).
+    transport: String,
+    /// Latest RTT from ping.
+    last_rtt: Option<std::time::Duration>,
+    /// Whether DCUtR was attempted.
+    dcutr_attempted: bool,
+    /// Whether DCUtR succeeded.
+    dcutr_succeeded: bool,
+    /// Messages sent over this connection.
+    messages_sent: u64,
+    /// Messages received.
+    messages_received: u64,
+    /// Bytes sent.
+    bytes_sent: u64,
+    /// Bytes received.
+    bytes_received: u64,
+    /// Number of reconnections.
+    reconnections: u64,
 }
 
 impl Libp2pTransportAdapter {
@@ -108,12 +126,36 @@ impl Libp2pTransportAdapter {
                         "Connection established"
                     );
 
-                    connected_peers.write().await.insert(
-                        gang_peer_id.as_str().to_string(),
+                    // Determine transport from endpoint
+                    let transport_name = if via_relay {
+                        "relay".to_string()
+                    } else if endpoint.get_remote_address().to_string().contains("quic") {
+                        "quic".to_string()
+                    } else {
+                        "tcp".to_string()
+                    };
+
+                    let peer_key = gang_peer_id.as_str().to_string();
+                    let mut peers = connected_peers.write().await;
+                    let reconnections = peers.get(&peer_key)
+                        .map(|p| p.reconnections + 1)
+                        .unwrap_or(0);
+
+                    peers.insert(
+                        peer_key,
                         PeerConnection {
                             libp2p_peer_id: peer_id,
                             via_relay,
                             connected_at: std::time::Instant::now(),
+                            transport: transport_name,
+                            last_rtt: None,
+                            dcutr_attempted: false,
+                            dcutr_succeeded: false,
+                            messages_sent: 0,
+                            messages_received: 0,
+                            bytes_sent: 0,
+                            bytes_received: 0,
+                            reconnections,
                         },
                     );
 
@@ -186,6 +228,12 @@ impl Libp2pTransportAdapter {
                 ..
             }) => {
                 debug!(peer = %peer, rtt = ?rtt, "Ping");
+                // Update RTT tracking
+                let gang_peer_id = libp2p_to_gang_peer_id(&peer);
+                let mut peers = self.connected_peers.write().await;
+                if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
+                    conn.last_rtt = Some(rtt);
+                }
             }
             GanglionBehaviourEvent::Dcutr(libp2p::dcutr::Event {
                 remote_peer_id,
@@ -194,6 +242,16 @@ impl Libp2pTransportAdapter {
             }) => {
                 let gang_peer_id = libp2p_to_gang_peer_id(&remote_peer_id);
                 info!(peer = %remote_peer_id, "Direct connection upgraded via DCUtR");
+
+                // Track DCUtR success
+                let mut peers = self.connected_peers.write().await;
+                if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
+                    conn.dcutr_attempted = true;
+                    conn.dcutr_succeeded = true;
+                    conn.via_relay = false;
+                    conn.transport = "quic".into(); // DCUtR typically upgrades to direct QUIC
+                }
+
                 let _ = self
                     .event_tx
                     .send(TransportEvent::DirectUpgrade {
@@ -318,6 +376,25 @@ impl TransportAdapter for Libp2pTransportAdapter {
         // In full implementation, this would broadcast a signed presence message
         // to connected relay peers via the control protocol.
         Ok(())
+    }
+
+    async fn transport_stats(&self, peer: &PeerId) -> Option<TransportStats> {
+        let peers = self.connected_peers.read().await;
+        let conn = peers.get(peer.as_str())?;
+        Some(TransportStats {
+            transport: conn.transport.clone(),
+            via_relay: conn.via_relay,
+            connect_time_ms: conn.connected_at.elapsed().as_millis() as u64,
+            messages_sent: conn.messages_sent,
+            messages_received: conn.messages_received,
+            bytes_sent: conn.bytes_sent,
+            bytes_received: conn.bytes_received,
+            last_rtt_ms: conn.last_rtt.map(|d| d.as_millis() as u64),
+            dcutr_attempted: conn.dcutr_attempted,
+            dcutr_succeeded: conn.dcutr_succeeded,
+            uptime_secs: conn.connected_at.elapsed().as_secs(),
+            reconnections: conn.reconnections,
+        })
     }
 
     async fn shutdown(&self) -> Result<(), TransportError> {

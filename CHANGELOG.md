@@ -2,7 +2,17 @@
 
 All notable changes to Ganglion will be documented in this file.
 
-## [Unreleased] — v0.1.0-dev
+## [Unreleased] — v0.2.0-dev
+
+### Added
+
+### Changed
+
+### Breaking
+
+---
+
+## [0.1.0] — 2026-04-23
 
 ### Added
 

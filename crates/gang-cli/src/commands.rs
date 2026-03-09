@@ -738,3 +738,132 @@ fn print_diagnostics(val: &serde_json::Value) {
         }
     }
 }
+
+/// `gang diagnose` — detect network archetype and recommend transport config.
+pub async fn diagnose(
+    robot: Option<&str>,
+    format: &crate::OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_ros::archetype;
+
+    if let Some(robot_name) = robot {
+        println!("Diagnosing network for robot: {robot_name}");
+        println!("(Remote diagnosis requires active connection — running local probes instead)");
+        println!();
+    }
+
+    println!("Running network probes...");
+    println!();
+
+    let result = archetype::detect_archetype();
+
+    match format {
+        crate::OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(&result)?;
+            println!("{json}");
+        }
+        crate::OutputFormat::Text => {
+            println!("============================================");
+            println!("  Network Archetype Detection");
+            println!("============================================");
+            println!();
+            println!("  Detected:    {} ({:.0}% confidence)",
+                     result.archetype, result.confidence * 100.0);
+            println!();
+
+            println!("Probes:");
+            for probe in &result.probes {
+                let status = if probe.success { "✓" } else { "✗" };
+                println!("  {status} {}: {}", probe.probe_name, probe.detail);
+            }
+            println!();
+
+            println!("Recommendations:");
+            for rec in &result.recommendations {
+                println!("  → {rec}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// `gang transport-stats` — show per-transport statistics for a peer.
+pub async fn transport_stats(
+    robot: &str,
+    format: &crate::OutputFormat,
+) -> anyhow::Result<()> {
+    // For now, show simulated stats since we don't have a live connection.
+    // In full implementation, this queries the transport adapter for the
+    // connected peer's stats.
+
+    println!("Transport statistics for: {robot}");
+    println!("(Requires active connection — showing example output)");
+    println!();
+
+    let example_stats = gang_core::transport::TransportStats {
+        transport: "quic".into(),
+        via_relay: false,
+        connect_time_ms: 145,
+        messages_sent: 42,
+        messages_received: 38,
+        bytes_sent: 12_480,
+        bytes_received: 156_320,
+        last_rtt_ms: Some(23),
+        dcutr_attempted: true,
+        dcutr_succeeded: true,
+        uptime_secs: 3600,
+        reconnections: 0,
+    };
+
+    match format {
+        crate::OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(&example_stats)?;
+            println!("{json}");
+        }
+        crate::OutputFormat::Text => {
+            println!("  Transport:       {}", example_stats.transport);
+            println!("  Via relay:       {}", example_stats.via_relay);
+            println!("  Connect time:    {}ms", example_stats.connect_time_ms);
+            println!("  Messages:        {} sent, {} received",
+                     example_stats.messages_sent, example_stats.messages_received);
+            println!("  Bytes:           {} sent, {} received",
+                     format_bytes(example_stats.bytes_sent),
+                     format_bytes(example_stats.bytes_received));
+            if let Some(rtt) = example_stats.last_rtt_ms {
+                println!("  Last RTT:        {rtt}ms");
+            }
+            println!("  DCUtR:           attempted={}, succeeded={}",
+                     example_stats.dcutr_attempted, example_stats.dcutr_succeeded);
+            println!("  Uptime:          {}",
+                     format_duration(example_stats.uptime_secs));
+            println!("  Reconnections:   {}", example_stats.reconnections);
+        }
+    }
+
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.1} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_duration(secs: u64) -> String {
+    if secs >= 3600 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        format!("{h}h {m}m")
+    } else if secs >= 60 {
+        let m = secs / 60;
+        let s = secs % 60;
+        format!("{m}m {s}s")
+    } else {
+        format!("{secs}s")
+    }
+}
