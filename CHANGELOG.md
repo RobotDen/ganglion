@@ -6,9 +6,19 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **Happy-eyeballs transport selection** (`gang-core`): `TransportPreference` configuration with preferred transport order, dial timeout, and stagger delay. `dial_parallel` method on `TransportAdapter` attempts multiple transports concurrently with first-handshake-wins semantics.
+- **Transport statistics** (`gang-core`, `gang-libp2p`): Per-peer `TransportStats` with transport type, RTT tracking, bytes sent/received, DCUtR upgrade status, uptime, and reconnection count. Ping events update RTT in real-time; DCUtR events update relay-to-direct transition state.
+- **Network archetype detection** (`gang-ros`): Six network probes (internet connectivity, NAT status, multicast, outbound ports, DNS behavior, CGNAT detection) with classification logic mapping to five standard archetypes. Transport recommendations per archetype.
+- **CLI commands**: `gang diagnose [robot]` for network archetype detection with recommendations. `gang transport-stats <robot>` for per-transport connection telemetry. `--prefer-transport` flag on `gang connect` for happy-eyeballs preference.
+- **8 new tests** for archetype classification and probe execution (60 total).
+
 ### Changed
 
+- `PeerConnection` in libp2p adapter tracks transport type, RTT history, DCUtR state, I/O counters, and reconnection count.
+
 ### Breaking
+
+- `TransportAdapter` trait gains `dial_parallel` and `transport_stats` methods (with default implementations — existing impls compile unchanged).
 
 ---
 

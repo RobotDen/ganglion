@@ -3,7 +3,9 @@
 **Status:** Active — tracks implementation from v0.1 through v0.4
 **Source of truth:** [DesignSpec.md](./DesignSpec.md)
 
-### Progress (v0.1)
+### Progress
+
+**v0.1** (tagged `v0.1.0`):
 
 | Phase | Status | Tests | Commit |
 |-------|--------|-------|--------|
@@ -16,7 +18,15 @@
 | 7. Test harness | Done | — | `416a4fc` |
 | 8. Documentation | Done | — | `15e2be4` |
 
-**Total: 52 tests passing across 4 crates.**
+**v0.2** (in progress):
+
+| Phase | Status | Tests | Commit |
+|-------|--------|-------|--------|
+| 9. Transport breadth | Done | — | `1a2f05f` |
+| 10. CLI + archetype detection | Done | 8 | `1a2f05f` |
+| 11. v0.2 release | Pending | — | — |
+
+**Total: 60 tests passing across 4 crates (23 core + 27 ros + 10 wasm-host).**
 
 ---
 
