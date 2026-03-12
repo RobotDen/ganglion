@@ -55,6 +55,16 @@ pub enum BrokerOperation {
     ProcessList,
     /// Collect network state.
     NetworkState,
+
+    // --- Artifacts (v0.3) ---
+    /// Publish a byte stream as a content-addressed artifact.
+    ArtifactPublish {
+        data: Vec<u8>,
+        filename: Option<String>,
+        content_type: Option<String>,
+    },
+    /// Check if an artifact exists by CID.
+    ArtifactExists { cid: String },
 }
 
 /// Response from a broker.

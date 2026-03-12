@@ -206,6 +206,9 @@ impl Policy {
             CapabilityGroup::DiagnosticsCollect { .. } => {
                 // No patterns to check beyond group presence.
             }
+            CapabilityGroup::ArtifactsPublish { .. } => {
+                // No patterns to check beyond group presence.
+            }
         }
 
         Ok(())

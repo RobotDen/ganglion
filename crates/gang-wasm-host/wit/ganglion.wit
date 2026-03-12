@@ -1,10 +1,10 @@
-// Ganglion WIT capability interface definitions — v0.1
+// Ganglion WIT capability interface definitions — v0.3
 //
 // All WASM components interact with the host through these interfaces.
 // A component declares which interfaces it needs in its signed manifest.
 // The host only links declared interfaces; undeclared imports trap.
 
-package ganglion:capability@0.1.0;
+package ganglion:capability@0.3.0;
 
 /// ROS 2 interface — topic subscribe, service call, parameter access.
 /// Pattern-gated: each operation is checked against the manifest's declared patterns.
@@ -87,6 +87,17 @@ interface diagnostics-collect {
     network-state: func() -> result<list<diagnostic-entry>, string>;
 }
 
+/// Content-addressed artifact publishing — v0.3.
+/// Capabilities can publish byte streams as content-addressed artifacts.
+interface artifacts-publish {
+    /// Publish a byte stream as a content-addressed artifact.
+    /// Returns the CID (content identifier) of the stored artifact.
+    publish: func(data: list<u8>, filename: option<string>, content-type: option<string>) -> result<string, string>;
+
+    /// Check if an artifact exists locally by CID.
+    exists: func(cid: string) -> bool;
+}
+
 /// The world that Ganglion capabilities target.
 /// A component imports whichever interfaces it needs.
 world ganglion-capability {
@@ -94,6 +105,7 @@ world ganglion-capability {
     import logs-stream;
     import fs-bounded;
     import diagnostics-collect;
+    import artifacts-publish;
 
     /// The capability's entry point. Returns serialized result data.
     export run: func(args: list<string>) -> result<list<u8>, string>;

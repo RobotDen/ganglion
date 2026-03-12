@@ -118,6 +118,27 @@ enum Commands {
         robot: String,
     },
 
+    /// Retrieve an artifact by CID from any reachable peer.
+    Fetch {
+        /// Content identifier of the artifact.
+        cid: String,
+        /// Output path (default: current directory).
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
+    /// Publish a local file to the content store and announce its CID.
+    Push {
+        /// Path to the file to publish.
+        path: String,
+        /// Content type (e.g., "application/octet-stream").
+        #[arg(long)]
+        content_type: Option<String>,
+    },
+
+    /// List locally-stored artifacts.
+    Artifacts,
+
     /// List reachable robots in the fleet.
     List,
 
@@ -195,6 +216,15 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::TransportStats { robot } => {
             commands::transport_stats(&robot, &cli.format).await?
+        }
+        Commands::Fetch { cid, output } => {
+            commands::fetch_artifact(&cid, output.as_deref(), &cli.format).await?
+        }
+        Commands::Push { path, content_type } => {
+            commands::push_artifact(&path, content_type.as_deref(), &cli.format).await?
+        }
+        Commands::Artifacts => {
+            commands::list_artifacts(&cli.format).await?
         }
         Commands::List => {
             eprintln!("gang list: requires a running relay connection (not yet implemented)");

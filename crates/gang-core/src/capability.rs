@@ -34,6 +34,12 @@ pub enum CapabilityGroup {
     DiagnosticsCollect {
         version: String,
     },
+
+    /// Content-addressed artifact publishing (v0.3).
+    #[serde(rename = "ganglion:artifacts/publish")]
+    ArtifactsPublish {
+        version: String,
+    },
 }
 
 impl CapabilityGroup {
@@ -43,6 +49,7 @@ impl CapabilityGroup {
             Self::LogStream { .. } => "ganglion:logs/stream",
             Self::FsBounded { .. } => "ganglion:fs/bounded",
             Self::DiagnosticsCollect { .. } => "ganglion:diagnostics/collect",
+            Self::ArtifactsPublish { .. } => "ganglion:artifacts/publish",
         }
     }
 
@@ -51,7 +58,8 @@ impl CapabilityGroup {
             Self::RosInterface { version, .. }
             | Self::LogStream { version, .. }
             | Self::FsBounded { version, .. }
-            | Self::DiagnosticsCollect { version, .. } => version,
+            | Self::DiagnosticsCollect { version, .. }
+            | Self::ArtifactsPublish { version, .. } => version,
         }
     }
 

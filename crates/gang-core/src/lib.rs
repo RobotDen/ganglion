@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod audit;
 pub mod broker;
 pub mod capability;

@@ -26,3 +26,4 @@ blake3 = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 ciborium = { workspace = true }
+dirs = "6"

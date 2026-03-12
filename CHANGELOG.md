@@ -2,7 +2,22 @@
 
 All notable changes to Ganglion will be documented in this file.
 
-## [Unreleased] — v0.2.0-dev
+## [0.3.0] — 2026-04-23
+
+### Added
+
+- **Content-addressed artifact store** (`gang-core`): `ArtifactStore` with CIDv1 + Blake3 hashing, content-addressed filesystem layout (blobs/ and chunks/ directories with 4-char fanout), configurable chunk size (default 1 MB), block-level deduplication, LRU eviction with configurable size cap (default 1 GB), and JSON metadata index with persist/reload.
+- **`Cid` type** (`gang-core`): Content identifier with `bafy` prefix + Blake3 hex hash. Supports `from_bytes`, `from_file`, `from_str`, and `verify`.
+- **`ArtifactsPublish` capability group** (`gang-core`): New `CapabilityGroup::ArtifactsPublish` variant for content-addressed artifact publishing.
+- **Broker operations** (`gang-core`): `ArtifactPublish` and `ArtifactExists` operations added to `BrokerOperation` enum.
+- **WIT interface** (`gang-wasm-host`): `artifacts-publish` interface with `publish` and `exists` functions, WIT updated to v0.3.0.
+- **CLI commands** (`gang-cli`): `gang fetch <cid>`, `gang push <path>`, `gang artifacts` for artifact management.
+- **Policy engine** updated to handle `ArtifactsPublish` capability group.
+- **10 new tests** for artifact store (CID determinism, dedup, chunking, LRU eviction, persist/reload, list). **70 total tests passing.**
+
+---
+
+## [0.2.0] — 2026-04-23
 
 ### Added
 

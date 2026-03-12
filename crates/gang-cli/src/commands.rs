@@ -854,6 +854,144 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// `gang fetch <cid>` — retrieve an artifact by CID.
+pub async fn fetch_artifact(
+    cid_str: &str,
+    output: Option<&str>,
+    _format: &crate::OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_core::artifacts::{ArtifactStore, ArtifactStoreConfig, Cid};
+
+    let store_dir = artifact_store_dir();
+    let mut store = ArtifactStore::open(ArtifactStoreConfig {
+        store_dir,
+        ..Default::default()
+    })?;
+
+    let cid = Cid::from_str(cid_str);
+    if !store.contains(&cid) {
+        anyhow::bail!(
+            "Artifact {cid_str} not found in local store.\n\
+             Remote fetch from peers is not yet implemented."
+        );
+    }
+
+    let data = store.retrieve(&cid)?;
+    let meta = store.meta(&cid);
+
+    match output {
+        Some(path) => {
+            std::fs::write(path, &data)?;
+            println!("Wrote {} bytes to {path}", data.len());
+        }
+        None => {
+            let filename = meta
+                .and_then(|m| m.filename.as_deref())
+                .unwrap_or("artifact.bin");
+            std::fs::write(filename, &data)?;
+            println!("Wrote {} bytes to {filename}", data.len());
+        }
+    }
+
+    Ok(())
+}
+
+/// `gang push <path>` — publish a local file to the content store.
+pub async fn push_artifact(
+    path: &str,
+    content_type: Option<&str>,
+    format: &crate::OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_core::artifacts::{ArtifactStore, ArtifactStoreConfig};
+
+    let store_dir = artifact_store_dir();
+    let mut store = ArtifactStore::open(ArtifactStoreConfig {
+        store_dir,
+        ..Default::default()
+    })?;
+
+    let data = std::fs::read(path)?;
+    let filename = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str());
+
+    let cid = store.store(&data, filename, None, content_type)?;
+
+    match format {
+        crate::OutputFormat::Json => {
+            let info = serde_json::json!({
+                "cid": cid.as_str(),
+                "size": data.len(),
+                "filename": filename,
+            });
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        }
+        crate::OutputFormat::Text => {
+            println!("Published artifact:");
+            println!("  CID:      {cid}");
+            println!("  Size:     {}", format_bytes(data.len() as u64));
+            if let Some(name) = filename {
+                println!("  Filename: {name}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// `gang artifacts` — list locally-stored artifacts.
+pub async fn list_artifacts(format: &crate::OutputFormat) -> anyhow::Result<()> {
+    use gang_core::artifacts::{ArtifactStore, ArtifactStoreConfig};
+
+    let store_dir = artifact_store_dir();
+    let store = ArtifactStore::open(ArtifactStoreConfig {
+        store_dir,
+        ..Default::default()
+    })?;
+
+    let artifacts = store.list();
+
+    match format {
+        crate::OutputFormat::Json => {
+            let json = serde_json::to_string_pretty(&artifacts)?;
+            println!("{json}");
+        }
+        crate::OutputFormat::Text => {
+            if artifacts.is_empty() {
+                println!("No artifacts stored locally.");
+            } else {
+                println!("Stored artifacts ({}, {}):",
+                         artifacts.len(),
+                         format_bytes(store.total_bytes()));
+                println!();
+                for meta in &artifacts {
+                    let name = meta.filename.as_deref().unwrap_or("(unnamed)");
+                    let chunks = if meta.chunk_count > 1 {
+                        format!(" ({} chunks)", meta.chunk_count)
+                    } else {
+                        String::new()
+                    };
+                    println!("  {} — {}{}", meta.cid, format_bytes(meta.size), chunks);
+                    println!("    Filename: {name}");
+                    if let Some(origin) = &meta.origin_peer {
+                        println!("    Origin:   {origin}");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Default artifact store directory.
+fn artifact_store_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("gang")
+        .join("artifacts")
+}
+
 fn format_duration(secs: u64) -> String {
     if secs >= 3600 {
         let h = secs / 3600;

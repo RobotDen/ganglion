@@ -18,15 +18,23 @@
 | 7. Test harness | Done | — | `416a4fc` |
 | 8. Documentation | Done | — | `15e2be4` |
 
-**v0.2** (in progress):
+**v0.2** (tagged `v0.2.0`):
 
 | Phase | Status | Tests | Commit |
 |-------|--------|-------|--------|
 | 9. Transport breadth | Done | — | `1a2f05f` |
 | 10. CLI + archetype detection | Done | 8 | `1a2f05f` |
-| 11. v0.2 release | Pending | — | — |
+| 11. v0.2 release | Done | — | `9770710` |
 
-**Total: 60 tests passing across 4 crates (23 core + 27 ros + 10 wasm-host).**
+**v0.3** (in progress):
+
+| Phase | Status | Tests | Commit |
+|-------|--------|-------|--------|
+| 12. Content-addressed artifact store | Done | 10 | — |
+| 13. Rosbag slicing capability | Pending | — | — |
+| 14. v0.3 CLI + release | Pending | — | — |
+
+**Total: 70 tests passing across 4 crates (33 core + 27 ros + 10 wasm-host).**
 
 ---
 
