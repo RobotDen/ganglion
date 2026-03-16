@@ -1,10 +1,10 @@
-// Ganglion WIT capability interface definitions — v0.3
+// Ganglion WIT capability interface definitions — v0.4
 //
 // All WASM components interact with the host through these interfaces.
 // A component declares which interfaces it needs in its signed manifest.
 // The host only links declared interfaces; undeclared imports trap.
 
-package ganglion:capability@0.3.0;
+package ganglion:capability@0.4.0;
 
 /// ROS 2 interface — topic subscribe, service call, parameter access.
 /// Pattern-gated: each operation is checked against the manifest's declared patterns.
@@ -98,6 +98,95 @@ interface artifacts-publish {
     exists: func(cid: string) -> bool;
 }
 
+/// Bounded subprocess invocation — v0.4.
+/// Components can spawn allowlisted subprocesses with captured stdio and resource limits.
+interface process-spawn {
+    /// Result of a spawned process.
+    record process-result {
+        exit-code: s32,
+        stdout: list<u8>,
+        stderr: list<u8>,
+    }
+
+    /// Spawn a subprocess. Command must be on the host allowlist.
+    /// Returns stdout/stderr and exit code.
+    spawn: func(command: string, args: list<string>, timeout-secs: u64) -> result<process-result, string>;
+
+    /// Spawn with environment variables and working directory.
+    spawn-with-env: func(
+        command: string,
+        args: list<string>,
+        env: list<tuple<string, string>>,
+        cwd: option<string>,
+        timeout-secs: u64,
+    ) -> result<process-result, string>;
+}
+
+/// Structured network probing primitives — v0.4.
+/// Used by archetype detection and network diagnostics capabilities.
+interface network-probe {
+    /// Ping result for a single host.
+    record ping-result {
+        host: string,
+        reachable: bool,
+        rtt-ms: f64,
+        packets-sent: u32,
+        packets-received: u32,
+    }
+
+    /// DNS lookup result.
+    record dns-result {
+        hostname: string,
+        record-type: string,
+        answers: list<string>,
+    }
+
+    /// Port check result.
+    record port-result {
+        host: string,
+        port: u16,
+        open: bool,
+        latency-ms: f64,
+    }
+
+    /// Traceroute hop.
+    record traceroute-hop {
+        hop: u32,
+        address: string,
+        rtt-ms: f64,
+    }
+
+    /// Ping a host.
+    ping: func(host: string, count: u32) -> result<ping-result, string>;
+
+    /// DNS lookup.
+    dns-lookup: func(hostname: string, record-type: string) -> result<dns-result, string>;
+
+    /// Check if a TCP port is open.
+    port-check: func(host: string, port: u16, timeout-secs: u64) -> result<port-result, string>;
+
+    /// Traceroute to a host.
+    traceroute: func(host: string, max-hops: u32) -> result<list<traceroute-hop>, string>;
+}
+
+/// Structured metric emission — v0.4.
+/// Capabilities emit metrics back to the operator for monitoring and alerting.
+interface metrics-emit {
+    /// A single metric data point.
+    record metric-point {
+        name: string,
+        value: f64,
+        unit: option<string>,
+        tags: list<tuple<string, string>>,
+    }
+
+    /// Emit a single metric.
+    emit: func(metric: metric-point) -> result<_, string>;
+
+    /// Emit a batch of metrics.
+    emit-batch: func(metrics: list<metric-point>) -> result<_, string>;
+}
+
 /// The world that Ganglion capabilities target.
 /// A component imports whichever interfaces it needs.
 world ganglion-capability {
@@ -106,6 +195,9 @@ world ganglion-capability {
     import fs-bounded;
     import diagnostics-collect;
     import artifacts-publish;
+    import process-spawn;
+    import network-probe;
+    import metrics-emit;
 
     /// The capability's entry point. Returns serialized result data.
     export run: func(args: list<string>) -> result<list<u8>, string>;

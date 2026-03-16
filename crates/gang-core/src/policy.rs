@@ -92,6 +92,26 @@ impl Policy {
                     allowed_patterns: vec!["**".into()],
                     max_access: None,
                 },
+                CapabilityRule {
+                    group: "ganglion:artifacts/publish".into(),
+                    allowed_patterns: vec!["**".into()],
+                    max_access: None,
+                },
+                CapabilityRule {
+                    group: "ganglion:process/spawn".into(),
+                    allowed_patterns: vec!["**".into()],
+                    max_access: None,
+                },
+                CapabilityRule {
+                    group: "ganglion:network/probe".into(),
+                    allowed_patterns: vec!["**".into()],
+                    max_access: None,
+                },
+                CapabilityRule {
+                    group: "ganglion:metrics/emit".into(),
+                    allowed_patterns: vec!["**".into()],
+                    max_access: None,
+                },
             ],
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
@@ -207,6 +227,22 @@ impl Policy {
                 // No patterns to check beyond group presence.
             }
             CapabilityGroup::ArtifactsPublish { .. } => {
+                // No patterns to check beyond group presence.
+            }
+            CapabilityGroup::ProcessSpawn { allowed_commands, .. } => {
+                for cmd in allowed_commands {
+                    if !pattern_matches_any(cmd, &rule.allowed_patterns) {
+                        return Err(PolicyError::PatternExceedsPolicy {
+                            capability: group_name.into(),
+                            pattern: cmd.clone(),
+                        });
+                    }
+                }
+            }
+            CapabilityGroup::NetworkProbe { .. } => {
+                // No patterns to check beyond group presence.
+            }
+            CapabilityGroup::MetricsEmit { .. } => {
                 // No patterns to check beyond group presence.
             }
         }

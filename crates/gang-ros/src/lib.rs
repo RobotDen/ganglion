@@ -3,4 +3,7 @@ pub mod archetype;
 pub mod diagnostics;
 pub mod filesystem;
 pub mod logs;
+pub mod metrics;
+pub mod network;
+pub mod process;
 pub mod ros;

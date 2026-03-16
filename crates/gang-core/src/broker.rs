@@ -65,6 +65,53 @@ pub enum BrokerOperation {
     },
     /// Check if an artifact exists by CID.
     ArtifactExists { cid: String },
+
+    // --- Process (v0.4) ---
+    /// Spawn a bounded subprocess.
+    ProcessSpawn {
+        command: String,
+        args: Vec<String>,
+        /// Working directory (within allowed paths).
+        cwd: Option<String>,
+        /// Environment variables to set.
+        env: Vec<(String, String)>,
+        /// Wall-clock timeout in seconds.
+        timeout_secs: u64,
+    },
+
+    // --- Network Probe (v0.4) ---
+    /// Ping a host and return latency.
+    NetPing { host: String, count: u32 },
+    /// DNS lookup.
+    NetDnsLookup { hostname: String, record_type: String },
+    /// TCP port check.
+    NetPortCheck { host: String, port: u16, timeout_secs: u64 },
+    /// Traceroute to a host.
+    NetTraceroute { host: String, max_hops: u32 },
+
+    // --- Metrics (v0.4) ---
+    /// Emit a metric value from a capability.
+    MetricEmit {
+        name: String,
+        value: f64,
+        unit: Option<String>,
+        tags: Vec<(String, String)>,
+    },
+    /// Emit a batch of metrics.
+    MetricEmitBatch {
+        metrics: Vec<MetricPoint>,
+    },
+}
+
+/// A single metric data point for batch emission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricPoint {
+    pub name: String,
+    pub value: f64,
+    pub unit: Option<String>,
+    pub tags: Vec<(String, String)>,
+    /// Unix timestamp in milliseconds. 0 = use current time.
+    pub timestamp_ms: u64,
 }
 
 /// Response from a broker.

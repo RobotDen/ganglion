@@ -40,6 +40,26 @@ pub enum CapabilityGroup {
     ArtifactsPublish {
         version: String,
     },
+
+    /// Bounded subprocess invocation (v0.4).
+    #[serde(rename = "ganglion:process/spawn")]
+    ProcessSpawn {
+        version: String,
+        /// Allowlisted command patterns.
+        allowed_commands: Vec<String>,
+    },
+
+    /// Structured network probing primitives (v0.4).
+    #[serde(rename = "ganglion:network/probe")]
+    NetworkProbe {
+        version: String,
+    },
+
+    /// Structured metric emission from capabilities (v0.4).
+    #[serde(rename = "ganglion:metrics/emit")]
+    MetricsEmit {
+        version: String,
+    },
 }
 
 impl CapabilityGroup {
@@ -50,6 +70,9 @@ impl CapabilityGroup {
             Self::FsBounded { .. } => "ganglion:fs/bounded",
             Self::DiagnosticsCollect { .. } => "ganglion:diagnostics/collect",
             Self::ArtifactsPublish { .. } => "ganglion:artifacts/publish",
+            Self::ProcessSpawn { .. } => "ganglion:process/spawn",
+            Self::NetworkProbe { .. } => "ganglion:network/probe",
+            Self::MetricsEmit { .. } => "ganglion:metrics/emit",
         }
     }
 
@@ -59,7 +82,10 @@ impl CapabilityGroup {
             | Self::LogStream { version, .. }
             | Self::FsBounded { version, .. }
             | Self::DiagnosticsCollect { version, .. }
-            | Self::ArtifactsPublish { version, .. } => version,
+            | Self::ArtifactsPublish { version, .. }
+            | Self::ProcessSpawn { version, .. }
+            | Self::NetworkProbe { version, .. }
+            | Self::MetricsEmit { version, .. } => version,
         }
     }
 
