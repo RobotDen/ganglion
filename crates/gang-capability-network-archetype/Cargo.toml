@@ -1,0 +1,15 @@
+[package]
+name = "gang-capability-network-archetype"
+description = "Network archetype detection v2 — classifies robot network environment with recommendations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

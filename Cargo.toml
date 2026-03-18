@@ -7,6 +7,9 @@ members = [
     "crates/gang-ros",
     "crates/gang-cli",
     "crates/gang-capability-diagnostics",
+    "crates/gang-capability-param-inspect",
+    "crates/gang-capability-diagnostic-bundle",
+    "crates/gang-capability-network-archetype",
 ]
 
 [workspace.package]

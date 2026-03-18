@@ -1,0 +1,16 @@
+[package]
+name = "gang-capability-diagnostic-bundle"
+description = "v2 diagnostic bundle — comprehensive system and ROS diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

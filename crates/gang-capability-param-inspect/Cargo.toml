@@ -1,0 +1,15 @@
+[package]
+name = "gang-capability-param-inspect"
+description = "Parameter server snapshot capability — inspects ROS 2 parameters with optional diff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
