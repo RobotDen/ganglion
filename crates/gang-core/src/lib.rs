@@ -8,4 +8,5 @@ pub mod manifest;
 pub mod message;
 pub mod policy;
 pub mod protocol;
+pub mod registry;
 pub mod transport;

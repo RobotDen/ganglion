@@ -992,6 +992,177 @@ fn artifact_store_dir() -> PathBuf {
         .join("artifacts")
 }
 
+/// Default registry directory.
+fn registry_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("gang")
+        .join("registry")
+}
+
+/// `gang registry search <query>`
+pub async fn registry_search(query: &str, _format: &OutputFormat) -> anyhow::Result<()> {
+    let reg = gang_core::registry::Registry::open(&registry_dir())?;
+    let results = reg.search(query);
+
+    if results.is_empty() {
+        println!("No capabilities found matching \"{query}\".");
+        return Ok(());
+    }
+
+    println!("Found {} result(s) for \"{}\":\n", results.len(), query);
+    for r in &results {
+        println!("  {} v{}", r.name, r.latest_version);
+        println!("    {}", r.description);
+        println!("    Language: {}  Author: {}...{}", r.language, &r.author[..8.min(r.author.len())], &r.author[r.author.len().saturating_sub(4)..]);
+        if !r.tags.is_empty() {
+            println!("    Tags: {}", r.tags.join(", "));
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// `gang registry install <name>`
+pub async fn registry_install(name: &str, version: Option<&str>, _format: &OutputFormat) -> anyhow::Result<()> {
+    let reg = gang_core::registry::Registry::open(&registry_dir())?;
+
+    let entry = if let Some(ver) = version {
+        reg.get(name).and_then(|versions| versions.iter().find(|e| e.version == ver))
+    } else {
+        reg.get_latest(name)
+    };
+
+    match entry {
+        Some(entry) => {
+            println!("Installing {} v{} ...", entry.name, entry.version);
+            println!("  Component CID: {}", entry.component_cid);
+            println!("  Manifest CID:  {}", entry.manifest_cid);
+            println!("  Language:       {}", entry.language);
+            // Actual fetch would use the artifact store to retrieve by CID
+            println!("\nNote: network fetch not yet implemented.");
+            println!("Use `gang fetch {}` to retrieve the component.", entry.component_cid);
+        }
+        None => {
+            let msg = if let Some(ver) = version {
+                format!("{}@{} not found in registry.", name, ver)
+            } else {
+                format!("{} not found in registry.", name)
+            };
+            eprintln!("{msg}");
+            eprintln!("Use `gang registry search` to discover available capabilities.");
+        }
+    }
+    Ok(())
+}
+
+/// `gang registry publish <wasm_path>`
+pub async fn registry_publish(
+    wasm_path: &str,
+    description: Option<&str>,
+    tags: Option<&[String]>,
+    _format: &OutputFormat,
+) -> anyhow::Result<()> {
+    let path = Path::new(wasm_path);
+    if !path.exists() {
+        anyhow::bail!("file not found: {wasm_path}");
+    }
+
+    // Read the component and compute CID
+    let data = std::fs::read(path)?;
+    let component_cid = gang_core::artifacts::Cid::from_bytes(&data);
+
+    // Derive name from filename
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Load identity for author
+    let key_path = gang_core::identity::default_key_path();
+    let author = if key_path.exists() {
+        let kp = gang_core::identity::Keypair::load(&key_path)?;
+        kp.peer_id().as_str().to_string()
+    } else {
+        "unknown".to_string()
+    };
+
+    let entry = gang_core::registry::RegistryEntry {
+        name: name.clone(),
+        version: "0.1.0".into(),
+        description: description.unwrap_or("A Ganglion capability").into(),
+        author_peer_id: author,
+        language: gang_core::registry::CapabilityLanguage::Rust,
+        component_cid: component_cid.clone(),
+        manifest_cid: gang_core::artifacts::Cid::from_bytes(b"manifest-placeholder"),
+        declared_capabilities: vec![],
+        published_at: chrono::Utc::now().to_rfc3339(),
+        tags: tags.map(|t| t.to_vec()).unwrap_or_default(),
+        min_ganglion_version: Some("0.4.0".into()),
+    };
+
+    let mut reg = gang_core::registry::Registry::open(&registry_dir())?;
+    reg.publish(entry)?;
+
+    println!("Published {} to local registry.", name);
+    println!("  Component CID: {}", component_cid);
+    println!("  Registry path: {}", registry_dir().display());
+    Ok(())
+}
+
+/// `gang registry list`
+pub async fn registry_list(_format: &OutputFormat) -> anyhow::Result<()> {
+    let reg = gang_core::registry::Registry::open(&registry_dir())?;
+    let list = reg.list();
+
+    if list.is_empty() {
+        println!("No capabilities in local registry.");
+        println!("Use `gang registry publish` to add a capability.");
+        return Ok(());
+    }
+
+    println!("{} capability(ies) in registry:\n", list.len());
+    for r in &list {
+        println!("  {} v{} [{}]", r.name, r.latest_version, r.language);
+        println!("    {}", r.description);
+    }
+    Ok(())
+}
+
+/// `gang registry info <name>`
+pub async fn registry_info(name: &str, _format: &OutputFormat) -> anyhow::Result<()> {
+    let reg = gang_core::registry::Registry::open(&registry_dir())?;
+
+    match reg.get(name) {
+        Some(versions) => {
+            println!("Capability: {name}\n");
+            for entry in versions {
+                println!("  v{}", entry.version);
+                println!("    Description:   {}", entry.description);
+                println!("    Author:        {}", entry.author_peer_id);
+                println!("    Language:       {}", entry.language);
+                println!("    Published:     {}", entry.published_at);
+                println!("    Component CID: {}", entry.component_cid);
+                if !entry.declared_capabilities.is_empty() {
+                    println!("    Capabilities:  {}", entry.declared_capabilities.join(", "));
+                }
+                if !entry.tags.is_empty() {
+                    println!("    Tags:          {}", entry.tags.join(", "));
+                }
+                if let Some(min_ver) = &entry.min_ganglion_version {
+                    println!("    Min Ganglion:  {min_ver}");
+                }
+                println!();
+            }
+        }
+        None => {
+            eprintln!("{name} not found in registry.");
+        }
+    }
+    Ok(())
+}
+
 fn format_duration(secs: u64) -> String {
     if secs >= 3600 {
         let h = secs / 3600;

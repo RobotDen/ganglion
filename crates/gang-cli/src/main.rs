@@ -139,6 +139,12 @@ enum Commands {
     /// List locally-stored artifacts.
     Artifacts,
 
+    /// Manage the capability registry.
+    Registry {
+        #[command(subcommand)]
+        action: RegistryAction,
+    },
+
     /// List reachable robots in the fleet.
     List,
 
@@ -149,6 +155,41 @@ enum Commands {
         /// Preferred transport order for happy-eyeballs selection.
         #[arg(long, value_delimiter = ',')]
         prefer_transport: Option<Vec<String>>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryAction {
+    /// Search for capabilities in the registry.
+    Search {
+        /// Search query (matches name, description, tags).
+        query: String,
+    },
+    /// Install a capability from the registry.
+    Install {
+        /// Capability name.
+        name: String,
+        /// Specific version (default: latest).
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Publish a signed capability to the registry.
+    Publish {
+        /// Path to the signed .wasm component.
+        wasm_path: String,
+        /// Short description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Tags (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        tags: Option<Vec<String>>,
+    },
+    /// List all capabilities in the local registry.
+    List,
+    /// Show details for a specific capability.
+    Info {
+        /// Capability name.
+        name: String,
     },
 }
 
@@ -226,6 +267,33 @@ async fn main() -> anyhow::Result<()> {
         Commands::Artifacts => {
             commands::list_artifacts(&cli.format).await?
         }
+        Commands::Registry { action } => match action {
+            RegistryAction::Search { query } => {
+                commands::registry_search(&query, &cli.format).await?
+            }
+            RegistryAction::Install { name, version } => {
+                commands::registry_install(&name, version.as_deref(), &cli.format).await?
+            }
+            RegistryAction::Publish {
+                wasm_path,
+                description,
+                tags,
+            } => {
+                commands::registry_publish(
+                    &wasm_path,
+                    description.as_deref(),
+                    tags.as_deref(),
+                    &cli.format,
+                )
+                .await?
+            }
+            RegistryAction::List => {
+                commands::registry_list(&cli.format).await?
+            }
+            RegistryAction::Info { name } => {
+                commands::registry_info(&name, &cli.format).await?
+            }
+        },
         Commands::List => {
             eprintln!("gang list: requires a running relay connection (not yet implemented)");
             eprintln!("Use `gang demo` for a self-contained local demo.");
