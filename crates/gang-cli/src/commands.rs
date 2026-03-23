@@ -992,6 +992,305 @@ fn artifact_store_dir() -> PathBuf {
         .join("artifacts")
 }
 
+/// `gang capability scaffold <name> --language <lang>`
+pub async fn capability_scaffold(
+    name: &str,
+    language: &str,
+    output_dir: Option<&str>,
+) -> anyhow::Result<()> {
+    let base = output_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let project_dir = base.join(name);
+
+    if project_dir.exists() {
+        anyhow::bail!("directory {} already exists", project_dir.display());
+    }
+
+    std::fs::create_dir_all(&project_dir)?;
+
+    match language {
+        "rust" => scaffold_rust(name, &project_dir)?,
+        "cpp" | "c++" => scaffold_cpp(name, &project_dir)?,
+        "python" | "py" => scaffold_python(name, &project_dir)?,
+        "go" | "golang" => scaffold_go(name, &project_dir)?,
+        _ => anyhow::bail!(
+            "unsupported language: {language}. Supported: rust, cpp, python, go"
+        ),
+    }
+
+    // Copy WIT interface to project
+    let wit_dir = project_dir.join("wit");
+    std::fs::create_dir_all(&wit_dir)?;
+    std::fs::write(
+        wit_dir.join("README.md"),
+        "Copy ganglion.wit from the Ganglion repository into this directory.\n\
+         See: https://github.com/tafy-labs/ganglion/tree/main/crates/gang-wasm-host/wit\n",
+    )?;
+
+    println!("Scaffolded {} capability at {}", language, project_dir.display());
+    println!("\nNext steps:");
+    println!("  1. Copy ganglion.wit into {}/wit/", name);
+    println!("  2. Implement your capability logic");
+    println!("  3. Build: see docs/CAPABILITY_AUTHOR_GUIDE.md");
+    println!("  4. Sign: gang sign {name}.component.wasm --name {name} --version 0.1.0");
+    Ok(())
+}
+
+fn scaffold_rust(name: &str, dir: &Path) -> anyhow::Result<()> {
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+
+    let crate_name = name.replace('-', "_");
+
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
+"#
+        ),
+    )?;
+
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        format!(
+            r#"//! {name} — a Ganglion capability.
+//!
+//! Build: cargo build --target wasm32-wasip2 --release
+//! Component: wasm-tools component new target/wasm32-wasip2/release/{crate_name}.wasm -o {name}.component.wasm
+//! Sign: gang sign {name}.component.wasm --name {name} --version 0.1.0
+
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct Output {{
+    status: String,
+    message: String,
+}}
+
+/// Entry point called by the Ganglion runtime.
+pub fn run(args: Vec<String>) -> Result<Vec<u8>, String> {{
+    let output = Output {{
+        status: "ok".into(),
+        message: format!("{name} invoked with {{}} arg(s)", args.len()),
+    }};
+    serde_json::to_vec(&output).map_err(|e| e.to_string())
+}}
+
+#[cfg(test)]
+mod tests {{
+    use super::*;
+
+    #[test]
+    fn run_returns_ok() {{
+        let result = run(vec!["test".into()]).unwrap();
+        let output: Output = serde_json::from_slice(&result).unwrap();
+        assert_eq!(output.status, "ok");
+    }}
+}}
+"#
+        ),
+    )?;
+
+    std::fs::write(
+        dir.join("Makefile"),
+        format!(
+            r#".PHONY: build component sign clean
+
+build:
+	cargo build --target wasm32-wasip2 --release
+
+component: build
+	wasm-tools component new target/wasm32-wasip2/release/{crate_name}.wasm \
+		-o {name}.component.wasm
+
+sign: component
+	gang sign {name}.component.wasm --name {name} --version 0.1.0
+
+test:
+	cargo test
+
+clean:
+	cargo clean
+	rm -f {name}.component.wasm {name}.manifest.cbor
+"#
+        ),
+    )?;
+
+    Ok(())
+}
+
+fn scaffold_cpp(name: &str, dir: &Path) -> anyhow::Result<()> {
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+
+    std::fs::write(
+        src_dir.join("main.cpp"),
+        format!(
+            r#"// {name} — a Ganglion capability (C++)
+//
+// Build with wasi-sdk:
+//   make component
+
+#include <cstdio>
+#include <cstring>
+
+// Entry point — called by the Ganglion runtime
+extern "C" int run(int argc, const char* argv[]) {{
+    printf("{{\\"status\\":\\"ok\\",\\"message\\":\\"{name} invoked with %d arg(s)\\"}}\\n", argc);
+    return 0;
+}}
+"#
+        ),
+    )?;
+
+    std::fs::write(
+        dir.join("Makefile"),
+        format!(
+            r#"WASI_SDK ?= $(WASI_SDK_PATH)
+CC = $(WASI_SDK)/bin/clang++
+
+.PHONY: build component sign clean
+
+build: src/main.cpp
+	$(CC) -o {name}.wasm src/main.cpp --target=wasm32-wasip2 -O2
+
+component: build
+	wasm-tools component new {name}.wasm -o {name}.component.wasm
+
+sign: component
+	gang sign {name}.component.wasm --name {name} --version 0.1.0
+
+clean:
+	rm -f {name}.wasm {name}.component.wasm {name}.manifest.cbor
+"#
+        ),
+    )?;
+
+    Ok(())
+}
+
+fn scaffold_python(name: &str, dir: &Path) -> anyhow::Result<()> {
+    std::fs::write(
+        dir.join("app.py"),
+        format!(
+            r#"\"\"\"
+{name} — a Ganglion capability (Python).
+
+Build: componentize-py -d wit/ganglion.wit -w ganglion-capability componentize app -o {name}.component.wasm
+Sign:  gang sign {name}.component.wasm --name {name} --version 0.1.0
+\"\"\"
+
+import json
+
+
+def run(args: list[str]) -> bytes:
+    \"\"\"Entry point called by the Ganglion runtime.\"\"\"
+    result = {{
+        "status": "ok",
+        "message": f"{name} invoked with {{len(args)}} arg(s)",
+        "args": args,
+    }}
+    return json.dumps(result).encode()
+"#
+        ),
+    )?;
+
+    std::fs::write(
+        dir.join("Makefile"),
+        format!(
+            r#".PHONY: component sign clean
+
+component:
+	componentize-py -d wit/ganglion.wit -w ganglion-capability componentize app -o {name}.component.wasm
+
+sign: component
+	gang sign {name}.component.wasm --name {name} --version 0.1.0
+
+clean:
+	rm -f {name}.component.wasm {name}.manifest.cbor
+"#
+        ),
+    )?;
+
+    Ok(())
+}
+
+fn scaffold_go(name: &str, dir: &Path) -> anyhow::Result<()> {
+    let mod_name = name.replace('-', "");
+
+    std::fs::write(
+        dir.join("main.go"),
+        format!(
+            r#"// {name} — a Ganglion capability (Go/TinyGo).
+//
+// Build: tinygo build -o {name}.wasm -target=wasip2 .
+// Component: wasm-tools component new {name}.wasm -o {name}.component.wasm
+// Sign: gang sign {name}.component.wasm --name {name} --version 0.1.0
+
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+type Result struct {{
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}}
+
+func main() {{
+	result := Result{{
+		Status:  "ok",
+		Message: fmt.Sprintf("{name} invoked with %d arg(s)", len(os.Args)-1),
+	}}
+	data, _ := json.Marshal(result)
+	fmt.Println(string(data))
+}}
+"#
+        ),
+    )?;
+
+    std::fs::write(
+        dir.join("go.mod"),
+        format!("module github.com/tafy-labs/{mod_name}\n\ngo 1.22\n"),
+    )?;
+
+    std::fs::write(
+        dir.join("Makefile"),
+        format!(
+            r#".PHONY: build component sign clean
+
+build:
+	tinygo build -o {name}.wasm -target=wasip2 .
+
+component: build
+	wasm-tools component new {name}.wasm -o {name}.component.wasm
+
+sign: component
+	gang sign {name}.component.wasm --name {name} --version 0.1.0
+
+clean:
+	rm -f {name}.wasm {name}.component.wasm {name}.manifest.cbor
+"#
+        ),
+    )?;
+
+    Ok(())
+}
+
 /// Default registry directory.
 fn registry_dir() -> PathBuf {
     dirs::data_local_dir()

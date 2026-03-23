@@ -139,6 +139,12 @@ enum Commands {
     /// List locally-stored artifacts.
     Artifacts,
 
+    /// Scaffold, inspect, or manage capabilities.
+    Capability {
+        #[command(subcommand)]
+        action: CapabilityAction,
+    },
+
     /// Manage the capability registry.
     Registry {
         #[command(subcommand)]
@@ -155,6 +161,21 @@ enum Commands {
         /// Preferred transport order for happy-eyeballs selection.
         #[arg(long, value_delimiter = ',')]
         prefer_transport: Option<Vec<String>>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CapabilityAction {
+    /// Generate a capability project skeleton.
+    Scaffold {
+        /// Capability name (e.g., "my-diagnostics").
+        name: String,
+        /// Language: rust, cpp, python, go.
+        #[arg(long, default_value = "rust")]
+        language: String,
+        /// Output directory (default: current directory).
+        #[arg(long)]
+        output_dir: Option<String>,
     },
 }
 
@@ -267,6 +288,15 @@ async fn main() -> anyhow::Result<()> {
         Commands::Artifacts => {
             commands::list_artifacts(&cli.format).await?
         }
+        Commands::Capability { action } => match action {
+            CapabilityAction::Scaffold {
+                name,
+                language,
+                output_dir,
+            } => {
+                commands::capability_scaffold(&name, &language, output_dir.as_deref()).await?
+            }
+        },
         Commands::Registry { action } => match action {
             RegistryAction::Search { query } => {
                 commands::registry_search(&query, &cli.format).await?
