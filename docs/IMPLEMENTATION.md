@@ -26,15 +26,25 @@
 | 10. CLI + archetype detection | Done | 8 | `1a2f05f` |
 | 11. v0.2 release | Done | — | `9770710` |
 
-**v0.3** (in progress):
+**v0.3** (tagged `v0.3.0`):
 
 | Phase | Status | Tests | Commit |
 |-------|--------|-------|--------|
-| 12. Content-addressed artifact store | Done | 10 | — |
-| 13. Rosbag slicing capability | Pending | — | — |
-| 14. v0.3 CLI + release | Pending | — | — |
+| 12. Content-addressed artifact store | Done | 10 | `7acc3be` |
+| 13. Rosbag slicing capability | Deferred | — | — |
+| 14. v0.3 CLI + release | Done | — | `7acc3be` |
 
-**Total: 70 tests passing across 4 crates (33 core + 27 ros + 10 wasm-host).**
+**v0.4** (tagged `v0.4.0`):
+
+| Phase | Status | Tests | Commit |
+|-------|--------|-------|--------|
+| 15. Expanded capability interface | Done | 19 | `3dae251` |
+| 16. Standard capability library | Done | 25 | `8864d80` |
+| 17. Capability registry | Done | 10 | `70b9ffe` |
+| 18. Community pathway | Done | — | `3e937bb` |
+| 19. v0.4 release | Done | 2 | — |
+
+**Total: 126 tests passing across 7 crates (45 core + 46 ros + 10 wasm-host + 8 param-inspect + 7 diag-bundle + 10 net-archetype).**
 
 ---
 

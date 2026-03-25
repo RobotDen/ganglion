@@ -76,6 +76,7 @@ pub async fn sign(
         });
 
     let manifest = ComponentManifest {
+        schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
         name: name.clone(),
         version: version.into(),
         declared_capabilities: vec![
@@ -90,6 +91,10 @@ pub async fn sign(
         author_peer_id: keypair.peer_id(),
         component_hash: component_hash.clone(),
         limits: ResourceLimits::default(),
+        language: gang_core::registry::CapabilityLanguage::Rust,
+        description: String::new(),
+        tags: vec![],
+        min_ganglion_version: None,
     };
 
     let signed = SignedManifest::sign(&manifest, &keypair)?;
@@ -390,6 +395,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
     let component_hash = blake3::hash(component_bytes).to_hex().to_string();
 
     let manifest = ComponentManifest {
+        schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
         name: "diagnostics".into(),
         version: "0.1.0".into(),
         declared_capabilities: vec![
@@ -404,6 +410,10 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
         author_peer_id: keypair.peer_id(),
         component_hash,
         limits: ResourceLimits::default(),
+        language: gang_core::registry::CapabilityLanguage::Rust,
+        description: "System diagnostics".into(),
+        tags: vec!["diagnostics".into()],
+        min_ganglion_version: None,
     };
 
     let signed = SignedManifest::sign(&manifest, &keypair)?;

@@ -409,6 +409,7 @@ mod tests {
         let component_hash = blake3::hash(component_bytes).to_hex().to_string();
 
         let manifest = gang_core::manifest::ComponentManifest {
+            schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
             name: "test-diag".into(),
             version: "0.1.0".into(),
             declared_capabilities: vec![CapabilityGroup::DiagnosticsCollect {
@@ -417,6 +418,10 @@ mod tests {
             author_peer_id: operator_kp.peer_id(),
             component_hash,
             limits: gang_core::manifest::ResourceLimits::default(),
+            language: Default::default(),
+            description: String::new(),
+            tags: vec![],
+            min_ganglion_version: None,
         };
 
         let signed = SignedManifest::sign(&manifest, &operator_kp).unwrap();
@@ -468,12 +473,17 @@ mod tests {
         let untrusted_kp = Keypair::generate();
         let component = b"fake wasm";
         let manifest = gang_core::manifest::ComponentManifest {
+            schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
             name: "evil-cap".into(),
             version: "0.1.0".into(),
             declared_capabilities: vec![],
             author_peer_id: untrusted_kp.peer_id(),
             component_hash: blake3::hash(component).to_hex().to_string(),
             limits: Default::default(),
+            language: Default::default(),
+            description: String::new(),
+            tags: vec![],
+            min_ganglion_version: None,
         };
         let signed = SignedManifest::sign(&manifest, &untrusted_kp).unwrap();
         let manifest_cbor = signed.to_cbor().unwrap();

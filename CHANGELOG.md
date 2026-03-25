@@ -2,6 +2,30 @@
 
 All notable changes to Ganglion will be documented in this file.
 
+## [0.4.0] — 2026-04-23
+
+### Added
+
+- **Expanded capability interface** (`gang-core`, `gang-ros`): Three new WIT capability groups — `ganglion:process/spawn@1.0` (bounded subprocess invocation with command allowlist), `ganglion:network/probe@1.0` (ping, DNS, port check, traceroute), `ganglion:metrics/emit@1.0` (structured metric emission with ring buffer). Full Layer 3 broker implementations for all three.
+- **Standard capability library**: Three Rust capability crates — `gang-capability-param-inspect` (parameter server snapshot with diff), `gang-capability-diagnostic-bundle` (v2 comprehensive diagnostics with automated health checks), `gang-capability-network-archetype` (v2 archetype detection with connectivity scoring and recommendations).
+- **Capability registry** (`gang-core`): Content-addressed registry with publish, search (by name/description/tags), install, multi-version support, persist/reload. CLI commands: `gang registry search/install/publish/list/info`.
+- **Community pathway**: `docs/CAPABILITY_AUTHOR_GUIDE.md` with language-specific guides for Rust, C++, Python, and Go/TinyGo. `gang capability scaffold <name> --language <lang>` generates project skeletons with Makefile, source template, and WIT directory.
+- **Manifest schema v2.0**: Adds authoring language, description, tags, minimum Ganglion version, and schema version fields. v1.x manifests load via `#[serde(default)]` backward compatibility.
+- **WIT interface v0.4.0** with `process-spawn`, `network-probe`, and `metrics-emit` interfaces.
+- **36 new tests** across 6 crates. **126 total tests passing.**
+
+### Changed
+
+- `CapabilityGroup` enum gains `ProcessSpawn`, `NetworkProbe`, `MetricsEmit` variants.
+- `BrokerOperation` enum gains process, network probe, and metric operations.
+- Policy engine and permissive policy updated for all new capability groups.
+
+### Breaking
+
+- `ComponentManifest` struct has new required fields (schema_version, language, description, tags, min_ganglion_version) — all have `#[serde(default)]` for backward compatibility with v1.x manifests.
+
+---
+
 ## [0.3.0] — 2026-04-23
 
 ### Added

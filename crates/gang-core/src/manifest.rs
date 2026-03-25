@@ -4,13 +4,24 @@ use serde::{Deserialize, Serialize};
 use crate::capability::CapabilityGroup;
 use crate::error::ManifestError;
 use crate::identity::{Keypair, PeerId};
+use crate::registry::CapabilityLanguage;
+
+/// Manifest schema version.
+pub const MANIFEST_SCHEMA_VERSION: &str = "2.0";
 
 /// Signed manifest that accompanies every WASM component.
 /// §3.6: Every WASM component ships with a manifest containing component metadata,
 /// declared capabilities, author identity, and a signature over the component bytes
 /// and manifest by the author's private key.
+///
+/// Schema v2.0 (Ganglion 0.4): adds authoring language, description, tags,
+/// minimum Ganglion version, and schema version field. v1.x manifests load
+/// with a deprecation warning via default fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentManifest {
+    /// Manifest schema version ("2.0" for v0.4+).
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
     pub name: String,
     pub version: String,
     pub declared_capabilities: Vec<CapabilityGroup>,
@@ -20,6 +31,22 @@ pub struct ComponentManifest {
     /// Optional resource limits.
     #[serde(default)]
     pub limits: ResourceLimits,
+    /// Language the capability was authored in (v2.0).
+    #[serde(default)]
+    pub language: CapabilityLanguage,
+    /// Short description (v2.0).
+    #[serde(default)]
+    pub description: String,
+    /// Tags for registry discoverability (v2.0).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Minimum Ganglion version required (v2.0).
+    #[serde(default)]
+    pub min_ganglion_version: Option<String>,
+}
+
+fn default_schema_version() -> String {
+    "1.0".to_string()
 }
 
 /// Optional resource limits for a WASM component.
@@ -190,12 +217,17 @@ mod tests {
 
     fn make_test_manifest(keypair: &Keypair, component_bytes: &[u8]) -> ComponentManifest {
         ComponentManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION.into(),
             name: "test-capability".into(),
             version: "0.1.0".into(),
             declared_capabilities: vec![],
             author_peer_id: keypair.peer_id(),
             component_hash: blake3::hash(component_bytes).to_hex().to_string(),
             limits: ResourceLimits::default(),
+            language: CapabilityLanguage::Rust,
+            description: "A test capability".into(),
+            tags: vec!["test".into()],
+            min_ganglion_version: Some("0.4.0".into()),
         }
     }
 
@@ -263,6 +295,42 @@ mod tests {
         // keypair signed it, but only other is trusted
         assert!(!store.is_trusted(&keypair.peer_id()));
         assert!(store.is_trusted(&other.peer_id()));
+    }
+
+    #[test]
+    fn schema_version_defaults_to_1() {
+        // Simulate a v1.x manifest missing the new fields
+        let keypair = Keypair::generate();
+        let component = b"fake wasm bytes";
+        let hash = blake3::hash(component).to_hex().to_string();
+
+        // Build a minimal JSON that only has v1 fields
+        let json = serde_json::json!({
+            "name": "old-cap",
+            "version": "0.1.0",
+            "declared_capabilities": [],
+            "author_peer_id": keypair.peer_id().as_str(),
+            "component_hash": hash,
+        });
+
+        let manifest: ComponentManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(manifest.schema_version, "1.0"); // default
+        assert_eq!(manifest.language, CapabilityLanguage::Other); // default
+        assert!(manifest.description.is_empty());
+        assert!(manifest.tags.is_empty());
+        assert!(manifest.min_ganglion_version.is_none());
+    }
+
+    #[test]
+    fn v2_manifest_fields() {
+        let keypair = Keypair::generate();
+        let component = b"fake wasm bytes";
+        let manifest = make_test_manifest(&keypair, component);
+
+        assert_eq!(manifest.schema_version, "2.0");
+        assert_eq!(manifest.language, CapabilityLanguage::Rust);
+        assert!(!manifest.description.is_empty());
+        assert!(!manifest.tags.is_empty());
     }
 
     #[test]
