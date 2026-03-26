@@ -124,13 +124,7 @@ impl CapabilityBroker for ProcessBroker {
                 timeout_secs,
             } => {
                 let output = self
-                    .spawn_process(
-                        &command,
-                        &args,
-                        cwd.as_deref(),
-                        &env,
-                        timeout_secs,
-                    )
+                    .spawn_process(&command, &args, cwd.as_deref(), &env, timeout_secs)
                     .await?;
 
                 let data = serde_json::to_vec(&output).map_err(|e| BrokerError::Unavailable {
@@ -236,7 +230,10 @@ mod tests {
         let resp = broker.handle_request(req).await.unwrap();
         assert!(resp.success);
         let output: ProcessOutput = serde_json::from_slice(&resp.data).unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "broker test");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "broker test"
+        );
     }
 
     #[tokio::test]

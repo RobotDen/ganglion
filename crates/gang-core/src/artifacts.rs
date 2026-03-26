@@ -45,7 +45,7 @@ impl Cid {
     }
 
     /// Create a CID from a raw string (e.g., from user input).
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         Self(s.to_string())
     }
 }
@@ -95,7 +95,7 @@ impl Default for ArtifactStoreConfig {
         Self {
             store_dir: PathBuf::from("/tmp/gang-artifacts"),
             max_size_bytes: 1_073_741_824, // 1 GB
-            chunk_size: 1_048_576,          // 1 MB
+            chunk_size: 1_048_576,         // 1 MB
         }
     }
 }
@@ -136,10 +136,8 @@ impl ArtifactStore {
             let entries: Vec<ArtifactMeta> = serde_json::from_str(&data)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             let total: u64 = entries.iter().map(|e| e.size).sum();
-            let index: HashMap<Cid, ArtifactMeta> = entries
-                .into_iter()
-                .map(|e| (e.cid.clone(), e))
-                .collect();
+            let index: HashMap<Cid, ArtifactMeta> =
+                entries.into_iter().map(|e| (e.cid.clone(), e)).collect();
             (index, total)
         } else {
             (HashMap::new(), 0)
@@ -172,8 +170,7 @@ impl ArtifactStore {
             && self.total_bytes + data.len() as u64 > self.config.max_size_bytes
         {
             if !self.evict_lru()? {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                return Err(std::io::Error::other(
                     "artifact store full and nothing to evict",
                 ));
             }
@@ -186,7 +183,7 @@ impl ArtifactStore {
             let chunk_dir = self.chunk_path(&cid);
             std::fs::create_dir_all(&chunk_dir)?;
 
-            let chunk_count = (data.len() + self.config.chunk_size - 1) / self.config.chunk_size;
+            let chunk_count = data.len().div_ceil(self.config.chunk_size);
             for i in 0..chunk_count {
                 let start = i * self.config.chunk_size;
                 let end = std::cmp::min(start + self.config.chunk_size, data.len());
@@ -236,7 +233,10 @@ impl ArtifactStore {
     /// Retrieve an artifact by CID.
     pub fn retrieve(&mut self, cid: &Cid) -> Result<Vec<u8>, std::io::Error> {
         let meta = self.index.get(cid).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, format!("artifact {cid} not found"))
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("artifact {cid} not found"),
+            )
         })?;
 
         let chunk_count = meta.chunk_count;
@@ -342,8 +342,7 @@ impl ArtifactStore {
 
     fn persist_index(&self) -> Result<(), std::io::Error> {
         let entries: Vec<&ArtifactMeta> = self.index.values().collect();
-        let json = serde_json::to_string_pretty(&entries)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&entries).map_err(std::io::Error::other)?;
         std::fs::write(self.config.store_dir.join("index.json"), json)
     }
 }
@@ -356,7 +355,7 @@ mod tests {
         ArtifactStore::open(ArtifactStoreConfig {
             store_dir: dir.to_path_buf(),
             max_size_bytes: 10 * 1024 * 1024, // 10 MB
-            chunk_size: 1024,                  // 1 KB for testing
+            chunk_size: 1024,                 // 1 KB for testing
         })
         .unwrap()
     }
@@ -455,7 +454,9 @@ mod tests {
         })
         .unwrap();
 
-        let cid1 = store.store(b"first artifact 1234567890", None, None, None).unwrap();
+        let cid1 = store
+            .store(b"first artifact 1234567890", None, None, None)
+            .unwrap();
         // Access cid1 to make it recently used
         let _ = store.retrieve(&cid1).unwrap();
 
@@ -474,7 +475,9 @@ mod tests {
 
         let cid = {
             let mut store = test_store(dir.path());
-            store.store(b"persistent data", Some("file.txt"), None, None).unwrap()
+            store
+                .store(b"persistent data", Some("file.txt"), None, None)
+                .unwrap()
         };
 
         // Reopen the store
@@ -488,9 +491,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = test_store(dir.path());
 
-        store.store(b"artifact 1", Some("a.bin"), None, None).unwrap();
-        store.store(b"artifact 2", Some("b.bin"), None, None).unwrap();
-        store.store(b"artifact 3", Some("c.bin"), None, None).unwrap();
+        store
+            .store(b"artifact 1", Some("a.bin"), None, None)
+            .unwrap();
+        store
+            .store(b"artifact 2", Some("b.bin"), None, None)
+            .unwrap();
+        store
+            .store(b"artifact 3", Some("c.bin"), None, None)
+            .unwrap();
 
         let list = store.list();
         assert_eq!(list.len(), 3);

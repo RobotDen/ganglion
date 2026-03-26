@@ -4,15 +4,15 @@ use std::sync::Arc;
 
 use futures::Stream;
 use libp2p::{Multiaddr, PeerId as Libp2pPeerId, Swarm};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::{debug, info};
 
 use gang_core::error::TransportError;
 use gang_core::identity::{Keypair, PeerId};
 use gang_core::protocol::ProtocolId;
 use gang_core::transport::{
-    GanglionStream, PresenceInfo, StreamHandler, TransportCapabilities, TransportEvent,
-    TransportAdapter, TransportStats,
+    GanglionStream, PresenceInfo, StreamHandler, TransportAdapter, TransportCapabilities,
+    TransportEvent, TransportStats,
 };
 
 use crate::config::Libp2pConfig;
@@ -27,6 +27,7 @@ use crate::swarm::{self, GanglionBehaviour};
 /// - Circuit relay v2 for NAT traversal
 /// - DCUtR for direct connection upgrades
 /// - Kademlia for peer routing
+#[allow(dead_code)] // Fields used as the transport layer is fleshed out
 pub struct Libp2pTransportAdapter {
     config: Libp2pConfig,
     keypair: Keypair,
@@ -40,6 +41,7 @@ pub struct Libp2pTransportAdapter {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PeerConnection {
     libp2p_peer_id: Libp2pPeerId,
     via_relay: bool,
@@ -113,9 +115,7 @@ impl Libp2pTransportAdapter {
 
             match event {
                 Some(SwarmEvent::ConnectionEstablished {
-                    peer_id,
-                    endpoint,
-                    ..
+                    peer_id, endpoint, ..
                 }) => {
                     let gang_peer_id = libp2p_to_gang_peer_id(&peer_id);
                     let via_relay = endpoint.is_relayed();
@@ -137,7 +137,8 @@ impl Libp2pTransportAdapter {
 
                     let peer_key = gang_peer_id.as_str().to_string();
                     let mut peers = connected_peers.write().await;
-                    let reconnections = peers.get(&peer_key)
+                    let reconnections = peers
+                        .get(&peer_key)
                         .map(|p| p.reconnections + 1)
                         .unwrap_or(0);
 
@@ -170,10 +171,7 @@ impl Libp2pTransportAdapter {
                     let gang_peer_id = libp2p_to_gang_peer_id(&peer_id);
                     info!(peer = %peer_id, "Connection closed");
 
-                    connected_peers
-                        .write()
-                        .await
-                        .remove(gang_peer_id.as_str());
+                    connected_peers.write().await.remove(gang_peer_id.as_str());
 
                     let _ = event_tx
                         .send(TransportEvent::PeerDisconnected {
@@ -205,7 +203,9 @@ impl Libp2pTransportAdapter {
 
         match event {
             GanglionBehaviourEvent::Identify(libp2p::identify::Event::Received {
-                peer_id, info, ..
+                peer_id,
+                info,
+                ..
             }) => {
                 debug!(
                     peer = %peer_id,
@@ -271,12 +271,12 @@ impl Libp2pTransportAdapter {
 
     /// Dial a peer by their libp2p multiaddr.
     pub async fn dial_multiaddr(&self, addr: &str) -> Result<(), TransportError> {
-        let addr: Multiaddr = addr.parse().map_err(|e: libp2p::multiaddr::Error| {
-            TransportError::DialFailed {
-                peer: addr.to_string(),
-                reason: e.to_string(),
-            }
-        })?;
+        let addr: Multiaddr =
+            addr.parse()
+                .map_err(|e: libp2p::multiaddr::Error| TransportError::DialFailed {
+                    peer: addr.to_string(),
+                    reason: e.to_string(),
+                })?;
 
         let mut swarm = self.swarm.lock().await;
         swarm.dial(addr).map_err(|e| TransportError::DialFailed {
@@ -294,14 +294,12 @@ impl Libp2pTransportAdapter {
             .await
             .iter()
             .map(|(id, conn)| {
-                let peer_id = PeerId::from_public_key(
-                    &gang_core::identity::Keypair::generate().public_key(),
-                );
+                let peer_id =
+                    PeerId::from_public_key(&gang_core::identity::Keypair::generate().public_key());
                 // In practice we'd maintain a proper mapping; for now return the stored ID
                 (
                     // Parse the stored gang peer ID string back
-                    serde_json::from_str::<PeerId>(&format!("\"{}\"", id))
-                        .unwrap_or_else(|_| peer_id),
+                    serde_json::from_str::<PeerId>(&format!("\"{}\"", id)).unwrap_or(peer_id),
                     conn.via_relay,
                 )
             })
@@ -409,7 +407,5 @@ fn libp2p_to_gang_peer_id(peer_id: &Libp2pPeerId) -> PeerId {
     let hash = blake3::hash(peer_id.to_bytes().as_slice());
     // Re-derive using the same format as gang-core PeerId
     let hex = hex::encode(&hash.as_bytes()[..16]);
-    serde_json::from_str::<PeerId>(&format!("\"12D3-{hex}\""))
-        .expect("valid peer id format")
+    serde_json::from_str::<PeerId>(&format!("\"12D3-{hex}\"")).expect("valid peer id format")
 }
-

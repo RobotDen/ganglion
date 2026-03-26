@@ -73,8 +73,7 @@ impl AuditLog {
 
         // Ensure parent directory exists
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| AuditError::WriteFailed(e.to_string()))?;
         }
 
         // Check size and rotate if needed
@@ -112,8 +111,7 @@ impl AuditLog {
             return Ok(Vec::new());
         }
 
-        let data = std::fs::read(&self.path)
-            .map_err(|e| AuditError::Corrupted(e.to_string()))?;
+        let data = std::fs::read(&self.path).map_err(|e| AuditError::Corrupted(e.to_string()))?;
 
         let mut records = Vec::new();
         let mut offset = 0;

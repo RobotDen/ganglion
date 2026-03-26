@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Ganglion pre-commit hook
+# Install: git config core.hooksPath .githooks
+# Or run: ./scripts/setup-hooks.sh
+
+set -e
+
+echo "=== pre-commit: cargo fmt --check ==="
+cargo fmt --check
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "Formatting check failed. Run 'cargo fmt' and try again."
+    exit 1
+fi
+
+echo "=== pre-commit: cargo clippy ==="
+cargo clippy --all-targets --quiet -- -D warnings 2>/dev/null || {
+    echo ""
+    echo "Clippy found warnings treated as errors."
+    echo "Run 'cargo clippy --all-targets' to see details."
+    exit 1
+}
+
+echo "=== pre-commit: cargo test ==="
+cargo test --quiet 2>/dev/null
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "Tests failed. Fix failing tests before committing."
+    exit 1
+fi
+
+echo "=== pre-commit: all checks passed ==="

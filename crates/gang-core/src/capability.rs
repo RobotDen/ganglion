@@ -31,15 +31,11 @@ pub enum CapabilityGroup {
 
     /// Structured diagnostic collection primitives.
     #[serde(rename = "ganglion:diagnostics/collect")]
-    DiagnosticsCollect {
-        version: String,
-    },
+    DiagnosticsCollect { version: String },
 
     /// Content-addressed artifact publishing (v0.3).
     #[serde(rename = "ganglion:artifacts/publish")]
-    ArtifactsPublish {
-        version: String,
-    },
+    ArtifactsPublish { version: String },
 
     /// Bounded subprocess invocation (v0.4).
     #[serde(rename = "ganglion:process/spawn")]
@@ -51,15 +47,11 @@ pub enum CapabilityGroup {
 
     /// Structured network probing primitives (v0.4).
     #[serde(rename = "ganglion:network/probe")]
-    NetworkProbe {
-        version: String,
-    },
+    NetworkProbe { version: String },
 
     /// Structured metric emission from capabilities (v0.4).
     #[serde(rename = "ganglion:metrics/emit")]
-    MetricsEmit {
-        version: String,
-    },
+    MetricsEmit { version: String },
 }
 
 impl CapabilityGroup {

@@ -6,7 +6,7 @@ use crate::identity::PeerId;
 
 /// The policy engine evaluates capability declarations against active policy
 /// at load time. Default-deny: anything not explicitly permitted is rejected.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Policy {
     /// Rules per capability group. If a group has no entry, it is denied.
     #[serde(default)]
@@ -15,15 +15,6 @@ pub struct Policy {
     /// Per-peer rules: which operators can deploy capabilities.
     #[serde(default)]
     pub peer_rules: Vec<PeerRule>,
-}
-
-impl Default for Policy {
-    fn default() -> Self {
-        Self {
-            capability_rules: Vec::new(),
-            peer_rules: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,20 +43,16 @@ impl Policy {
     /// Load policy from a TOML file.
     pub fn load(path: &std::path::Path) -> Result<Self, PolicyError> {
         if !path.exists() {
-            return Err(PolicyError::PolicyNotFound(
-                path.display().to_string(),
-            ));
+            return Err(PolicyError::PolicyNotFound(path.display().to_string()));
         }
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| PolicyError::InvalidPolicy(e.to_string()))?;
-        toml::from_str(&contents)
-            .map_err(|e| PolicyError::InvalidPolicy(e.to_string()))
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| PolicyError::InvalidPolicy(e.to_string()))?;
+        toml::from_str(&contents).map_err(|e| PolicyError::InvalidPolicy(e.to_string()))
     }
 
     /// Load policy from a TOML string.
     pub fn from_toml(toml_str: &str) -> Result<Self, PolicyError> {
-        toml::from_str(toml_str)
-            .map_err(|e| PolicyError::InvalidPolicy(e.to_string()))
+        toml::from_str(toml_str).map_err(|e| PolicyError::InvalidPolicy(e.to_string()))
     }
 
     /// A permissive policy for development/testing. Allows everything.
@@ -145,11 +132,13 @@ impl Policy {
             });
         }
 
-        let authorized = self.peer_rules.iter().any(|rule| {
-            rule.peer_id == "*" || rule.peer_id == peer.as_str()
-        }) && self.peer_rules.iter().any(|rule| {
-            (rule.peer_id == "*" || rule.peer_id == peer.as_str()) && rule.can_deploy
-        });
+        let authorized = self
+            .peer_rules
+            .iter()
+            .any(|rule| rule.peer_id == "*" || rule.peer_id == peer.as_str())
+            && self.peer_rules.iter().any(|rule| {
+                (rule.peer_id == "*" || rule.peer_id == peer.as_str()) && rule.can_deploy
+            });
 
         if !authorized {
             return Err(PolicyError::PeerNotAuthorized {
@@ -163,10 +152,7 @@ impl Policy {
     fn check_capability_permitted(&self, cap: &CapabilityGroup) -> Result<(), PolicyError> {
         let group_name = cap.name();
 
-        let rule = self
-            .capability_rules
-            .iter()
-            .find(|r| r.group == group_name);
+        let rule = self.capability_rules.iter().find(|r| r.group == group_name);
 
         let rule = match rule {
             Some(r) => r,
@@ -229,7 +215,9 @@ impl Policy {
             CapabilityGroup::ArtifactsPublish { .. } => {
                 // No patterns to check beyond group presence.
             }
-            CapabilityGroup::ProcessSpawn { allowed_commands, .. } => {
+            CapabilityGroup::ProcessSpawn {
+                allowed_commands, ..
+            } => {
                 for cmd in allowed_commands {
                     if !pattern_matches_any(cmd, &rule.allowed_patterns) {
                         return Err(PolicyError::PatternExceedsPolicy {

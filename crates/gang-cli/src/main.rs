@@ -236,9 +236,7 @@ async fn main() -> anyhow::Result<()> {
         1 => "gang=debug",
         _ => "gang=trace,gang_core=trace,gang_ros=trace",
     };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     match cli.command {
         Commands::Identity { action } => match action {
@@ -266,16 +264,15 @@ async fn main() -> anyhow::Result<()> {
         } => commands::run(&robot, &cap_name, &args, &cli.format).await?,
         Commands::Caps { robot } => commands::caps(&robot, &cli.format).await?,
         Commands::Demo => commands::demo(&cli.format).await?,
-        Commands::Logs { robot: _, follow: _ } => {
+        Commands::Logs {
+            robot: _,
+            follow: _,
+        } => {
             eprintln!("gang logs: requires a running relay connection (not yet implemented)");
             eprintln!("Use `gang demo` for a self-contained local demo.");
         }
-        Commands::TestArchetype { archetype } => {
-            commands::test_archetype(&archetype).await?
-        }
-        Commands::Diagnose { robot } => {
-            commands::diagnose(robot.as_deref(), &cli.format).await?
-        }
+        Commands::TestArchetype { archetype } => commands::test_archetype(&archetype).await?,
+        Commands::Diagnose { robot } => commands::diagnose(robot.as_deref(), &cli.format).await?,
         Commands::TransportStats { robot } => {
             commands::transport_stats(&robot, &cli.format).await?
         }
@@ -285,17 +282,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Push { path, content_type } => {
             commands::push_artifact(&path, content_type.as_deref(), &cli.format).await?
         }
-        Commands::Artifacts => {
-            commands::list_artifacts(&cli.format).await?
-        }
+        Commands::Artifacts => commands::list_artifacts(&cli.format).await?,
         Commands::Capability { action } => match action {
             CapabilityAction::Scaffold {
                 name,
                 language,
                 output_dir,
-            } => {
-                commands::capability_scaffold(&name, &language, output_dir.as_deref()).await?
-            }
+            } => commands::capability_scaffold(&name, &language, output_dir.as_deref()).await?,
         },
         Commands::Registry { action } => match action {
             RegistryAction::Search { query } => {
@@ -317,18 +310,17 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?
             }
-            RegistryAction::List => {
-                commands::registry_list(&cli.format).await?
-            }
-            RegistryAction::Info { name } => {
-                commands::registry_info(&name, &cli.format).await?
-            }
+            RegistryAction::List => commands::registry_list(&cli.format).await?,
+            RegistryAction::Info { name } => commands::registry_info(&name, &cli.format).await?,
         },
         Commands::List => {
             eprintln!("gang list: requires a running relay connection (not yet implemented)");
             eprintln!("Use `gang demo` for a self-contained local demo.");
         }
-        Commands::Connect { robot: _, prefer_transport: _ } => {
+        Commands::Connect {
+            robot: _,
+            prefer_transport: _,
+        } => {
             eprintln!("gang connect: requires a running relay (not yet implemented)");
             eprintln!("Use `gang demo` for a self-contained local demo.");
         }

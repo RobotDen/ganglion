@@ -1,9 +1,8 @@
 use std::time::Duration;
 
 use libp2p::{
-    Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder,
-    dcutr, identify, kad, noise, ping, relay, tcp, yamux,
-    swarm::NetworkBehaviour,
+    Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder, dcutr, identify, kad, noise, ping,
+    relay, swarm::NetworkBehaviour, tcp, yamux,
 };
 use tracing::{debug, info};
 
@@ -22,6 +21,7 @@ pub struct GanglionBehaviour {
 
 /// Events from the Ganglion swarm that the adapter translates to TransportEvents.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum SwarmEvent {
     PeerConnected(Libp2pPeerId),
     PeerDisconnected(Libp2pPeerId),
@@ -64,23 +64,17 @@ pub async fn build_swarm(
 
             // Identify: lets peers exchange metadata
             let identify = identify::Behaviour::new(
-                identify::Config::new(
-                    "/ganglion/0.1.0".into(),
-                    keypair.public(),
-                )
-                .with_push_listen_addr_updates(true),
+                identify::Config::new("/ganglion/0.1.0".into(), keypair.public())
+                    .with_push_listen_addr_updates(true),
             );
 
             // Ping: keepalive and latency measurement
-            let ping = ping::Behaviour::new(
-                ping::Config::new().with_interval(Duration::from_secs(30)),
-            );
+            let ping =
+                ping::Behaviour::new(ping::Config::new().with_interval(Duration::from_secs(30)));
 
             // Kademlia: peer routing through bootstrap nodes
-            let mut kademlia = kad::Behaviour::new(
-                local_peer_id,
-                kad::store::MemoryStore::new(local_peer_id),
-            );
+            let mut kademlia =
+                kad::Behaviour::new(local_peer_id, kad::store::MemoryStore::new(local_peer_id));
             kademlia.set_mode(Some(kad::Mode::Client));
 
             // DCUtR: direct connection upgrade through relay

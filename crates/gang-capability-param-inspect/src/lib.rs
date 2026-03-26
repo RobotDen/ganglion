@@ -96,9 +96,7 @@ pub fn diff_snapshots(reference: &ParamSnapshot, current: &ParamSnapshot) -> Vec
     for (node, cur_params) in &current.nodes {
         let ref_params = reference.nodes.get(node);
         for (param, cur_val) in cur_params {
-            let in_ref = ref_params
-                .map(|p| p.contains_key(param))
-                .unwrap_or(false);
+            let in_ref = ref_params.map(|p| p.contains_key(param)).unwrap_or(false);
             if !in_ref {
                 diffs.push(ParamDiff {
                     node: node.clone(),

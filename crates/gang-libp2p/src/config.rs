@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Configuration for the libp2p transport adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]

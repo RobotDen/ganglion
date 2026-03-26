@@ -145,7 +145,10 @@ pub fn analyze_bundle(bundle: &DiagnosticBundle) -> Vec<DiagnosticCheck> {
         checks.push(DiagnosticCheck {
             name: "memory_usage".into(),
             severity,
-            message: format!("{usage_pct:.1}% memory used ({}/{} MB)", bundle.system.memory_used_mb, bundle.system.memory_total_mb),
+            message: format!(
+                "{usage_pct:.1}% memory used ({}/{} MB)",
+                bundle.system.memory_used_mb, bundle.system.memory_total_mb
+            ),
         });
     }
 

@@ -187,7 +187,8 @@ pub fn recommend(archetype: NetworkArchetype) -> Vec<Recommendation> {
             Recommendation {
                 priority: Priority::Recommended,
                 category: "resilience".into(),
-                action: "Enable aggressive reconnection — mobile connections drop frequently".into(),
+                action: "Enable aggressive reconnection — mobile connections drop frequently"
+                    .into(),
             },
             Recommendation {
                 priority: Priority::Optional,
@@ -243,10 +244,7 @@ pub fn summarize(report: &ArchetypeReport) -> String {
             Priority::Recommended => "recommended",
             Priority::Optional => "optional",
         };
-        out.push_str(&format!(
-            "  [{tag}] [{}] {}\n",
-            rec.category, rec.action
-        ));
+        out.push_str(&format!("  [{tag}] [{}] {}\n", rec.category, rec.action));
     }
 
     out
@@ -262,45 +260,141 @@ mod tests {
 
     fn open_warehouse_probes() -> Vec<ProbeResult> {
         vec![
-            ProbeResult { name: "internet".into(), passed: true, detail: "DNS+ping OK".into() },
-            ProbeResult { name: "nat".into(), passed: false, detail: "no NAT detected".into() },
-            ProbeResult { name: "multicast".into(), passed: true, detail: "mDNS available".into() },
-            ProbeResult { name: "outbound_ports".into(), passed: true, detail: "all ports open".into() },
-            ProbeResult { name: "cgnat".into(), passed: false, detail: "no CGNAT".into() },
-            ProbeResult { name: "symmetric_nat".into(), passed: false, detail: "not symmetric".into() },
+            ProbeResult {
+                name: "internet".into(),
+                passed: true,
+                detail: "DNS+ping OK".into(),
+            },
+            ProbeResult {
+                name: "nat".into(),
+                passed: false,
+                detail: "no NAT detected".into(),
+            },
+            ProbeResult {
+                name: "multicast".into(),
+                passed: true,
+                detail: "mDNS available".into(),
+            },
+            ProbeResult {
+                name: "outbound_ports".into(),
+                passed: true,
+                detail: "all ports open".into(),
+            },
+            ProbeResult {
+                name: "cgnat".into(),
+                passed: false,
+                detail: "no CGNAT".into(),
+            },
+            ProbeResult {
+                name: "symmetric_nat".into(),
+                passed: false,
+                detail: "not symmetric".into(),
+            },
         ]
     }
 
     fn nat_office_probes() -> Vec<ProbeResult> {
         vec![
-            ProbeResult { name: "internet".into(), passed: true, detail: "OK".into() },
-            ProbeResult { name: "nat".into(), passed: true, detail: "behind NAT".into() },
-            ProbeResult { name: "multicast".into(), passed: true, detail: "LAN mDNS".into() },
-            ProbeResult { name: "outbound_ports".into(), passed: true, detail: "ports open".into() },
-            ProbeResult { name: "cgnat".into(), passed: false, detail: "no CGNAT".into() },
-            ProbeResult { name: "symmetric_nat".into(), passed: false, detail: "not symmetric".into() },
+            ProbeResult {
+                name: "internet".into(),
+                passed: true,
+                detail: "OK".into(),
+            },
+            ProbeResult {
+                name: "nat".into(),
+                passed: true,
+                detail: "behind NAT".into(),
+            },
+            ProbeResult {
+                name: "multicast".into(),
+                passed: true,
+                detail: "LAN mDNS".into(),
+            },
+            ProbeResult {
+                name: "outbound_ports".into(),
+                passed: true,
+                detail: "ports open".into(),
+            },
+            ProbeResult {
+                name: "cgnat".into(),
+                passed: false,
+                detail: "no CGNAT".into(),
+            },
+            ProbeResult {
+                name: "symmetric_nat".into(),
+                passed: false,
+                detail: "not symmetric".into(),
+            },
         ]
     }
 
     fn enterprise_probes() -> Vec<ProbeResult> {
         vec![
-            ProbeResult { name: "internet".into(), passed: true, detail: "OK".into() },
-            ProbeResult { name: "nat".into(), passed: true, detail: "NAT".into() },
-            ProbeResult { name: "multicast".into(), passed: false, detail: "blocked".into() },
-            ProbeResult { name: "outbound_ports".into(), passed: false, detail: "only 443".into() },
-            ProbeResult { name: "cgnat".into(), passed: false, detail: "no CGNAT".into() },
-            ProbeResult { name: "symmetric_nat".into(), passed: false, detail: "not symmetric".into() },
+            ProbeResult {
+                name: "internet".into(),
+                passed: true,
+                detail: "OK".into(),
+            },
+            ProbeResult {
+                name: "nat".into(),
+                passed: true,
+                detail: "NAT".into(),
+            },
+            ProbeResult {
+                name: "multicast".into(),
+                passed: false,
+                detail: "blocked".into(),
+            },
+            ProbeResult {
+                name: "outbound_ports".into(),
+                passed: false,
+                detail: "only 443".into(),
+            },
+            ProbeResult {
+                name: "cgnat".into(),
+                passed: false,
+                detail: "no CGNAT".into(),
+            },
+            ProbeResult {
+                name: "symmetric_nat".into(),
+                passed: false,
+                detail: "not symmetric".into(),
+            },
         ]
     }
 
     fn cgnat_probes() -> Vec<ProbeResult> {
         vec![
-            ProbeResult { name: "internet".into(), passed: true, detail: "OK".into() },
-            ProbeResult { name: "nat".into(), passed: true, detail: "NAT".into() },
-            ProbeResult { name: "multicast".into(), passed: false, detail: "no".into() },
-            ProbeResult { name: "outbound_ports".into(), passed: true, detail: "open".into() },
-            ProbeResult { name: "cgnat".into(), passed: true, detail: "100.64.x.x range".into() },
-            ProbeResult { name: "symmetric_nat".into(), passed: true, detail: "symmetric".into() },
+            ProbeResult {
+                name: "internet".into(),
+                passed: true,
+                detail: "OK".into(),
+            },
+            ProbeResult {
+                name: "nat".into(),
+                passed: true,
+                detail: "NAT".into(),
+            },
+            ProbeResult {
+                name: "multicast".into(),
+                passed: false,
+                detail: "no".into(),
+            },
+            ProbeResult {
+                name: "outbound_ports".into(),
+                passed: true,
+                detail: "open".into(),
+            },
+            ProbeResult {
+                name: "cgnat".into(),
+                passed: true,
+                detail: "100.64.x.x range".into(),
+            },
+            ProbeResult {
+                name: "symmetric_nat".into(),
+                passed: true,
+                detail: "symmetric".into(),
+            },
         ]
     }
 
@@ -333,9 +427,11 @@ mod tests {
 
     #[test]
     fn classify_no_internet() {
-        let probes = vec![
-            ProbeResult { name: "internet".into(), passed: false, detail: "unreachable".into() },
-        ];
+        let probes = vec![ProbeResult {
+            name: "internet".into(),
+            passed: false,
+            detail: "unreachable".into(),
+        }];
         let (arch, _) = classify(&probes);
         assert_eq!(arch, NetworkArchetype::RegulatedFacility);
     }
@@ -365,8 +461,16 @@ mod tests {
     #[test]
     fn connectivity_score_none_pass() {
         let probes = vec![
-            ProbeResult { name: "internet".into(), passed: false, detail: "fail".into() },
-            ProbeResult { name: "nat".into(), passed: false, detail: "fail".into() },
+            ProbeResult {
+                name: "internet".into(),
+                passed: false,
+                detail: "fail".into(),
+            },
+            ProbeResult {
+                name: "nat".into(),
+                passed: false,
+                detail: "fail".into(),
+            },
         ];
         let score = connectivity_score(&probes);
         assert_eq!(score, 0);

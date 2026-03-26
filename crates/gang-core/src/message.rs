@@ -4,9 +4,11 @@ use crate::identity::PeerId;
 
 /// Length-prefixed CBOR framing for Ganglion messages.
 /// Wire format: [varint length][CBOR payload]
-
+///
 /// Encode a message to length-prefixed CBOR bytes.
-pub fn encode_message<T: Serialize>(msg: &T) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
+pub fn encode_message<T: Serialize>(
+    msg: &T,
+) -> Result<Vec<u8>, ciborium::ser::Error<std::io::Error>> {
     let mut payload = Vec::new();
     ciborium::into_writer(msg, &mut payload)?;
 
@@ -29,8 +31,8 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
     }
 
     let payload = &data[varint_size..total];
-    let msg: T = ciborium::from_reader(payload)
-        .map_err(|e| DecodeError::CborError(e.to_string()))?;
+    let msg: T =
+        ciborium::from_reader(payload).map_err(|e| DecodeError::CborError(e.to_string()))?;
     Ok((msg, total))
 }
 
@@ -107,9 +109,7 @@ pub enum ControlMessage {
     /// List installed capabilities (request).
     ListCapabilities,
     /// List installed capabilities (response).
-    CapabilityList {
-        capabilities: Vec<CapabilityInfo>,
-    },
+    CapabilityList { capabilities: Vec<CapabilityInfo> },
     /// Error response.
     Error {
         request_id: Option<String>,
@@ -165,10 +165,7 @@ pub enum BulkMessage {
     /// Accept the offered artifact.
     Accept,
     /// A data chunk.
-    Chunk {
-        offset: u64,
-        data: Vec<u8>,
-    },
+    Chunk { offset: u64, data: Vec<u8> },
     /// Transfer complete.
     Complete { hash: String },
     /// Progress report.
@@ -205,8 +202,7 @@ mod tests {
         };
 
         let encoded = encode_message(&msg).unwrap();
-        let (decoded, consumed): (ControlMessage, usize) =
-            decode_message(&encoded).unwrap();
+        let (decoded, consumed): (ControlMessage, usize) = decode_message(&encoded).unwrap();
         assert_eq!(consumed, encoded.len());
 
         match decoded {

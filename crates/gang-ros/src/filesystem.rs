@@ -124,11 +124,9 @@ impl CapabilityBroker for FsBroker {
                     .map(|entry| entry.file_name().to_string_lossy().to_string())
                     .collect();
 
-                let data = serde_json::to_vec(&entries).map_err(|e| {
-                    BrokerError::Unavailable {
-                        broker: "fs".into(),
-                        reason: e.to_string(),
-                    }
+                let data = serde_json::to_vec(&entries).map_err(|e| BrokerError::Unavailable {
+                    broker: "fs".into(),
+                    reason: e.to_string(),
                 })?;
 
                 let bytes_out = data.len() as u64;
@@ -143,11 +141,9 @@ impl CapabilityBroker for FsBroker {
             BrokerOperation::FsStat { ref path } => {
                 self.check_access(path, false)?;
 
-                let metadata = std::fs::metadata(path).map_err(|e| {
-                    BrokerError::Unavailable {
-                        broker: "fs".into(),
-                        reason: e.to_string(),
-                    }
+                let metadata = std::fs::metadata(path).map_err(|e| BrokerError::Unavailable {
+                    broker: "fs".into(),
+                    reason: e.to_string(),
                 })?;
 
                 let stat = FileStat {
@@ -158,11 +154,9 @@ impl CapabilityBroker for FsBroker {
                     readonly: metadata.permissions().readonly(),
                 };
 
-                let data = serde_json::to_vec(&stat).map_err(|e| {
-                    BrokerError::Unavailable {
-                        broker: "fs".into(),
-                        reason: e.to_string(),
-                    }
+                let data = serde_json::to_vec(&stat).map_err(|e| BrokerError::Unavailable {
+                    broker: "fs".into(),
+                    reason: e.to_string(),
                 })?;
 
                 let bytes_out = data.len() as u64;
@@ -276,7 +270,10 @@ mod tests {
         };
         let resp = broker.handle_request(req).await.unwrap();
         assert!(resp.success);
-        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "written by ganglion");
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "written by ganglion"
+        );
     }
 
     #[tokio::test]

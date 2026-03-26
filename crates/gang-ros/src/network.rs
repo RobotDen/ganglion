@@ -13,6 +13,12 @@ use gang_core::error::BrokerError;
 /// for use by network diagnostics and archetype detection capabilities.
 pub struct NetworkProbeBroker;
 
+impl Default for NetworkProbeBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetworkProbeBroker {
     pub fn new() -> Self {
         Self
@@ -60,13 +66,10 @@ fn do_ping(host: &str, count: u32) -> PingResult {
         let start = Instant::now();
         if let Ok(addrs) = addr_str.to_socket_addrs() {
             for addr in addrs {
-                match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
-                    Ok(_) => {
-                        received += 1;
-                        total_rtt += start.elapsed().as_secs_f64() * 1000.0;
-                        break;
-                    }
-                    Err(_) => {}
+                if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok() {
+                    received += 1;
+                    total_rtt += start.elapsed().as_secs_f64() * 1000.0;
+                    break;
                 }
             }
         }
@@ -117,16 +120,12 @@ fn do_port_check(host: &str, port: u16, timeout_secs: u64) -> PortResult {
             let mut found = false;
             let mut lat = 0.0;
             for addr in addrs {
-                match std::net::TcpStream::connect_timeout(
-                    &addr,
-                    Duration::from_secs(timeout_secs),
-                ) {
-                    Ok(_) => {
-                        found = true;
-                        lat = start.elapsed().as_secs_f64() * 1000.0;
-                        break;
-                    }
-                    Err(_) => {}
+                if std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(timeout_secs))
+                    .is_ok()
+                {
+                    found = true;
+                    lat = start.elapsed().as_secs_f64() * 1000.0;
+                    break;
                 }
             }
             (found, lat)

@@ -41,18 +41,14 @@ pub struct RegistryEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum CapabilityLanguage {
     Rust,
     Cpp,
     Python,
     Go,
+    #[default]
     Other,
-}
-
-impl Default for CapabilityLanguage {
-    fn default() -> Self {
-        Self::Other
-    }
 }
 
 impl std::fmt::Display for CapabilityLanguage {
@@ -114,10 +110,7 @@ impl Registry {
         if versions.iter().any(|e| e.version == entry.version) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
-                format!(
-                    "{}@{} already published",
-                    entry.name, entry.version
-                ),
+                format!("{}@{} already published", entry.name, entry.version),
             ));
         }
 
@@ -201,8 +194,7 @@ impl Registry {
     }
 
     fn persist(&self) -> Result<(), std::io::Error> {
-        let json = serde_json::to_string_pretty(&self.entries)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&self.entries).map_err(std::io::Error::other)?;
         std::fs::write(&self.index_path, json)
     }
 }

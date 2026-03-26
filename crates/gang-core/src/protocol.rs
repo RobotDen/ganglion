@@ -1,6 +1,6 @@
 /// Stream protocol identifiers for Ganglion.
 /// All application-level traffic flows over libp2p streams multiplexed on the connection.
-
+///
 /// Control messages: capability deployment, invocation, presence, configuration.
 pub const PROTOCOL_CONTROL: &str = "/ganglion/control/1.0";
 

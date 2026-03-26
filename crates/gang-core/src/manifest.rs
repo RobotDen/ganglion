@@ -91,7 +91,8 @@ impl SignedManifest {
     /// Verify the signature and decode the manifest.
     pub fn verify_and_decode(&self) -> Result<ComponentManifest, ManifestError> {
         // Reconstruct public key
-        let pub_key_bytes: [u8; 32] = self.author_public_key
+        let pub_key_bytes: [u8; 32] = self
+            .author_public_key
             .as_slice()
             .try_into()
             .map_err(|_| ManifestError::InvalidSignature)?;
@@ -99,7 +100,8 @@ impl SignedManifest {
             .map_err(|_| ManifestError::InvalidSignature)?;
 
         // Reconstruct signature
-        let sig_bytes: [u8; 64] = self.signature
+        let sig_bytes: [u8; 64] = self
+            .signature
             .as_slice()
             .try_into()
             .map_err(|_| ManifestError::InvalidSignature)?;
@@ -152,8 +154,7 @@ impl SignedManifest {
 
     /// Decode from CBOR bytes.
     pub fn from_cbor(data: &[u8]) -> Result<Self, ManifestError> {
-        ciborium::from_reader(data)
-            .map_err(|e| ManifestError::DecodeFailed(e.to_string()))
+        ciborium::from_reader(data).map_err(|e| ManifestError::DecodeFailed(e.to_string()))
     }
 }
 
@@ -184,8 +185,8 @@ impl TrustStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        let json =
+            serde_json::to_string_pretty(self).map_err(|e| std::io::Error::other(e.to_string()))?;
         std::fs::write(path, json)
     }
 

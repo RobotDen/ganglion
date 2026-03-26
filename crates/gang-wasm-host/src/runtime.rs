@@ -77,9 +77,7 @@ impl From<InvocationError> for CapabilityError {
                 name: String::new(),
                 message: msg,
             },
-            InvocationError::InstantiationFailed(msg) => {
-                CapabilityError::InstantiationFailed(msg)
-            }
+            InvocationError::InstantiationFailed(msg) => CapabilityError::InstantiationFailed(msg),
             other => CapabilityError::Trapped {
                 name: String::new(),
                 message: other.to_string(),
@@ -177,22 +175,18 @@ impl ComponentRuntime {
             })?;
 
         // Look for the `run` export
-        let run_func = instance
-            .get_func(&mut store, "run")
-            .ok_or_else(|| {
-                InvocationError::InstantiationFailed(
-                    "component does not export a 'run' function".into(),
-                )
-            })?;
+        let run_func = instance.get_func(&mut store, "run").ok_or_else(|| {
+            InvocationError::InstantiationFailed(
+                "component does not export a 'run' function".into(),
+            )
+        })?;
 
         // Prepare arguments
-        let args_val: Vec<wasmtime::component::Val> = vec![
-            wasmtime::component::Val::List(
-                args.into_iter()
-                    .map(|s| wasmtime::component::Val::String(s))
-                    .collect(),
-            ),
-        ];
+        let args_val: Vec<wasmtime::component::Val> = vec![wasmtime::component::Val::List(
+            args.into_iter()
+                .map(wasmtime::component::Val::String)
+                .collect(),
+        )];
 
         // Invoke
         let mut results = vec![wasmtime::component::Val::Bool(false)]; // placeholder
@@ -201,7 +195,10 @@ impl ComponentRuntime {
             .await;
 
         let elapsed = start.elapsed();
-        let fuel_consumed = store.get_fuel().ok().map(|remaining| fuel_budget - remaining);
+        let fuel_consumed = store
+            .get_fuel()
+            .ok()
+            .map(|remaining| fuel_budget - remaining);
 
         match invoke_result {
             Ok(()) => {
@@ -234,10 +231,9 @@ impl ComponentRuntime {
     /// Validate that a component can be compiled without actually running it.
     /// Useful for pre-flight checks during `gang deploy`.
     pub fn validate_component(&self, component_bytes: &[u8]) -> Result<(), InvocationError> {
-        wasmtime::component::Component::new(self.engine.engine(), component_bytes)
-            .map_err(|e| {
-                InvocationError::InstantiationFailed(format!("component validation failed: {e}"))
-            })?;
+        wasmtime::component::Component::new(self.engine.engine(), component_bytes).map_err(
+            |e| InvocationError::InstantiationFailed(format!("component validation failed: {e}")),
+        )?;
         Ok(())
     }
 }
@@ -317,7 +313,10 @@ mod tests {
                 vec![],
             )
             .await;
-        assert!(matches!(result, Err(InvocationError::InstantiationFailed(_))));
+        assert!(matches!(
+            result,
+            Err(InvocationError::InstantiationFailed(_))
+        ));
     }
 
     #[tokio::test]

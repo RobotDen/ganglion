@@ -8,6 +8,12 @@ use gang_core::error::BrokerError;
 /// Works on Linux and macOS without requiring ROS 2.
 pub struct DiagnosticsBroker;
 
+impl Default for DiagnosticsBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiagnosticsBroker {
     pub fn new() -> Self {
         Self
@@ -23,11 +29,10 @@ impl CapabilityBroker for DiagnosticsBroker {
         match req.operation {
             BrokerOperation::SystemInfo => {
                 let info = collect_system_info();
-                let data = serde_json::to_vec(&info)
-                    .map_err(|e| BrokerError::Unavailable {
-                        broker: "diagnostics".into(),
-                        reason: e.to_string(),
-                    })?;
+                let data = serde_json::to_vec(&info).map_err(|e| BrokerError::Unavailable {
+                    broker: "diagnostics".into(),
+                    reason: e.to_string(),
+                })?;
                 let bytes_out = data.len() as u64;
                 Ok(CapabilityResponse {
                     success: true,
@@ -39,11 +44,10 @@ impl CapabilityBroker for DiagnosticsBroker {
             }
             BrokerOperation::ProcessList => {
                 let procs = collect_process_list();
-                let data = serde_json::to_vec(&procs)
-                    .map_err(|e| BrokerError::Unavailable {
-                        broker: "diagnostics".into(),
-                        reason: e.to_string(),
-                    })?;
+                let data = serde_json::to_vec(&procs).map_err(|e| BrokerError::Unavailable {
+                    broker: "diagnostics".into(),
+                    reason: e.to_string(),
+                })?;
                 let bytes_out = data.len() as u64;
                 Ok(CapabilityResponse {
                     success: true,
@@ -55,11 +59,10 @@ impl CapabilityBroker for DiagnosticsBroker {
             }
             BrokerOperation::NetworkState => {
                 let net = collect_network_state();
-                let data = serde_json::to_vec(&net)
-                    .map_err(|e| BrokerError::Unavailable {
-                        broker: "diagnostics".into(),
-                        reason: e.to_string(),
-                    })?;
+                let data = serde_json::to_vec(&net).map_err(|e| BrokerError::Unavailable {
+                    broker: "diagnostics".into(),
+                    reason: e.to_string(),
+                })?;
                 let bytes_out = data.len() as u64;
                 Ok(CapabilityResponse {
                     success: true,
@@ -140,7 +143,7 @@ fn collect_system_info() -> SystemInfo {
         cpu_count: num_cpus(),
         memory_total_bytes: memory_total(),
         memory_available_bytes: memory_available(),
-        disk_total_bytes: 0,    // Platform-specific
+        disk_total_bytes: 0,     // Platform-specific
         disk_available_bytes: 0, // Platform-specific
         ganglion_version: env!("CARGO_PKG_VERSION").into(),
     }
@@ -148,9 +151,7 @@ fn collect_system_info() -> SystemInfo {
 
 fn collect_process_list() -> Vec<ProcessInfo> {
     // Use `ps` command for cross-platform compatibility
-    let output = std::process::Command::new("ps")
-        .args(["aux"])
-        .output();
+    let output = std::process::Command::new("ps").args(["aux"]).output();
 
     match output {
         Ok(out) => {
@@ -193,8 +194,7 @@ fn collect_interfaces() -> Vec<InterfaceInfo> {
             .args(["addr", "show"])
             .output()
     } else {
-        std::process::Command::new("ifconfig")
-            .output()
+        std::process::Command::new("ifconfig").output()
     };
 
     match output {
@@ -233,11 +233,7 @@ fn parse_interfaces(text: &str) -> Vec<InterfaceInfo> {
         } else {
             let trimmed = line.trim();
             if trimmed.starts_with("inet ") || trimmed.starts_with("inet6 ") {
-                let addr = trimmed
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("")
-                    .to_string();
+                let addr = trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
                 current_addrs.push(addr);
             }
         }
@@ -257,13 +253,9 @@ fn parse_interfaces(text: &str) -> Vec<InterfaceInfo> {
 
 fn collect_connections() -> Vec<ConnectionInfo> {
     let output = if cfg!(target_os = "linux") {
-        std::process::Command::new("ss")
-            .args(["-tuln"])
-            .output()
+        std::process::Command::new("ss").args(["-tuln"]).output()
     } else {
-        std::process::Command::new("netstat")
-            .args(["-an"])
-            .output()
+        std::process::Command::new("netstat").args(["-an"]).output()
     };
 
     match output {
@@ -296,9 +288,7 @@ fn os_version() -> String {
             .args(["-productVersion"])
             .output()
     } else {
-        std::process::Command::new("uname")
-            .args(["-r"])
-            .output()
+        std::process::Command::new("uname").args(["-r"]).output()
     };
 
     output

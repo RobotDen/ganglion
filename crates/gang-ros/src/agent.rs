@@ -19,6 +19,7 @@ use crate::logs::LogStreamBroker;
 
 /// The robot agent — the central process running on a deployed robot.
 /// Manages installed capabilities, brokers, policy enforcement, and audit logging.
+#[allow(dead_code)] // Fields used as agent runtime is fleshed out
 pub struct RobotAgent {
     /// This robot's identity.
     keypair: Keypair,
@@ -87,7 +88,10 @@ impl RobotAgent {
         // Load policy
         let policy = if let Some(ref path) = config.policy_path {
             Policy::load(path).unwrap_or_else(|e| {
-                warn!("Failed to load policy from {}: {e}, using permissive", path.display());
+                warn!(
+                    "Failed to load policy from {}: {e}, using permissive",
+                    path.display()
+                );
                 Policy::permissive()
             })
         } else {
@@ -164,7 +168,8 @@ impl RobotAgent {
         }
 
         // 3. Evaluate policy
-        self.policy.evaluate(&manifest.declared_capabilities, deployer)?;
+        self.policy
+            .evaluate(&manifest.declared_capabilities, deployer)?;
 
         // 4. Store component and manifest
         let cap_dir = self.capabilities_dir.join(&manifest.name);
@@ -212,9 +217,9 @@ impl RobotAgent {
         operator_peer_id: &PeerId,
     ) -> Result<Vec<u8>, anyhow::Error> {
         let caps = self.capabilities.read().await;
-        let cap = caps.get(name).ok_or_else(|| {
-            CapabilityError::NotFound(name.into())
-        })?;
+        let cap = caps
+            .get(name)
+            .ok_or_else(|| CapabilityError::NotFound(name.into()))?;
 
         let started_at = chrono::Utc::now();
         info!(name = %name, operator = %operator_peer_id, "Invoking capability");

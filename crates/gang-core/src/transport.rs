@@ -113,11 +113,8 @@ pub trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 impl<T: AsyncRead + AsyncWrite> AsyncReadWrite for T {}
 
 /// Handler for incoming streams on a protocol.
-pub type StreamHandler = Box<
-    dyn Fn(GanglionStream) -> Pin<Box<dyn futures::Future<Output = ()> + Send>>
-        + Send
-        + Sync,
->;
+pub type StreamHandler =
+    Box<dyn Fn(GanglionStream) -> Pin<Box<dyn futures::Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Presence information announced by a robot agent.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -133,20 +130,13 @@ pub struct PresenceInfo {
 #[derive(Debug)]
 pub enum TransportEvent {
     /// A new peer connected.
-    PeerConnected {
-        peer_id: PeerId,
-        via_relay: bool,
-    },
+    PeerConnected { peer_id: PeerId, via_relay: bool },
     /// A peer disconnected.
-    PeerDisconnected {
-        peer_id: PeerId,
-    },
+    PeerDisconnected { peer_id: PeerId },
     /// Received a presence announcement.
     PresenceReceived(PresenceInfo),
     /// Connection upgraded from relay to direct.
-    DirectUpgrade {
-        peer_id: PeerId,
-    },
+    DirectUpgrade { peer_id: PeerId },
 }
 
 /// The core transport adapter trait. Protocol-agnostic core, opinionated defaults.

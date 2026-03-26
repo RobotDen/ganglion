@@ -4,7 +4,7 @@ use crate::error::BrokerError;
 
 /// Brokers mediate access between WASM capabilities and privileged resources.
 /// Each broker enforces policy and produces audit-ready I/O stats.
-
+///
 /// A request from a WASM capability to a Layer 3 broker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityRequest {
@@ -83,9 +83,16 @@ pub enum BrokerOperation {
     /// Ping a host and return latency.
     NetPing { host: String, count: u32 },
     /// DNS lookup.
-    NetDnsLookup { hostname: String, record_type: String },
+    NetDnsLookup {
+        hostname: String,
+        record_type: String,
+    },
     /// TCP port check.
-    NetPortCheck { host: String, port: u16, timeout_secs: u64 },
+    NetPortCheck {
+        host: String,
+        port: u16,
+        timeout_secs: u64,
+    },
     /// Traceroute to a host.
     NetTraceroute { host: String, max_hops: u32 },
 
@@ -98,9 +105,7 @@ pub enum BrokerOperation {
         tags: Vec<(String, String)>,
     },
     /// Emit a batch of metrics.
-    MetricEmitBatch {
-        metrics: Vec<MetricPoint>,
-    },
+    MetricEmitBatch { metrics: Vec<MetricPoint> },
 }
 
 /// A single metric data point for batch emission.

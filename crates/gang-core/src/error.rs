@@ -54,10 +54,7 @@ pub enum PolicyError {
     CapabilityDenied { capability: String },
 
     #[error("pattern {pattern} exceeds policy for {capability}")]
-    PatternExceedsPolicy {
-        capability: String,
-        pattern: String,
-    },
+    PatternExceedsPolicy { capability: String, pattern: String },
 
     #[error("peer {peer} not authorized to deploy capabilities")]
     PeerNotAuthorized { peer: String },

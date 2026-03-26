@@ -13,7 +13,10 @@ pub async fn identity_show() -> anyhow::Result<()> {
 
     let keypair = gang_core::identity::Keypair::load(&key_path)?;
     println!("Peer ID:    {}", keypair.peer_id());
-    println!("Public key: {}", hex::encode(keypair.public_key().as_bytes()));
+    println!(
+        "Public key: {}",
+        hex::encode(keypair.public_key().as_bytes())
+    );
     println!("Key file:   {}", key_path.display());
     Ok(())
 }
@@ -65,15 +68,13 @@ pub async fn sign(
     let component_bytes = std::fs::read(wasm_path)?;
     let component_hash = blake3::hash(&component_bytes).to_hex().to_string();
 
-    let name = name
-        .map(String::from)
-        .unwrap_or_else(|| {
-            wasm_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
+    let name = name.map(String::from).unwrap_or_else(|| {
+        wasm_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    });
 
     let manifest = ComponentManifest {
         schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
@@ -199,9 +200,8 @@ pub async fn deploy(
     };
 
     let agent = RobotAgent::new(config)?;
-    let operator_kp = gang_core::identity::Keypair::load_or_generate(
-        &gang_core::identity::default_key_path(),
-    )?;
+    let operator_kp =
+        gang_core::identity::Keypair::load_or_generate(&gang_core::identity::default_key_path())?;
 
     let name = agent
         .deploy_capability(&manifest_cbor, &component_bytes, &operator_kp.peer_id())
@@ -261,9 +261,8 @@ pub async fn run(
     };
 
     let agent = RobotAgent::new(config)?;
-    let operator_kp = gang_core::identity::Keypair::load_or_generate(
-        &gang_core::identity::default_key_path(),
-    )?;
+    let operator_kp =
+        gang_core::identity::Keypair::load_or_generate(&gang_core::identity::default_key_path())?;
 
     let output = agent
         .invoke_capability(cap_name, args, &operator_kp.peer_id())
@@ -287,7 +286,6 @@ pub async fn run(
 /// `gang caps` — list installed capabilities.
 pub async fn caps(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
-    
 
     let data_dir = PathBuf::from(format!("/tmp/gang-agent-{robot}"));
     if !data_dir.exists() {
@@ -333,9 +331,7 @@ pub async fn caps(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
                 for cap in &caps {
                     println!(
                         "  {} v{} (by {})",
-                        cap.name,
-                        cap.version,
-                        cap.author_peer_id
+                        cap.name, cap.version, cap.author_peer_id
                     );
                     for group in &cap.declared_capabilities {
                         println!("    - {}", group.qualified_name());
@@ -433,10 +429,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
     println!("--- Installed capabilities ---");
     let caps = agent.list_capabilities().await;
     for cap in &caps {
-        println!(
-            "  {} v{} ({})",
-            cap.name, cap.version, cap.author_peer_id
-        );
+        println!("  {} v{} ({})", cap.name, cap.version, cap.author_peer_id);
     }
     println!();
 
@@ -459,10 +452,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
 
     println!();
     println!("--- Audit log ---");
-    let audit_log = gang_core::audit::AuditLog::new(
-        data_dir.join("audit.log"),
-        50 * 1024 * 1024,
-    );
+    let audit_log = gang_core::audit::AuditLog::new(data_dir.join("audit.log"), 50 * 1024 * 1024);
     let records = audit_log.read_all()?;
     for record in &records {
         println!(
@@ -487,7 +477,12 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
 
 /// `gang test-archetype`
 pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
-    let valid = ["open-warehouse", "nat-office", "enterprise-dmz", "mobile-cgnat"];
+    let valid = [
+        "open-warehouse",
+        "nat-office",
+        "enterprise-dmz",
+        "mobile-cgnat",
+    ];
     if !valid.contains(&archetype) {
         anyhow::bail!(
             "Unknown archetype: {archetype}\nValid archetypes: {}",
@@ -496,9 +491,7 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     }
 
     // Check Docker
-    let docker_check = std::process::Command::new("docker")
-        .args(["info"])
-        .output();
+    let docker_check = std::process::Command::new("docker").args(["info"]).output();
 
     match docker_check {
         Ok(out) if out.status.success() => {}
@@ -561,8 +554,10 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     let build_status = std::process::Command::new("docker")
         .args([
             "compose",
-            "-p", &project_name,
-            "-f", &compose_file.to_string_lossy(),
+            "-p",
+            &project_name,
+            "-f",
+            &compose_file.to_string_lossy(),
             "build",
         ])
         .status()?;
@@ -577,9 +572,12 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     let up_status = std::process::Command::new("docker")
         .args([
             "compose",
-            "-p", &project_name,
-            "-f", &compose_file.to_string_lossy(),
-            "up", "-d",
+            "-p",
+            &project_name,
+            "-f",
+            &compose_file.to_string_lossy(),
+            "up",
+            "-d",
         ])
         .status()?;
 
@@ -596,8 +594,10 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     let _ = std::process::Command::new("docker")
         .args([
             "compose",
-            "-p", &project_name,
-            "-f", &compose_file.to_string_lossy(),
+            "-p",
+            &project_name,
+            "-f",
+            &compose_file.to_string_lossy(),
             "ps",
         ])
         .status();
@@ -608,9 +608,13 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     let _ = std::process::Command::new("docker")
         .args([
             "compose",
-            "-p", &project_name,
-            "-f", &compose_file.to_string_lossy(),
-            "logs", "--tail", "20",
+            "-p",
+            &project_name,
+            "-f",
+            &compose_file.to_string_lossy(),
+            "logs",
+            "--tail",
+            "20",
         ])
         .status();
 
@@ -620,14 +624,20 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     println!("============================================");
     println!();
     println!("Inspect manually:");
-    println!("  docker compose -p {project_name} -f {} exec robot bash",
-             compose_file.display());
-    println!("  docker compose -p {project_name} -f {} logs -f",
-             compose_file.display());
+    println!(
+        "  docker compose -p {project_name} -f {} exec robot bash",
+        compose_file.display()
+    );
+    println!(
+        "  docker compose -p {project_name} -f {} logs -f",
+        compose_file.display()
+    );
     println!();
     println!("Tear down:");
-    println!("  docker compose -p {project_name} -f {} down -v",
-             compose_file.display());
+    println!(
+        "  docker compose -p {project_name} -f {} down -v",
+        compose_file.display()
+    );
 
     Ok(())
 }
@@ -655,10 +665,7 @@ fn print_diagnostics(val: &serde_json::Value) {
             println!("  Hostname:  {h}");
         }
         if let Some(os) = sys.get("os").and_then(|v| v.as_str()) {
-            let ver = sys
-                .get("os_version")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let ver = sys.get("os_version").and_then(|v| v.as_str()).unwrap_or("");
             println!("  OS:        {os} {ver}");
         }
         if let Some(arch) = sys.get("arch").and_then(|v| v.as_str()) {
@@ -714,15 +721,11 @@ fn print_diagnostics(val: &serde_json::Value) {
         // Show top 5 by CPU
         let mut sorted: Vec<&serde_json::Value> = procs.iter().collect();
         sorted.sort_by(|a, b| {
-            let cpu_a = a
-                .get("cpu_percent")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            let cpu_b = b
-                .get("cpu_percent")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
-            cpu_b.partial_cmp(&cpu_a).unwrap_or(std::cmp::Ordering::Equal)
+            let cpu_a = a.get("cpu_percent").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let cpu_b = b.get("cpu_percent").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            cpu_b
+                .partial_cmp(&cpu_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         for proc in sorted.iter().take(5) {
             let name = proc.get("name").and_then(|v| v.as_str()).unwrap_or("?");
@@ -750,10 +753,7 @@ fn print_diagnostics(val: &serde_json::Value) {
 }
 
 /// `gang diagnose` — detect network archetype and recommend transport config.
-pub async fn diagnose(
-    robot: Option<&str>,
-    format: &crate::OutputFormat,
-) -> anyhow::Result<()> {
+pub async fn diagnose(robot: Option<&str>, format: &crate::OutputFormat) -> anyhow::Result<()> {
     use gang_ros::archetype;
 
     if let Some(robot_name) = robot {
@@ -777,8 +777,11 @@ pub async fn diagnose(
             println!("  Network Archetype Detection");
             println!("============================================");
             println!();
-            println!("  Detected:    {} ({:.0}% confidence)",
-                     result.archetype, result.confidence * 100.0);
+            println!(
+                "  Detected:    {} ({:.0}% confidence)",
+                result.archetype,
+                result.confidence * 100.0
+            );
             println!();
 
             println!("Probes:");
@@ -799,10 +802,7 @@ pub async fn diagnose(
 }
 
 /// `gang transport-stats` — show per-transport statistics for a peer.
-pub async fn transport_stats(
-    robot: &str,
-    format: &crate::OutputFormat,
-) -> anyhow::Result<()> {
+pub async fn transport_stats(robot: &str, format: &crate::OutputFormat) -> anyhow::Result<()> {
     // For now, show simulated stats since we don't have a live connection.
     // In full implementation, this queries the transport adapter for the
     // connected peer's stats.
@@ -835,18 +835,26 @@ pub async fn transport_stats(
             println!("  Transport:       {}", example_stats.transport);
             println!("  Via relay:       {}", example_stats.via_relay);
             println!("  Connect time:    {}ms", example_stats.connect_time_ms);
-            println!("  Messages:        {} sent, {} received",
-                     example_stats.messages_sent, example_stats.messages_received);
-            println!("  Bytes:           {} sent, {} received",
-                     format_bytes(example_stats.bytes_sent),
-                     format_bytes(example_stats.bytes_received));
+            println!(
+                "  Messages:        {} sent, {} received",
+                example_stats.messages_sent, example_stats.messages_received
+            );
+            println!(
+                "  Bytes:           {} sent, {} received",
+                format_bytes(example_stats.bytes_sent),
+                format_bytes(example_stats.bytes_received)
+            );
             if let Some(rtt) = example_stats.last_rtt_ms {
                 println!("  Last RTT:        {rtt}ms");
             }
-            println!("  DCUtR:           attempted={}, succeeded={}",
-                     example_stats.dcutr_attempted, example_stats.dcutr_succeeded);
-            println!("  Uptime:          {}",
-                     format_duration(example_stats.uptime_secs));
+            println!(
+                "  DCUtR:           attempted={}, succeeded={}",
+                example_stats.dcutr_attempted, example_stats.dcutr_succeeded
+            );
+            println!(
+                "  Uptime:          {}",
+                format_duration(example_stats.uptime_secs)
+            );
             println!("  Reconnections:   {}", example_stats.reconnections);
         }
     }
@@ -878,7 +886,7 @@ pub async fn fetch_artifact(
         ..Default::default()
     })?;
 
-    let cid = Cid::from_str(cid_str);
+    let cid = Cid::parse(cid_str);
     if !store.contains(&cid) {
         anyhow::bail!(
             "Artifact {cid_str} not found in local store.\n\
@@ -921,9 +929,7 @@ pub async fn push_artifact(
     })?;
 
     let data = std::fs::read(path)?;
-    let filename = Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str());
+    let filename = Path::new(path).file_name().and_then(|n| n.to_str());
 
     let cid = store.store(&data, filename, None, content_type)?;
 
@@ -970,9 +976,11 @@ pub async fn list_artifacts(format: &crate::OutputFormat) -> anyhow::Result<()> 
             if artifacts.is_empty() {
                 println!("No artifacts stored locally.");
             } else {
-                println!("Stored artifacts ({}, {}):",
-                         artifacts.len(),
-                         format_bytes(store.total_bytes()));
+                println!(
+                    "Stored artifacts ({}, {}):",
+                    artifacts.len(),
+                    format_bytes(store.total_bytes())
+                );
                 println!();
                 for meta in &artifacts {
                     let name = meta.filename.as_deref().unwrap_or("(unnamed)");
@@ -1024,9 +1032,7 @@ pub async fn capability_scaffold(
         "cpp" | "c++" => scaffold_cpp(name, &project_dir)?,
         "python" | "py" => scaffold_python(name, &project_dir)?,
         "go" | "golang" => scaffold_go(name, &project_dir)?,
-        _ => anyhow::bail!(
-            "unsupported language: {language}. Supported: rust, cpp, python, go"
-        ),
+        _ => anyhow::bail!("unsupported language: {language}. Supported: rust, cpp, python, go"),
     }
 
     // Copy WIT interface to project
@@ -1038,7 +1044,11 @@ pub async fn capability_scaffold(
          See: https://github.com/tafy-labs/ganglion/tree/main/crates/gang-wasm-host/wit\n",
     )?;
 
-    println!("Scaffolded {} capability at {}", language, project_dir.display());
+    println!(
+        "Scaffolded {} capability at {}",
+        language,
+        project_dir.display()
+    );
     println!("\nNext steps:");
     println!("  1. Copy ganglion.wit into {}/wit/", name);
     println!("  2. Implement your capability logic");
@@ -1323,7 +1333,12 @@ pub async fn registry_search(query: &str, _format: &OutputFormat) -> anyhow::Res
     for r in &results {
         println!("  {} v{}", r.name, r.latest_version);
         println!("    {}", r.description);
-        println!("    Language: {}  Author: {}...{}", r.language, &r.author[..8.min(r.author.len())], &r.author[r.author.len().saturating_sub(4)..]);
+        println!(
+            "    Language: {}  Author: {}...{}",
+            r.language,
+            &r.author[..8.min(r.author.len())],
+            &r.author[r.author.len().saturating_sub(4)..]
+        );
         if !r.tags.is_empty() {
             println!("    Tags: {}", r.tags.join(", "));
         }
@@ -1333,11 +1348,16 @@ pub async fn registry_search(query: &str, _format: &OutputFormat) -> anyhow::Res
 }
 
 /// `gang registry install <name>`
-pub async fn registry_install(name: &str, version: Option<&str>, _format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn registry_install(
+    name: &str,
+    version: Option<&str>,
+    _format: &OutputFormat,
+) -> anyhow::Result<()> {
     let reg = gang_core::registry::Registry::open(&registry_dir())?;
 
     let entry = if let Some(ver) = version {
-        reg.get(name).and_then(|versions| versions.iter().find(|e| e.version == ver))
+        reg.get(name)
+            .and_then(|versions| versions.iter().find(|e| e.version == ver))
     } else {
         reg.get_latest(name)
     };
@@ -1350,7 +1370,10 @@ pub async fn registry_install(name: &str, version: Option<&str>, _format: &Outpu
             println!("  Language:       {}", entry.language);
             // Actual fetch would use the artifact store to retrieve by CID
             println!("\nNote: network fetch not yet implemented.");
-            println!("Use `gang fetch {}` to retrieve the component.", entry.component_cid);
+            println!(
+                "Use `gang fetch {}` to retrieve the component.",
+                entry.component_cid
+            );
         }
         None => {
             let msg = if let Some(ver) = version {
@@ -1454,7 +1477,10 @@ pub async fn registry_info(name: &str, _format: &OutputFormat) -> anyhow::Result
                 println!("    Published:     {}", entry.published_at);
                 println!("    Component CID: {}", entry.component_cid);
                 if !entry.declared_capabilities.is_empty() {
-                    println!("    Capabilities:  {}", entry.declared_capabilities.join(", "));
+                    println!(
+                        "    Capabilities:  {}",
+                        entry.declared_capabilities.join(", ")
+                    );
                 }
                 if !entry.tags.is_empty() {
                     println!("    Tags:          {}", entry.tags.join(", "));

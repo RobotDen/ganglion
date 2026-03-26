@@ -38,7 +38,9 @@ impl CapabilityHost {
 
     /// Check whether a capability group is declared by this component.
     pub fn is_declared(&self, group_name: &str) -> bool {
-        self.declared_capabilities.iter().any(|g| g.name() == group_name)
+        self.declared_capabilities
+            .iter()
+            .any(|g| g.name() == group_name)
     }
 
     /// Route a broker operation to the appropriate broker.
@@ -64,10 +66,7 @@ impl CapabilityHost {
             operation,
         };
 
-        broker
-            .handle_request(req)
-            .await
-            .map_err(|e| e.to_string())
+        broker.handle_request(req).await.map_err(|e| e.to_string())
     }
 
     /// Get a reference to a broker by capability group name.
@@ -82,7 +81,10 @@ impl CapabilityHost {
 
     /// List all declared capability groups.
     pub fn declared_groups(&self) -> Vec<String> {
-        self.declared_capabilities.iter().map(|g| g.qualified_name()).collect()
+        self.declared_capabilities
+            .iter()
+            .map(|g| g.qualified_name())
+            .collect()
     }
 }
 
@@ -110,6 +112,10 @@ mod tests {
     #[test]
     fn registered_groups_lists_brokers() {
         let brokers: HashMap<String, Arc<dyn CapabilityBroker>> = HashMap::new();
-        assert!(CapabilityHost::new(brokers, vec![]).registered_groups().is_empty());
+        assert!(
+            CapabilityHost::new(brokers, vec![])
+                .registered_groups()
+                .is_empty()
+        );
     }
 }

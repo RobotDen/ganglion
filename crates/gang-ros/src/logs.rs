@@ -45,11 +45,9 @@ impl CapabilityBroker for LogStreamBroker {
         match req.operation {
             BrokerOperation::LogSourceList => {
                 let sources = enumerate_log_sources();
-                let data = serde_json::to_vec(&sources).map_err(|e| {
-                    BrokerError::Unavailable {
-                        broker: "logs".into(),
-                        reason: e.to_string(),
-                    }
+                let data = serde_json::to_vec(&sources).map_err(|e| BrokerError::Unavailable {
+                    broker: "logs".into(),
+                    reason: e.to_string(),
                 })?;
                 let bytes_out = data.len() as u64;
                 Ok(CapabilityResponse {
@@ -67,11 +65,9 @@ impl CapabilityBroker for LogStreamBroker {
                 self.check_source_allowed(source)?;
 
                 let lines = read_log_source(source, pattern);
-                let data = serde_json::to_vec(&lines).map_err(|e| {
-                    BrokerError::Unavailable {
-                        broker: "logs".into(),
-                        reason: e.to_string(),
-                    }
+                let data = serde_json::to_vec(&lines).map_err(|e| BrokerError::Unavailable {
+                    broker: "logs".into(),
+                    reason: e.to_string(),
                 })?;
                 let bytes_out = data.len() as u64;
                 Ok(CapabilityResponse {
@@ -135,7 +131,11 @@ fn enumerate_log_sources() -> Vec<LogSource> {
     }
 
     // Check for common log files
-    for path in &["/var/log/syslog", "/var/log/messages", "/var/log/system.log"] {
+    for path in &[
+        "/var/log/syslog",
+        "/var/log/messages",
+        "/var/log/system.log",
+    ] {
         if std::path::Path::new(path).exists() {
             sources.push(LogSource {
                 name: path.to_string(),

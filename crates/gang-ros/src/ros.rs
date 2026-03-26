@@ -78,11 +78,9 @@ impl CapabilityBroker for RosInterfaceBroker {
                     nodes,
                 };
 
-                let data = serde_json::to_vec(&listing).map_err(|e| {
-                    BrokerError::Unavailable {
-                        broker: "ros".into(),
-                        reason: e.to_string(),
-                    }
+                let data = serde_json::to_vec(&listing).map_err(|e| BrokerError::Unavailable {
+                    broker: "ros".into(),
+                    reason: e.to_string(),
                 })?;
                 let bytes_out = data.len() as u64;
                 Ok(CapabilityResponse {
@@ -106,11 +104,9 @@ impl CapabilityBroker for RosInterfaceBroker {
                 // In full implementation: subscribe via rosbridge WebSocket
                 // and stream messages back. For now, return current topic info.
                 let info = ros2_topic_info(topic);
-                let data = serde_json::to_vec(&info).map_err(|e| {
-                    BrokerError::Unavailable {
-                        broker: "ros".into(),
-                        reason: e.to_string(),
-                    }
+                let data = serde_json::to_vec(&info).map_err(|e| BrokerError::Unavailable {
+                    broker: "ros".into(),
+                    reason: e.to_string(),
                 })?;
                 let bytes_out = data.len() as u64;
                 Ok(CapabilityResponse {

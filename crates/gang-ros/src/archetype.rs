@@ -139,9 +139,7 @@ fn probe_nat_status() -> ProbeResult {
             .args(["route", "show", "default"])
             .output()
     } else {
-        std::process::Command::new("netstat")
-            .args(["-rn"])
-            .output()
+        std::process::Command::new("netstat").args(["-rn"]).output()
     };
 
     match output {
@@ -183,8 +181,7 @@ fn probe_multicast() -> ProbeResult {
             .args(["link", "show"])
             .output()
     } else {
-        std::process::Command::new("ifconfig")
-            .output()
+        std::process::Command::new("ifconfig").output()
     };
 
     match output {
@@ -260,8 +257,7 @@ fn probe_symmetric_nat() -> ProbeResult {
             .args(["addr", "show"])
             .output()
     } else {
-        std::process::Command::new("ifconfig")
-            .output()
+        std::process::Command::new("ifconfig").output()
     };
 
     match output {
@@ -301,16 +297,31 @@ fn probe_symmetric_nat() -> ProbeResult {
 
 /// Classify the archetype based on probe results.
 fn classify_archetype(probes: &[ProbeResult]) -> (NetworkArchetype, f64) {
-    let internet = probes.iter().find(|p| p.probe_name == "internet_connectivity")
-        .map(|p| p.success).unwrap_or(false);
-    let nat = probes.iter().find(|p| p.probe_name == "nat_status")
-        .map(|p| p.success).unwrap_or(false);
-    let multicast = probes.iter().find(|p| p.probe_name == "multicast")
-        .map(|p| p.success).unwrap_or(false);
-    let ports_open = probes.iter().find(|p| p.probe_name == "outbound_ports")
-        .map(|p| p.success).unwrap_or(false);
-    let cgnat = probes.iter().find(|p| p.probe_name == "symmetric_nat")
-        .map(|p| p.success).unwrap_or(false);
+    let internet = probes
+        .iter()
+        .find(|p| p.probe_name == "internet_connectivity")
+        .map(|p| p.success)
+        .unwrap_or(false);
+    let nat = probes
+        .iter()
+        .find(|p| p.probe_name == "nat_status")
+        .map(|p| p.success)
+        .unwrap_or(false);
+    let multicast = probes
+        .iter()
+        .find(|p| p.probe_name == "multicast")
+        .map(|p| p.success)
+        .unwrap_or(false);
+    let ports_open = probes
+        .iter()
+        .find(|p| p.probe_name == "outbound_ports")
+        .map(|p| p.success)
+        .unwrap_or(false);
+    let cgnat = probes
+        .iter()
+        .find(|p| p.probe_name == "symmetric_nat")
+        .map(|p| p.success)
+        .unwrap_or(false);
 
     // Classification logic
     if !internet {
@@ -342,10 +353,7 @@ fn classify_archetype(probes: &[ProbeResult]) -> (NetworkArchetype, f64) {
 }
 
 /// Generate transport recommendations based on the detected archetype.
-fn generate_recommendations(
-    archetype: &NetworkArchetype,
-    _probes: &[ProbeResult],
-) -> Vec<String> {
+fn generate_recommendations(archetype: &NetworkArchetype, _probes: &[ProbeResult]) -> Vec<String> {
     match archetype {
         NetworkArchetype::OpenWarehouse => vec![
             "Direct QUIC connection recommended — lowest latency".into(),
@@ -384,11 +392,31 @@ mod tests {
     #[test]
     fn classify_no_internet() {
         let probes = vec![
-            ProbeResult { probe_name: "internet_connectivity".into(), success: false, detail: String::new() },
-            ProbeResult { probe_name: "nat_status".into(), success: false, detail: String::new() },
-            ProbeResult { probe_name: "multicast".into(), success: false, detail: String::new() },
-            ProbeResult { probe_name: "outbound_ports".into(), success: false, detail: String::new() },
-            ProbeResult { probe_name: "symmetric_nat".into(), success: false, detail: String::new() },
+            ProbeResult {
+                probe_name: "internet_connectivity".into(),
+                success: false,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "nat_status".into(),
+                success: false,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "multicast".into(),
+                success: false,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "outbound_ports".into(),
+                success: false,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "symmetric_nat".into(),
+                success: false,
+                detail: String::new(),
+            },
         ];
         let (archetype, _) = classify_archetype(&probes);
         assert_eq!(archetype, NetworkArchetype::RegulatedFacility);
@@ -397,11 +425,31 @@ mod tests {
     #[test]
     fn classify_cgnat() {
         let probes = vec![
-            ProbeResult { probe_name: "internet_connectivity".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "nat_status".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "multicast".into(), success: false, detail: String::new() },
-            ProbeResult { probe_name: "outbound_ports".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "symmetric_nat".into(), success: true, detail: String::new() },
+            ProbeResult {
+                probe_name: "internet_connectivity".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "nat_status".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "multicast".into(),
+                success: false,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "outbound_ports".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "symmetric_nat".into(),
+                success: true,
+                detail: String::new(),
+            },
         ];
         let (archetype, _) = classify_archetype(&probes);
         assert_eq!(archetype, NetworkArchetype::MobileCgnat);
@@ -410,11 +458,31 @@ mod tests {
     #[test]
     fn classify_enterprise_dmz() {
         let probes = vec![
-            ProbeResult { probe_name: "internet_connectivity".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "nat_status".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "multicast".into(), success: false, detail: String::new() },
-            ProbeResult { probe_name: "outbound_ports".into(), success: false, detail: String::new() },
-            ProbeResult { probe_name: "symmetric_nat".into(), success: false, detail: String::new() },
+            ProbeResult {
+                probe_name: "internet_connectivity".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "nat_status".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "multicast".into(),
+                success: false,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "outbound_ports".into(),
+                success: false,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "symmetric_nat".into(),
+                success: false,
+                detail: String::new(),
+            },
         ];
         let (archetype, _) = classify_archetype(&probes);
         assert_eq!(archetype, NetworkArchetype::EnterpriseDmz);
@@ -423,11 +491,31 @@ mod tests {
     #[test]
     fn classify_open_warehouse() {
         let probes = vec![
-            ProbeResult { probe_name: "internet_connectivity".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "nat_status".into(), success: false, detail: String::new() },
-            ProbeResult { probe_name: "multicast".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "outbound_ports".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "symmetric_nat".into(), success: false, detail: String::new() },
+            ProbeResult {
+                probe_name: "internet_connectivity".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "nat_status".into(),
+                success: false,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "multicast".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "outbound_ports".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "symmetric_nat".into(),
+                success: false,
+                detail: String::new(),
+            },
         ];
         let (archetype, _) = classify_archetype(&probes);
         assert_eq!(archetype, NetworkArchetype::OpenWarehouse);
@@ -436,11 +524,31 @@ mod tests {
     #[test]
     fn classify_nat_office() {
         let probes = vec![
-            ProbeResult { probe_name: "internet_connectivity".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "nat_status".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "multicast".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "outbound_ports".into(), success: true, detail: String::new() },
-            ProbeResult { probe_name: "symmetric_nat".into(), success: false, detail: String::new() },
+            ProbeResult {
+                probe_name: "internet_connectivity".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "nat_status".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "multicast".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "outbound_ports".into(),
+                success: true,
+                detail: String::new(),
+            },
+            ProbeResult {
+                probe_name: "symmetric_nat".into(),
+                success: false,
+                detail: String::new(),
+            },
         ];
         let (archetype, _) = classify_archetype(&probes);
         assert_eq!(archetype, NetworkArchetype::NatOffice);
@@ -448,9 +556,15 @@ mod tests {
 
     #[test]
     fn archetype_display() {
-        assert_eq!(NetworkArchetype::OpenWarehouse.to_string(), "open-warehouse");
+        assert_eq!(
+            NetworkArchetype::OpenWarehouse.to_string(),
+            "open-warehouse"
+        );
         assert_eq!(NetworkArchetype::MobileCgnat.to_string(), "mobile-cgnat");
-        assert_eq!(NetworkArchetype::EnterpriseDmz.to_string(), "enterprise-dmz");
+        assert_eq!(
+            NetworkArchetype::EnterpriseDmz.to_string(),
+            "enterprise-dmz"
+        );
     }
 
     #[test]
