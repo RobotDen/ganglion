@@ -1,22 +1,62 @@
 # Validation results
 
-Test harness results from running Ganglion across four simulated network archetypes.
+Test results and validation status for Ganglion v0.4.0.
 
 ## Test environment
 
-- **Host:** macOS / Linux with Docker
-- **Ganglion version:** v0.1.0-dev
+- **Host:** macOS / Linux
+- **Ganglion version:** v0.4.0
 - **Rust:** 1.85+
-- **Base image:** debian:bookworm-slim with iproute2, iptables, networking tools
+- **CI:** GitHub Actions (ubuntu-latest + macos-latest matrix)
 
-## Unit test coverage
+## Unit test summary
 
-42 tests across all crates, all passing:
+126 tests across 9 crates, all passing:
 
 | Crate | Tests | Coverage areas |
 |-------|-------|---------------|
-| gang-core | 23 | Identity (keypair gen, persist, sign/verify, registry), messages (CBOR framing, varint), manifests (sign, verify, tamper detection, hash verification), policy (default-deny, patterns, peer auth), audit (write/read, rotation) |
-| gang-ros | 19 | Diagnostics broker (system info, network, processes), filesystem broker (read/write/list/stat, pattern gating, symlink jail), log stream broker (source enumeration, pattern filtering), robot agent (deploy, invoke, trust verification) |
+| gang-core | 45 | Identity (keypair gen, persist, sign/verify, registry), messages (CBOR framing, varint), manifests (sign, verify, tamper detection, hash verification, v2 fields, schema version), policy (default-deny, patterns, peer auth, TOML roundtrip, process/network/metrics groups), audit (write/read, rotation), artifacts (CID determinism, dedup, chunking, LRU eviction, persist/reload), registry (publish, search, tags, versions, persist/reload, remove) |
+| gang-ros | 46 | Diagnostics broker (system info, network, processes), filesystem broker (read/write/list/stat, pattern gating, symlink jail), log stream broker (source enumeration, pattern filtering), robot agent (deploy, invoke, trust verification), archetype detection (classify all 5 archetypes, display, recommendations), process broker (allowlist exact/glob/wildcard, spawn echo, denied command, handle request, unsupported op), network probe broker (DNS lookup, port check, traceroute, handle request, unsupported op), metrics broker (emit, batch, ring buffer eviction, drain, unsupported op) |
+| gang-wasm-host | 7 | WIT interface parsing, component runtime setup, fuel metering |
+| gang-libp2p | 0 | Integration-tested via test-harness scenarios |
+| gang-cli | 0 | Integration-tested via `gang demo` and manual CLI exercises |
+| gang-capability-diagnostics | 0 | WIP — reference capability |
+| gang-capability-param-inspect | 10 | Snapshot construction, diff (added/removed/changed), empty snapshots, identical snapshots, format output, mixed types, nested paths |
+| gang-capability-diagnostic-bundle | 8 | Bundle construction, system section, journal section, network section, ROS graph section, health analysis (memory/disk/CPU/systemd), severity ordering, report formatting |
+| gang-capability-network-archetype | 10 | Probe construction, archetype classification (all 5 types), connectivity scoring (all pass, partial, all fail), recommendation generation, report formatting |
+
+### Test breakdown by version
+
+| Version | Tests added | Running total |
+|---------|------------|---------------|
+| v0.1.0 | 52 | 52 |
+| v0.2.0 | 8 | 60 |
+| v0.3.0 | 10 | 70 |
+| v0.4.0 | 56 | 126 |
+
+## CI pipeline
+
+The GitHub Actions CI workflow runs on every push and pull request to `main`:
+
+| Job | What it checks | Matrix |
+|-----|---------------|--------|
+| Check | `cargo check --all-targets` | ubuntu-latest |
+| Format | `cargo fmt --check` | ubuntu-latest |
+| Clippy | `cargo clippy --all-targets` with `RUSTFLAGS="-Dwarnings"` | ubuntu-latest |
+| Test | `cargo test` | ubuntu-latest, macos-latest |
+| Documentation | `cargo doc --no-deps` with `RUSTDOCFLAGS="-Dwarnings"` | ubuntu-latest |
+
+All jobs must pass before merging.
+
+## Pre-commit hooks
+
+The pre-commit hook (`.githooks/pre-commit`) runs the same three checks locally:
+
+1. `cargo fmt --check`
+2. `cargo clippy --all-targets --quiet -- -D warnings`
+3. `cargo test --quiet`
+
+Set up with `./scripts/setup-hooks.sh`.
 
 ## Network archetype scenarios
 
@@ -34,7 +74,7 @@ Four Docker-compose scenarios simulate increasingly hostile network conditions.
 
 ### Scenario 2: NAT'd office
 
-**Topology:** Two separate LANs (192.168.1.0/24, 192.168.2.0/24) behind independent NAT gateways, relay on shared internet (10.0.0.0/24). Internal networks marked `internal: true` — no direct external access.
+**Topology:** Two separate LANs (192.168.1.0/24, 192.168.2.0/24) behind independent NAT gateways, relay on shared internet (10.0.0.0/24).
 
 | Metric | Expected | Notes |
 |--------|----------|-------|
@@ -44,7 +84,7 @@ Four Docker-compose scenarios simulate increasingly hostile network conditions.
 
 ### Scenario 3: Enterprise DMZ
 
-**Topology:** Robot on isolated VLAN (172.16.10.0/24) behind restrictive firewall. Only TCP 443 outbound permitted. Operator has direct internet (10.1.0.0/24). 5ms netem delay simulating TLS inspection overhead.
+**Topology:** Robot on isolated VLAN (172.16.10.0/24) behind restrictive firewall. Only TCP 443 outbound permitted. 5ms netem delay simulating TLS inspection overhead.
 
 | Metric | Expected | Notes |
 |--------|----------|-------|
@@ -55,7 +95,7 @@ Four Docker-compose scenarios simulate increasingly hostile network conditions.
 
 ### Scenario 4: Mobile/CGNAT
 
-**Topology:** Robot behind double NAT — inner (10.64.0.0/24 → 100.64.0.0/24) and outer CGNAT (100.64.0.0/24 → 10.2.0.0/24). Symmetric NAT on outer layer (`--random`). Mobile network conditions simulated: 50ms±30ms latency, 2% packet loss on inner; 20ms±10ms, 0.5% loss on outer.
+**Topology:** Robot behind double NAT — inner (10.64.0.0/24 to 100.64.0.0/24) and outer CGNAT (100.64.0.0/24 to 10.2.0.0/24). Symmetric NAT on outer layer. Mobile network conditions simulated: 50ms +/- 30ms latency, 2% packet loss on inner; 20ms +/- 10ms, 0.5% loss on outer.
 
 | Metric | Expected | Notes |
 |--------|----------|-------|
@@ -76,15 +116,10 @@ gang test-archetype enterprise-dmz
 gang test-archetype mobile-cgnat
 ```
 
-*Or use the runner script directly:*
+## Known limitations (v0.4)
 
-```bash
-./test-harness/run-scenario.sh open-warehouse
-```
-
-## Known limitations (v0.1)
-
-- WASM component runtime not yet integrated — capabilities run as native broker calls
-- Scenarios verify network topology and reachability, not full Ganglion protocol flow
-- Measured numbers will be filled in once libp2p transport is wired into the agent process
+- WASM component runtime host-function wiring is partially complete — capabilities can be loaded and fuel-metered, but full broker integration requires additional glue code
+- Docker test scenarios verify network topology and reachability; full end-to-end protocol flow testing requires the WASM host integration
 - Regulated facility (air-gapped) archetype is not Docker-testable — requires physical sneakernet
+- The `gang logs` and `gang list` commands require relay connectivity (not yet wired)
+- Registry is local-only — distributed registry synchronization is planned for a future version

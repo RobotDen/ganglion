@@ -12,7 +12,7 @@ Three layers:
 
 2. **Tool Execution (Layer 2)** — WASM component runtime (Wasmtime). Signed, sandboxed, versioned tools with explicit capability declarations. No ambient authority. Memory limits, CPU budgets, and wall-clock deadlines enforced per-component.
 
-3. **Native Brokers (Layer 3)** — Privileged host processes that mediate WASM capability access to ROS 2 topics/services/parameters, filesystem, system logs, and diagnostics. Pattern-based access gating with default-deny policy.
+3. **Native Brokers (Layer 3)** — Privileged host processes that mediate WASM capability access to ROS 2 topics/services/parameters, filesystem, system logs, diagnostics, subprocess execution, network probing, and metrics. Pattern-based access gating with default-deny policy.
 
 ## Quick start
 
@@ -22,6 +22,9 @@ cargo install --path crates/gang-cli
 
 # Run the self-contained demo — no Docker, no ROS 2, no external dependencies
 gang demo
+
+# Diagnose local network archetype
+gang diagnose
 
 # Or run a network archetype test scenario (requires Docker)
 gang test-archetype open-warehouse
@@ -34,40 +37,82 @@ See [docs/QUICKSTART.md](docs/QUICKSTART.md) for a detailed walkthrough.
 ```
 ganglion/
 ├── crates/
-│   ├── gang-core/                  # Core types: identity, messages, policy, audit, manifests
-│   ├── gang-libp2p/                # libp2p transport adapter (TCP, QUIC, relay, DCUtR)
-│   ├── gang-wasm-host/             # Wasmtime component runtime (WIP)
-│   ├── gang-ros/                   # ROS 2 brokers, robot agent, diagnostics
-│   ├── gang-cli/                   # `gang` CLI binary
-│   └── gang-capability-diagnostics/ # Reference WASM capability (WIP)
-├── test-harness/                   # Docker-compose network archetype scenarios
-│   ├── open-warehouse/             # Flat L2, direct connectivity
-│   ├── nat-office/                 # Consumer NAT, relay + DCUtR
-│   ├── enterprise-dmz/             # VLAN isolation, TCP 443 only
-│   └── mobile-cgnat/               # Symmetric NAT, CGNAT, jitter + loss
-└── docs/
-    ├── DesignSpec.md               # Full architectural design specification
-    ├── IMPLEMENTATION.md           # Implementation plan and progress checklist
-    ├── QUICKSTART.md               # 5-minute getting-started guide
-    └── VALIDATION.md               # Test harness results and measurements
+│   ├── gang-core/                          # Core types: identity, messages, policy, audit, manifests, registry
+│   ├── gang-libp2p/                        # libp2p transport adapter (TCP, QUIC, relay, DCUtR)
+│   ├── gang-wasm-host/                     # Wasmtime component runtime with WIT interfaces
+│   ├── gang-ros/                           # ROS 2 brokers, robot agent, archetype detection
+│   ├── gang-cli/                           # `gang` CLI binary
+│   ├── gang-capability-diagnostics/        # Reference WASM capability (WIP)
+│   ├── gang-capability-param-inspect/      # ROS 2 parameter snapshot and diff
+│   ├── gang-capability-diagnostic-bundle/  # Comprehensive diagnostic bundle with health checks
+│   └── gang-capability-network-archetype/  # Network archetype detection with connectivity scoring
+├── test-harness/                           # Docker-compose network archetype scenarios
+│   ├── open-warehouse/                     # Flat L2, direct connectivity
+│   ├── nat-office/                         # Consumer NAT, relay + DCUtR
+│   ├── enterprise-dmz/                     # VLAN isolation, TCP 443 only
+│   └── mobile-cgnat/                       # Symmetric NAT, CGNAT, jitter + loss
+├── docs/
+│   ├── ARCHITECTURE.md                     # Full architectural reference
+│   ├── SECURITY.md                         # Threat model and security design
+│   ├── CLI_REFERENCE.md                    # Complete CLI documentation
+│   ├── NETWORK_ARCHETYPES.md               # Network archetype deep dive
+│   ├── CAPABILITY_AUTHOR_GUIDE.md          # Writing capabilities in Rust, C++, Python, Go
+│   ├── QUICKSTART.md                       # 5-minute getting-started guide
+│   ├── VALIDATION.md                       # Test harness results and measurements
+│   ├── DesignSpec.md                       # Original design specification
+│   └── IMPLEMENTATION.md                   # Implementation plan and progress
+├── .github/workflows/
+│   ├── ci.yml                              # CI: check, fmt, clippy, test, doc
+│   └── release.yml                         # Release: validate + GitHub Release on tags
+├── .githooks/
+│   └── pre-commit                          # Pre-commit: fmt, clippy -Dwarnings, test
+└── CONTRIBUTING.md                         # Contribution guidelines
 ```
 
 ## CLI commands
 
 ```
-gang identity show              # Show your PeerId and public key
-gang identity generate          # Generate a new Ed25519 keypair
-gang sign <wasm-path>           # Sign a WASM component, produce .manifest.cbor
-gang agent --data-dir <path>    # Run a local robot agent
-gang deploy <robot> <wasm>      # Deploy a signed capability to a robot
-gang run <robot> <cap> [args]   # Invoke an installed capability
-gang caps <robot>               # List capabilities installed on a robot
-gang logs <robot>               # Stream robot logs
-gang demo                       # Self-contained end-to-end demo
-gang test-archetype <archetype> # Launch a Docker network scenario
-gang list                       # List reachable robots
-gang connect <robot>            # Establish a session with a robot
+gang identity show                    Show your PeerId and public key
+gang identity generate [--force]      Generate a new Ed25519 keypair
+gang sign <wasm> [--key K] [--name N] Sign a WASM component, produce .manifest.cbor
+gang agent [--config C] [--data-dir]  Run a local robot agent
+gang deploy <robot> <wasm>            Deploy a signed capability to a robot
+gang run <robot> <cap> [args...]      Invoke an installed capability
+gang caps <robot>                     List capabilities installed on a robot
+gang logs <robot> [--follow]          Stream robot logs
+gang demo                             Self-contained end-to-end demo
+gang diagnose [robot]                 Detect network archetype, recommend transport config
+gang transport-stats <robot>          Show per-transport connection statistics
+gang test-archetype <archetype>       Launch a Docker network scenario
+gang fetch <cid> [-o path]            Retrieve an artifact by CID
+gang push <path> [--content-type T]   Publish a file to the content store
+gang artifacts                        List locally-stored artifacts
+gang capability scaffold <name>       Generate a capability project skeleton
+gang registry search <query>          Search the capability registry
+gang registry install <name>          Install a capability from the registry
+gang registry publish <wasm>          Publish a capability to the registry
+gang registry list                    List all registry capabilities
+gang registry info <name>             Show capability details
+gang list                             List reachable robots in the fleet
+gang connect <robot>                  Establish a session with a robot via relay
 ```
+
+See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full details, flags, and examples.
+
+## Capability groups
+
+Ganglion defines eight WIT capability interfaces that WASM components can declare:
+
+| Group | WIT interface | Description |
+|-------|--------------|-------------|
+| ROS Interface | `ganglion:ros/interface@1.0` | Topic subscribe, service call, parameter get/set |
+| Log Stream | `ganglion:logs/stream@1.0` | Journald, syslog, ROS log file access |
+| FS Bounded | `ganglion:fs/bounded@1.0` | Symlink-jailed filesystem access |
+| Diagnostics | `ganglion:diagnostics/collect@1.0` | System info, process lists, network state |
+| Artifacts | `ganglion:artifacts/publish@1.0` | Content-addressed artifact store |
+| Process Spawn | `ganglion:process/spawn@1.0` | Bounded subprocess invocation with command allowlist |
+| Network Probe | `ganglion:network/probe@1.0` | Ping, DNS, TCP port check, traceroute |
+| Metrics Emit | `ganglion:metrics/emit@1.0` | Structured metric emission |
 
 ## Network archetypes
 
@@ -81,6 +126,8 @@ Ganglion is designed around five real-world network environments:
 | Regulated facility | Air-gapped, physical sneakernet | Offline signed bundles |
 | Mobile/CGNAT | Symmetric NAT, IP rotation | Relay-only, reconnect logic |
 
+See [docs/NETWORK_ARCHETYPES.md](docs/NETWORK_ARCHETYPES.md) for a deep dive.
+
 ## Design principles
 
 1. **Protocol-agnostic core, opinionated defaults.** libp2p is the default transport, not the only valid one.
@@ -91,12 +138,16 @@ Ganglion is designed around five real-world network environments:
 
 ## Security model
 
-- Ed25519 keypair identity with PeerId derivation (blake3 hash of public key)
+- Ed25519 keypair identity with PeerId derivation (Blake3 hash of public key)
 - Noise protocol encrypted channels (libp2p)
 - Signed WASM component manifests with trust store verification
 - Default-deny policy engine with glob pattern matching
 - Append-only audit logging with size-based rotation
 - Symlink jail enforcement on filesystem access
+- Command allowlist on subprocess execution
+- Fuel metering and epoch-based wall-clock deadlines for WASM execution
+
+See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 
 ## Building
 
@@ -104,11 +155,17 @@ Ganglion is designed around five real-world network environments:
 # Prerequisites: Rust 1.85+, cargo
 cargo build --release
 
-# Run tests (42 tests across all crates)
+# Run all tests (126 tests across 9 crates)
 cargo test
 
-# Build for Docker test harness
-docker compose -f test-harness/open-warehouse/docker-compose.yml build
+# Run with warnings as errors (matches CI)
+RUSTFLAGS="-Dwarnings" cargo clippy --all-targets
+
+# Build documentation
+cargo doc --no-deps --open
+
+# Set up git hooks
+./scripts/setup-hooks.sh
 ```
 
 ## License
