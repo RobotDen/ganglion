@@ -623,7 +623,25 @@ Track decisions made during implementation that deviate from or clarify the spec
 
 | # | Decision | Rationale | Date |
 |---|----------|-----------|------|
-| 1 | | | |
+| 001 | [Monorepo workspace](adr/ADR-001-monorepo-workspace.md) | Single team, tight cross-crate iteration; 4-repo split from spec was unnecessary overhead | v0.1 |
+| 002 | [Three-layer architecture](adr/ADR-002-three-layer-architecture.md) | Isolate connectivity, tool execution, and privileged operations for independent failure and testing | Design |
+| 003 | [Ed25519 identity](adr/ADR-003-ed25519-identity.md) | Self-certifying identity, no CA infrastructure, libp2p-compatible | v0.1 |
+| 004 | [Default-deny policy](adr/ADR-004-default-deny-policy.md) | New capability groups must be secure by default; customer network exposure risk | v0.1 |
+| 005 | [Transport adapter trait](adr/ADR-005-transport-adapter-trait.md) | Protocol-agnostic core enables alternative transports without modifying gang-core | v0.1 |
+| 006 | [WASM component model](adr/ADR-006-wasm-component-model.md) | Sandboxing + portability + resource bounding for operator-supplied tools | v0.1 |
+| 007 | [Simplified WASM linking](adr/ADR-007-simplified-wasm-linking.md) | Defer full WIT-to-broker binding to focus on proving broker architecture | v0.1 |
+| 008 | [WIT capability interfaces](adr/ADR-008-wit-capability-interfaces.md) | Component model's native IDL; typed, composable, multi-language bindings | v0.1 |
+| 009 | [Outbound-initiated connectivity](adr/ADR-009-outbound-initiated.md) | Robots behind customer NAT/firewalls cannot accept inbound; relay-first design | Design |
+| 010 | [Content-addressed artifacts](adr/ADR-010-content-addressed-artifacts.md) | Blake3+CIDv1 for dedup, integrity, IPFS interop, LRU eviction on edge | v0.3 |
+| 011 | [Manifest schema v2](adr/ADR-011-manifest-schema-v2.md) | Backward-compatible schema evolution via serde defaults | v0.3 |
+| 012 | [Network archetype detection](adr/ADR-012-network-archetype-detection.md) | Automated transport recommendation from probe results | v0.4 |
+| 013 | [Rosbridge over rclrs](adr/ADR-013-rosbridge-over-rclrs.md) | No build-time ROS 2 dependency; works with any distro; CI-friendly | v0.1 |
+| 014 | [Rust edition 2024](adr/ADR-014-rust-edition-2024.md) | Newest stable edition, project targets Rust 1.85+ | v0.4 |
+| 015 | [Fix symlink jail writes](adr/ADR-015-fix-symlink-jail-writes.md) | Canonicalize parent for new-file writes to close traversal gap | Proposed |
+| 016 | [Implement ROS stubs](adr/ADR-016-implement-ros-stubs.md) | Complete service-call and param-get via rosbridge | Proposed |
+| 017 | [WIT param-set](adr/ADR-017-wit-param-set.md) | Add write symmetry for parameters; enable field tuning capabilities | Proposed |
+| 018 | [Document CLI stubs](adr/ADR-018-document-cli-stubs.md) | Mark WIP commands clearly; add gang status command | Proposed |
+| 019 | [ROS broker tests](adr/ADR-019-ros-broker-test-coverage.md) | Zero unit tests on RosBroker; cover check_access and handle_request | Proposed |
 
 ---
 

@@ -1,0 +1,49 @@
+# Architecture Decision Records
+
+This directory contains Architecture Decision Records (ADRs) for the Ganglion project.
+
+## Format
+
+Each ADR follows a consistent format:
+
+- **Title** — short imperative-mood description
+- **Status** — Accepted, Proposed, Deprecated, or Superseded
+- **Context** — the forces at play
+- **Decision** — what we decided
+- **Consequences** — what follows from the decision
+
+## Index
+
+### Foundational decisions (v0.1)
+
+| # | Title | Status |
+|---|-------|--------|
+| 001 | [Monorepo workspace](ADR-001-monorepo-workspace.md) | Accepted |
+| 002 | [Three-layer architecture](ADR-002-three-layer-architecture.md) | Accepted |
+| 003 | [Ed25519 identity model](ADR-003-ed25519-identity.md) | Accepted |
+| 004 | [Default-deny policy engine](ADR-004-default-deny-policy.md) | Accepted |
+| 005 | [Protocol-agnostic transport adapter](ADR-005-transport-adapter-trait.md) | Accepted |
+| 006 | [WASM component model for tool execution](ADR-006-wasm-component-model.md) | Accepted |
+| 007 | [Simplified WASM capability linking](ADR-007-simplified-wasm-linking.md) | Accepted |
+| 008 | [WIT-defined capability interfaces](ADR-008-wit-capability-interfaces.md) | Accepted |
+| 009 | [Outbound-initiated connectivity](ADR-009-outbound-initiated.md) | Accepted |
+
+### Evolution decisions (v0.2–v0.4)
+
+| # | Title | Status |
+|---|-------|--------|
+| 010 | [Content-addressed artifact store](ADR-010-content-addressed-artifacts.md) | Accepted |
+| 011 | [Manifest schema v2 with backward compatibility](ADR-011-manifest-schema-v2.md) | Accepted |
+| 012 | [Network archetype detection](ADR-012-network-archetype-detection.md) | Accepted |
+| 013 | [Rosbridge over rclrs for ROS 2 integration](ADR-013-rosbridge-over-rclrs.md) | Accepted |
+| 014 | [Rust edition 2024](ADR-014-rust-edition-2024.md) | Accepted |
+
+### Review findings (v0.5 scope)
+
+| # | Title | Status |
+|---|-------|--------|
+| 015 | [Fix filesystem broker symlink jail for writes](ADR-015-fix-symlink-jail-writes.md) | Proposed |
+| 016 | [Implement ROS broker stubbed operations](ADR-016-implement-ros-stubs.md) | Proposed |
+| 017 | [Add param-set to WIT ros-interface](ADR-017-wit-param-set.md) | Proposed |
+| 018 | [Document CLI stubbed commands](ADR-018-document-cli-stubs.md) | Proposed |
+| 019 | [ROS broker test coverage](ADR-019-ros-broker-test-coverage.md) | Proposed |
