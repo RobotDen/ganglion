@@ -366,6 +366,66 @@ mod tests {
     }
 
     #[test]
+    fn read_write_required_for_param_set() {
+        // A read_only policy should block ReadWrite patterns (used by param-set).
+        let policy = Policy {
+            capability_rules: vec![CapabilityRule {
+                group: "ganglion:ros/interface".into(),
+                allowed_patterns: vec!["**".into()],
+                max_access: Some("read_only".into()),
+            }],
+            peer_rules: vec![PeerRule {
+                peer_id: "*".into(),
+                can_deploy: true,
+                allowed_capabilities: Vec::new(),
+            }],
+        };
+        let peer = Keypair::generate().peer_id();
+
+        // ReadWrite pattern (required for param-set) must be denied.
+        let caps = vec![CapabilityGroup::RosInterface {
+            version: "1.0".into(),
+            patterns: vec![AccessPattern {
+                pattern: "/my_node/max_speed".into(),
+                access: RosAccess::ReadWrite,
+            }],
+        }];
+        assert!(policy.evaluate(&caps, &peer).is_err());
+
+        // ReadOnly (param-get) should still be allowed.
+        let caps = vec![CapabilityGroup::RosInterface {
+            version: "1.0".into(),
+            patterns: vec![AccessPattern {
+                pattern: "/my_node/max_speed".into(),
+                access: RosAccess::ReadOnly,
+            }],
+        }];
+        assert!(policy.evaluate(&caps, &peer).is_ok());
+
+        // A read_write policy should allow both.
+        let rw_policy = Policy {
+            capability_rules: vec![CapabilityRule {
+                group: "ganglion:ros/interface".into(),
+                allowed_patterns: vec!["**".into()],
+                max_access: Some("read_write".into()),
+            }],
+            peer_rules: vec![PeerRule {
+                peer_id: "*".into(),
+                can_deploy: true,
+                allowed_capabilities: Vec::new(),
+            }],
+        };
+        let caps = vec![CapabilityGroup::RosInterface {
+            version: "1.0".into(),
+            patterns: vec![AccessPattern {
+                pattern: "/my_node/max_speed".into(),
+                access: RosAccess::ReadWrite,
+            }],
+        }];
+        assert!(rw_policy.evaluate(&caps, &peer).is_ok());
+    }
+
+    #[test]
     fn policy_toml_roundtrip() {
         let policy = Policy::permissive();
         let toml_str = toml::to_string_pretty(&policy).unwrap();

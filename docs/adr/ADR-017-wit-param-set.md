@@ -1,6 +1,6 @@
 # ADR-017: Add param-set to WIT ros-interface
 
-**Status:** Proposed
+**Status:** Accepted (implemented)
 **Date:** 2026-04-23
 
 ## Context

@@ -1,6 +1,6 @@
 # ADR-018: Document CLI stubbed commands
 
-**Status:** Proposed
+**Status:** Accepted (implemented)
 **Date:** 2026-04-23
 
 ## Context

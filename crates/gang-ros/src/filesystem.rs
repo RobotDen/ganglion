@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gang_core::broker::{BrokerOperation, CapabilityBroker, CapabilityRequest, CapabilityResponse};
 use gang_core::error::BrokerError;
@@ -34,14 +34,33 @@ impl FsBroker {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|_| path.to_string())
         } else {
-            // For writes to new files, check the parent
-            path.to_string()
+            // For writes to new files, canonicalize the parent directory
+            // and rejoin with the filename to prevent traversal attacks.
+            let p = PathBuf::from(path);
+            let parent = p.parent().ok_or_else(|| BrokerError::AccessDenied {
+                broker: "fs".into(),
+                resource: path.into(),
+                reason: "path has no parent directory".into(),
+            })?;
+            let filename = p.file_name().ok_or_else(|| BrokerError::AccessDenied {
+                broker: "fs".into(),
+                resource: path.into(),
+                reason: "path has no filename component".into(),
+            })?;
+            let canonical_parent =
+                std::fs::canonicalize(parent).map_err(|_| BrokerError::AccessDenied {
+                    broker: "fs".into(),
+                    resource: path.into(),
+                    reason: "parent directory does not exist".into(),
+                })?;
+            canonical_parent
+                .join(filename)
+                .to_string_lossy()
+                .to_string()
         };
 
         for rule in &self.allowed_patterns {
-            if glob_match::glob_match(&rule.pattern, &canonical)
-                || glob_match::glob_match(&rule.pattern, path)
-            {
+            if glob_match::glob_match(&rule.pattern, &canonical) {
                 if needs_write && !rule.write {
                     return Err(BrokerError::AccessDenied {
                         broker: "fs".into(),
@@ -337,5 +356,85 @@ mod tests {
         let stat: FileStat = serde_json::from_slice(&resp.data).unwrap();
         assert!(stat.is_file);
         assert_eq!(stat.size, 5);
+    }
+
+    #[tokio::test]
+    async fn write_new_file_traversal_denied() {
+        let dir = TempDir::new().unwrap();
+        let canonical_dir = canon(dir.path());
+        // Attempt to escape via ../ in a new file path
+        let evil_path = format!("{canonical_dir}/../../../etc/shadow");
+
+        let broker = test_broker(dir.path());
+        let result = broker.check_access(&evil_path, true);
+        assert!(
+            result.is_err(),
+            "traversal via ../ in new file path must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_new_file_symlink_parent_denied() {
+        let dir = TempDir::new().unwrap();
+        let canonical_dir = canon(dir.path());
+        let jail = PathBuf::from(&canonical_dir).join("allowed");
+        std::fs::create_dir(&jail).unwrap();
+
+        // Create a symlink inside the jail that points outside
+        let escape_link = jail.join("escape");
+        std::os::unix::fs::symlink("/tmp", &escape_link).unwrap();
+
+        let broker = test_broker(dir.path());
+        // The symlink resolves to /tmp, which is outside the jail
+        let evil_path = format!("{}/escape/pwned.txt", jail.display());
+        let result = broker.check_access(&evil_path, true);
+        assert!(
+            result.is_err(),
+            "symlink parent pointing outside jail must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_new_file_nonexistent_parent_denied() {
+        let dir = TempDir::new().unwrap();
+        let canonical_dir = canon(dir.path());
+        // Parent directory does not exist at all
+        let bad_path = format!("{canonical_dir}/no_such_dir/file.txt");
+
+        let broker = test_broker(dir.path());
+        let result = broker.check_access(&bad_path, true);
+        assert!(
+            result.is_err(),
+            "nonexistent parent directory must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_new_file_in_allowed_dir_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let canonical_dir = canon(dir.path());
+        // File does not exist yet but parent is valid and inside jail
+        let new_file = format!("{canonical_dir}/brand_new.txt");
+
+        let broker = test_broker(dir.path());
+        let result = broker.check_access(&new_file, true);
+        assert!(
+            result.is_ok(),
+            "write to new file in allowed dir must succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_existing_file_still_works() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("existing.txt");
+        std::fs::write(&file, b"data").unwrap();
+
+        let broker = test_broker(dir.path());
+        let result = broker.check_access(&file.to_string_lossy(), false);
+        assert!(
+            result.is_ok(),
+            "read of existing file in allowed dir must succeed"
+        );
     }
 }

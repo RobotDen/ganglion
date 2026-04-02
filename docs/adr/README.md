@@ -38,12 +38,12 @@ Each ADR follows a consistent format:
 | 013 | [Rosbridge over rclrs for ROS 2 integration](ADR-013-rosbridge-over-rclrs.md) | Accepted |
 | 014 | [Rust edition 2024](ADR-014-rust-edition-2024.md) | Accepted |
 
-### Review findings (v0.5 scope)
+### Review findings (v0.5 — implemented)
 
 | # | Title | Status |
 |---|-------|--------|
-| 015 | [Fix filesystem broker symlink jail for writes](ADR-015-fix-symlink-jail-writes.md) | Proposed |
-| 016 | [Implement ROS broker stubbed operations](ADR-016-implement-ros-stubs.md) | Proposed |
-| 017 | [Add param-set to WIT ros-interface](ADR-017-wit-param-set.md) | Proposed |
-| 018 | [Document CLI stubbed commands](ADR-018-document-cli-stubs.md) | Proposed |
-| 019 | [ROS broker test coverage](ADR-019-ros-broker-test-coverage.md) | Proposed |
+| 015 | [Fix filesystem broker symlink jail for writes](ADR-015-fix-symlink-jail-writes.md) | Accepted |
+| 016 | [Implement ROS broker stubbed operations](ADR-016-implement-ros-stubs.md) | Accepted |
+| 017 | [Add param-set to WIT ros-interface](ADR-017-wit-param-set.md) | Accepted |
+| 018 | [Document CLI stubbed commands](ADR-018-document-cli-stubs.md) | Accepted |
+| 019 | [ROS broker test coverage](ADR-019-ros-broker-test-coverage.md) | Accepted |

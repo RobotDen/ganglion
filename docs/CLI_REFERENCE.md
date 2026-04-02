@@ -9,6 +9,35 @@ The `gang` CLI is the primary interface for operators to manage robot identities
 | `--format <text\|json>` | Output format. Default: `text`. Use `json` for machine-readable output. |
 | `-v`, `-vv`, `-vvv` | Verbosity level. `-v` = debug, `-vv` = trace (all crates). |
 
+## Status
+
+### `gang status`
+
+Show Ganglion version, identity status, available commands, and WIP commands.
+
+```bash
+$ gang status
+Ganglion v0.4.0
+
+Identity:   12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
+Key file:   /home/user/.gang/identity.key
+Registry:   2 capability(ies) registered
+
+Available commands:
+  gang identity show
+  gang identity generate
+  gang sign
+  gang agent
+  ...
+
+WIP commands (require relay connectivity):
+  gang logs  [WIP]
+  gang list  [WIP]
+  gang connect  [WIP]
+```
+
+Supports `--format json` for structured output.
+
 ## Identity management
 
 ### `gang identity show`
@@ -126,7 +155,7 @@ param-inspect     0.1.0    12D3-a1b2c3d4...   2026-04-23T10:05:00Z
 
 ## Log streaming
 
-### `gang logs <robot>`
+### `gang logs <robot>` [WIP]
 
 Stream logs from a robot.
 
@@ -138,7 +167,7 @@ $ gang logs robot-42 --follow
 |------|-------------|
 | `--follow` | Continuously stream new log entries (like `tail -f`). |
 
-> Note: Requires a running relay connection. Use `gang demo` for local testing.
+> Note: Requires relay connectivity (not yet available in v0.4). Run `gang demo` for local testing or `gang status` for a summary of available commands.
 
 ## Diagnostics
 
@@ -327,13 +356,13 @@ Show detailed information for a specific capability.
 
 ## Fleet management
 
-### `gang list`
+### `gang list` [WIP]
 
 List reachable robots in the fleet.
 
-> Note: Requires a running relay connection. Use `gang demo` for local testing.
+> Note: Requires relay connectivity (not yet available in v0.4). Run `gang demo` for local testing or `gang status` for a summary of available commands.
 
-### `gang connect <robot>`
+### `gang connect <robot>` [WIP]
 
 Establish a session with a robot via relay.
 
@@ -344,6 +373,8 @@ $ gang connect robot-42 --prefer-transport quic,tcp
 | Flag | Description |
 |------|-------------|
 | `--prefer-transport <t1,t2>` | Preferred transport order for happy-eyeballs selection. |
+
+> Note: Requires relay connectivity (not yet available in v0.4). Run `gang demo` for local testing or `gang status` for a summary of available commands.
 
 ## Exit codes
 

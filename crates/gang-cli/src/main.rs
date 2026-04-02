@@ -151,6 +151,9 @@ enum Commands {
         action: RegistryAction,
     },
 
+    /// Show Ganglion status: version, identity, available and WIP capabilities.
+    Status,
+
     /// List reachable robots in the fleet.
     List,
 
@@ -268,8 +271,10 @@ async fn main() -> anyhow::Result<()> {
             robot: _,
             follow: _,
         } => {
-            eprintln!("gang logs: requires a running relay connection (not yet implemented)");
-            eprintln!("Use `gang demo` for a self-contained local demo.");
+            eprintln!("This command requires relay connectivity (not yet available in v0.4).");
+            eprintln!(
+                "Run `gang demo` to see current capabilities, or `gang status` for a summary."
+            );
         }
         Commands::TestArchetype { archetype } => commands::test_archetype(&archetype).await?,
         Commands::Diagnose { robot } => commands::diagnose(robot.as_deref(), &cli.format).await?,
@@ -313,16 +318,21 @@ async fn main() -> anyhow::Result<()> {
             RegistryAction::List => commands::registry_list(&cli.format).await?,
             RegistryAction::Info { name } => commands::registry_info(&name, &cli.format).await?,
         },
+        Commands::Status => commands::status(&cli.format).await?,
         Commands::List => {
-            eprintln!("gang list: requires a running relay connection (not yet implemented)");
-            eprintln!("Use `gang demo` for a self-contained local demo.");
+            eprintln!("This command requires relay connectivity (not yet available in v0.4).");
+            eprintln!(
+                "Run `gang demo` to see current capabilities, or `gang status` for a summary."
+            );
         }
         Commands::Connect {
             robot: _,
             prefer_transport: _,
         } => {
-            eprintln!("gang connect: requires a running relay (not yet implemented)");
-            eprintln!("Use `gang demo` for a self-contained local demo.");
+            eprintln!("This command requires relay connectivity (not yet available in v0.4).");
+            eprintln!(
+                "Run `gang demo` to see current capabilities, or `gang status` for a summary."
+            );
         }
     }
 

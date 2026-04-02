@@ -1,6 +1,6 @@
 # ADR-015: Fix filesystem broker symlink jail for write operations
 
-**Status:** Proposed
+**Status:** Accepted (implemented)
 **Date:** 2026-04-23
 
 ## Context

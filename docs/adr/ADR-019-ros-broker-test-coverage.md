@@ -1,6 +1,6 @@
 # ADR-019: ROS broker test coverage
 
-**Status:** Proposed
+**Status:** Accepted (implemented)
 **Date:** 2026-04-23
 
 ## Context

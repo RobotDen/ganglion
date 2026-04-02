@@ -1,10 +1,10 @@
-// Ganglion WIT capability interface definitions — v0.4
+// Ganglion WIT capability interface definitions — v0.5
 //
 // All WASM components interact with the host through these interfaces.
 // A component declares which interfaces it needs in its signed manifest.
 // The host only links declared interfaces; undeclared imports trap.
 
-package ganglion:capability@0.4.0;
+package ganglion:capability@0.5.0;
 
 /// ROS 2 interface — topic subscribe, service call, parameter access.
 /// Pattern-gated: each operation is checked against the manifest's declared patterns.
@@ -27,6 +27,9 @@ interface ros-interface {
 
     /// Get a parameter value.
     param-get: func(name: string) -> result<list<u8>, string>;
+
+    /// Set a parameter value. Requires read-write access.
+    param-set: func(name: string, value: list<u8>) -> result<bool, string>;
 }
 
 /// Log streaming — enumerate sources and stream log lines.

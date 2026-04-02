@@ -1,6 +1,6 @@
 # ADR-016: Implement ROS broker stubbed operations
 
-**Status:** Proposed
+**Status:** Accepted (implemented)
 **Date:** 2026-04-23
 
 ## Context

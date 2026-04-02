@@ -2,6 +2,88 @@ use std::path::{Path, PathBuf};
 
 use crate::OutputFormat;
 
+/// `gang status` — show version, identity, and capability summary.
+pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+
+    // Check identity
+    let key_path = gang_core::identity::default_key_path();
+    let identity_status = if key_path.exists() {
+        match gang_core::identity::Keypair::load(&key_path) {
+            Ok(kp) => format!("{}", kp.peer_id()),
+            Err(_) => "present but unreadable".to_string(),
+        }
+    } else {
+        "not generated (run `gang identity generate`)".to_string()
+    };
+
+    // Registry count
+    let reg_dir = registry_dir();
+    let registry_count = match gang_core::registry::Registry::open(&reg_dir) {
+        Ok(reg) => reg.list().len(),
+        Err(_) => 0,
+    };
+
+    let available = [
+        "identity show",
+        "identity generate",
+        "sign",
+        "agent",
+        "deploy",
+        "run",
+        "caps",
+        "demo",
+        "diagnose",
+        "transport-stats",
+        "test-archetype",
+        "push",
+        "fetch",
+        "artifacts",
+        "capability scaffold",
+        "registry search",
+        "registry install",
+        "registry publish",
+        "registry list",
+        "registry info",
+        "status",
+    ];
+
+    let wip = ["logs", "list", "connect"];
+
+    match format {
+        OutputFormat::Json => {
+            let info = serde_json::json!({
+                "version": version,
+                "identity": identity_status,
+                "key_path": key_path.display().to_string(),
+                "registry_capabilities": registry_count,
+                "available_commands": available,
+                "wip_commands": wip,
+            });
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        }
+        OutputFormat::Text => {
+            println!("Ganglion v{version}");
+            println!();
+            println!("Identity:   {identity_status}");
+            println!("Key file:   {}", key_path.display());
+            println!("Registry:   {} capability(ies) registered", registry_count);
+            println!();
+            println!("Available commands:");
+            for cmd in &available {
+                println!("  gang {cmd}");
+            }
+            println!();
+            println!("WIP commands (require relay connectivity):");
+            for cmd in &wip {
+                println!("  gang {cmd}  [WIP]");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// `gang identity show`
 pub async fn identity_show() -> anyhow::Result<()> {
     let key_path = gang_core::identity::default_key_path();
