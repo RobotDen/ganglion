@@ -105,14 +105,16 @@ Ganglion defines eight WIT capability interfaces that WASM components can declar
 
 | Group | WIT interface | Description |
 |-------|--------------|-------------|
-| ROS Interface | `ganglion:ros/interface@1.0` | Topic subscribe, service call, parameter get/set |
-| Log Stream | `ganglion:logs/stream@1.0` | Journald, syslog, ROS log file access |
-| FS Bounded | `ganglion:fs/bounded@1.0` | Symlink-jailed filesystem access |
-| Diagnostics | `ganglion:diagnostics/collect@1.0` | System info, process lists, network state |
-| Artifacts | `ganglion:artifacts/publish@1.0` | Content-addressed artifact store |
-| Process Spawn | `ganglion:process/spawn@1.0` | Bounded subprocess invocation with command allowlist |
-| Network Probe | `ganglion:network/probe@1.0` | Ping, DNS, TCP port check, traceroute |
-| Metrics Emit | `ganglion:metrics/emit@1.0` | Structured metric emission |
+| ROS Interface | `ganglion:ros/interface` | Topic subscribe, service call, parameter get/set |
+| Log Stream | `ganglion:logs/stream` | Journald, syslog, ROS log file access |
+| FS Bounded | `ganglion:fs/bounded` | Symlink-jailed filesystem access |
+| Diagnostics | `ganglion:diagnostics/collect` | System info, process lists, network state |
+| Artifacts | `ganglion:artifacts/publish` | Content-addressed artifact store |
+| Process Spawn | `ganglion:process/spawn` | Bounded subprocess invocation with command allowlist |
+| Network Probe | `ganglion:network/probe` | Ping, DNS, TCP port check, traceroute |
+| Metrics Emit | `ganglion:metrics/emit` | Structured metric emission |
+
+All interfaces are part of the `ganglion:capability@0.5.0` WIT package. Individual interfaces are not independently versioned.
 
 ## Network archetypes
 
@@ -155,7 +157,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 # Prerequisites: Rust 1.85+, cargo
 cargo build --release
 
-# Run all tests (126 tests across 9 crates)
+# Run all tests (158+ tests across 9 crates)
 cargo test
 
 # Run with warnings as errors (matches CI)

@@ -6,6 +6,7 @@
 
 pub mod engine;
 pub mod host;
+pub mod imports;
 pub mod runtime;
 
 pub use engine::GanglionEngine;

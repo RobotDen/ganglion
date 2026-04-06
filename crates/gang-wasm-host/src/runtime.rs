@@ -18,6 +18,7 @@ use gang_core::manifest::ResourceLimits;
 
 use crate::engine::GanglionEngine;
 use crate::host::CapabilityHost;
+use crate::imports::register_capability_imports;
 
 /// Result of a component invocation.
 #[derive(Debug)]
@@ -150,17 +151,19 @@ impl ComponentRuntime {
                 InvocationError::InstantiationFailed(format!("failed to compile component: {e}"))
             })?;
 
-        // Create a linker and link capability imports
-        let linker = wasmtime::component::Linker::<CapabilityHost>::new(self.engine.engine());
-
-        // For v0.1, we use a simplified invocation path:
-        // Instead of full WIT binding generation at runtime, we attempt to
-        // instantiate the component with whatever imports the linker provides.
-        // Unlinked imports will cause instantiation to fail, which maps to
-        // "undeclared capability" semantics.
-        //
-        // Full WIT-based dynamic linking will arrive when wit-bindgen
-        // stabilizes its programmatic API for host-side binding generation.
+        // Create a linker and register host functions for all capability
+        // interfaces. Each WIT import (e.g., ganglion:capability/ros-interface)
+        // gets host functions that route through CapabilityHost::broker_call().
+        // Undeclared capabilities are rejected at call time (not link time),
+        // so all interfaces are registered regardless of what the component
+        // declares — the CapabilityHost enforces the manifest's declaration
+        // list when the function is actually invoked.
+        let mut linker = wasmtime::component::Linker::<CapabilityHost>::new(self.engine.engine());
+        register_capability_imports(&mut linker).map_err(|e| {
+            InvocationError::InstantiationFailed(format!(
+                "failed to register capability imports: {e}"
+            ))
+        })?;
 
         let instance = linker
             .instantiate_async(&mut store, &component)

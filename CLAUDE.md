@@ -12,7 +12,7 @@ Part of the Tafy Labs / RobotDen vault ecosystem. Ganglion is the open-source co
 cargo build                          # Debug build
 cargo build --release                # Release build
 cargo install --path crates/gang-cli # Install `gang` CLI to PATH
-cargo test                           # Run all 126 tests
+cargo test                           # Run all 158+ tests
 cargo clippy --all-targets           # Lint (CI runs with -Dwarnings)
 cargo fmt --check                    # Check formatting
 cargo doc --no-deps                  # Build rustdoc
@@ -77,14 +77,16 @@ crates/
 
 | Group | Broker | Key constraint |
 |-------|--------|----------------|
-| `ganglion:ros/interface@1.0` | `RosBroker` | Topic/service/param pattern matching, read-only vs read-write |
-| `ganglion:logs/stream@1.0` | `LogStreamBroker` | Source pattern filtering |
-| `ganglion:fs/bounded@1.0` | `FsBroker` | Symlink jail enforcement |
-| `ganglion:diagnostics/collect@1.0` | `DiagnosticsBroker` | System info collection |
-| `ganglion:artifacts/publish@1.0` | `ArtifactStore` | CIDv1 + Blake3, LRU eviction |
-| `ganglion:process/spawn@1.0` | `ProcessBroker` | Command allowlist, wall-clock timeout |
-| `ganglion:network/probe@1.0` | `NetworkProbeBroker` | Structured probing (no raw sockets) |
-| `ganglion:metrics/emit@1.0` | `MetricsBroker` | Ring buffer, configurable retention |
+| `ganglion:ros/interface` | `RosBroker` | Topic/service/param pattern matching, read-only vs read-write |
+| `ganglion:logs/stream` | `LogStreamBroker` | Source pattern filtering |
+| `ganglion:fs/bounded` | `FsBroker` | Symlink jail enforcement |
+| `ganglion:diagnostics/collect` | `DiagnosticsBroker` | System info collection |
+| `ganglion:artifacts/publish` | `ArtifactStore` | CIDv1 + Blake3, LRU eviction |
+| `ganglion:process/spawn` | `ProcessBroker` | Command allowlist, wall-clock timeout |
+| `ganglion:network/probe` | `NetworkProbeBroker` | Structured probing (no raw sockets) |
+| `ganglion:metrics/emit` | `MetricsBroker` | Ring buffer, configurable retention |
+
+All interfaces are part of `ganglion:capability@0.5.0`. Individual interfaces are not independently versioned.
 
 ### Five network archetypes
 

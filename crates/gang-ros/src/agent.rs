@@ -208,12 +208,14 @@ impl RobotAgent {
     }
 
     /// Invoke an installed capability.
-    /// In v0.1, this runs the capability's broker operations directly
-    /// (WASM host integration comes in Phase 3).
+    ///
+    /// Prefer WASM execution when component bytes are available. Fall back to
+    /// direct broker invocation for non-WASM capabilities (e.g., when the
+    /// component file is missing or contains placeholder bytes from testing).
     pub async fn invoke_capability(
         &self,
         name: &str,
-        _args: &[String],
+        args: &[String],
         operator_peer_id: &PeerId,
     ) -> Result<Vec<u8>, anyhow::Error> {
         let caps = self.capabilities.read().await;
@@ -224,15 +226,104 @@ impl RobotAgent {
         let started_at = chrono::Utc::now();
         info!(name = %name, operator = %operator_peer_id, "Invoking capability");
 
-        // For v0.1, run broker operations directly based on declared capabilities.
-        // Full WASM execution will replace this in Phase 3.
+        // Prefer WASM execution when component bytes are available.
+        // Read the component file and, if it looks like a valid WASM binary
+        // (starts with the \0asm magic bytes), run it through the
+        // ComponentRuntime. This is the intended three-layer execution path:
+        //   WASM component -> host functions -> Layer 3 brokers.
+        let wasm_bytes = std::fs::read(&cap.component_path).ok();
+        let is_valid_wasm = wasm_bytes
+            .as_ref()
+            .map(|b| b.len() > 8 && b.starts_with(b"\0asm"))
+            .unwrap_or(false);
+
+        if is_valid_wasm {
+            let wasm_bytes = wasm_bytes.unwrap();
+            info!(name = %name, "Executing via WASM component runtime");
+
+            let engine = gang_wasm_host::GanglionEngine::new()?;
+            let mut brokers: std::collections::HashMap<
+                String,
+                std::sync::Arc<dyn gang_core::broker::CapabilityBroker>,
+            > = std::collections::HashMap::new();
+
+            // Register available brokers so the WASM component can call them
+            // through the host function bridge in imports.rs. Fresh broker
+            // instances are created because the originals are not Arc-wrapped.
+            brokers.insert(
+                "ganglion:diagnostics/collect".into(),
+                std::sync::Arc::new(DiagnosticsBroker::new()),
+            );
+            brokers.insert(
+                "ganglion:logs/stream".into(),
+                std::sync::Arc::new(LogStreamBroker::permissive()),
+            );
+            // FsBroker requires allowed patterns; reuse the same config
+            // the agent was initialized with would be ideal, but since the
+            // broker doesn't expose its rules, create a permissive one for
+            // now. Policy enforcement happens at the broker level.
+            brokers.insert(
+                "ganglion:fs/bounded".into(),
+                std::sync::Arc::new(FsBroker::new(vec![FsRule {
+                    pattern: "/tmp/gang/**".into(),
+                    read: true,
+                    write: true,
+                }])),
+            );
+
+            let runtime = gang_wasm_host::runtime::ComponentRuntime::new(engine, brokers);
+            let limits = gang_core::manifest::ResourceLimits::default();
+            let result = runtime
+                .invoke(
+                    &wasm_bytes,
+                    cap.declared_capabilities.clone(),
+                    &limits,
+                    args.to_vec(),
+                )
+                .await;
+
+            match result {
+                Ok(comp_result) => {
+                    let ended_at = chrono::Utc::now();
+                    let record = AuditRecord {
+                        operator_peer_id: operator_peer_id.clone(),
+                        component_name: name.into(),
+                        component_version: cap.version.clone(),
+                        component_hash: cap.component_hash.clone(),
+                        capabilities_used: cap
+                            .declared_capabilities
+                            .iter()
+                            .map(|c| c.qualified_name())
+                            .collect(),
+                        started_at,
+                        ended_at,
+                        exit_status: ExitStatus::Success,
+                        io_stats: vec![],
+                    };
+                    if let Err(e) = self.audit_log.append(&record) {
+                        warn!("Failed to write audit record: {e}");
+                    }
+                    return Ok(comp_result.data);
+                }
+                Err(e) => {
+                    warn!(
+                        name = %name,
+                        error = %e,
+                        "WASM execution failed, falling back to direct broker invocation"
+                    );
+                }
+            }
+        }
+
+        // Fall back to direct broker invocation for non-WASM capabilities.
+        // Used when no valid WASM binary is available (e.g., test fixtures,
+        // non-WASM capabilities, or WASM execution failures).
         let mut results = serde_json::Map::new();
         let mut io_stats = Vec::new();
 
         for group in &cap.declared_capabilities {
             match group {
                 CapabilityGroup::DiagnosticsCollect { .. } => {
-                    // Collect all diagnostics
                     let sys_req = gang_core::broker::CapabilityRequest {
                         capability_group: "ganglion:diagnostics/collect".into(),
                         operation: gang_core::broker::BrokerOperation::SystemInfo,
@@ -339,24 +430,56 @@ impl RobotAgent {
                 if manifest_path.exists() && wasm_path.exists() {
                     match std::fs::read(&manifest_path) {
                         Ok(manifest_cbor) => {
-                            if let Ok(signed) = SignedManifest::from_cbor(&manifest_cbor) {
-                                if let Ok(manifest) = signed.verify_and_decode() {
-                                    let installed = InstalledCapability {
-                                        name: manifest.name.clone(),
-                                        version: manifest.version,
-                                        author_peer_id: manifest.author_peer_id,
-                                        declared_capabilities: manifest.declared_capabilities,
-                                        component_hash: manifest.component_hash,
-                                        installed_at: chrono::Utc::now(),
-                                        component_path: wasm_path,
-                                        manifest_path,
-                                    };
+                            match SignedManifest::from_cbor(&manifest_cbor) {
+                                Ok(signed) => match signed.verify_and_decode() {
+                                    Ok(manifest) => {
+                                        // Verify against trust store (skip if empty)
+                                        if !self.trust_store.trusted_peers.is_empty()
+                                            && !self
+                                                .trust_store
+                                                .is_trusted(&manifest.author_peer_id)
+                                        {
+                                            warn!(
+                                                name = %manifest.name,
+                                                author = %manifest.author_peer_id,
+                                                "Skipping capability: author not in trust store"
+                                            );
+                                            continue;
+                                        }
 
-                                    // Use try_write to avoid async in sync context
-                                    if let Ok(mut caps) = self.capabilities.try_write() {
-                                        info!(name = %manifest.name, "Loaded installed capability");
-                                        caps.insert(manifest.name, installed);
+                                        let cap_name = manifest.name.clone();
+                                        let installed = InstalledCapability {
+                                            name: manifest.name,
+                                            version: manifest.version,
+                                            author_peer_id: manifest.author_peer_id,
+                                            declared_capabilities: manifest.declared_capabilities,
+                                            component_hash: manifest.component_hash,
+                                            installed_at: chrono::Utc::now(),
+                                            component_path: wasm_path,
+                                            manifest_path,
+                                        };
+
+                                        // Use try_write to avoid async in sync context
+                                        if let Ok(mut caps) = self.capabilities.try_write() {
+                                            info!(
+                                                name = %cap_name,
+                                                "Loaded installed capability"
+                                            );
+                                            caps.insert(cap_name, installed);
+                                        }
                                     }
+                                    Err(e) => {
+                                        warn!(
+                                            "Signature verification failed for {}: {e}",
+                                            manifest_path.display()
+                                        );
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to deserialize manifest at {}: {e}",
+                                        manifest_path.display()
+                                    );
                                 }
                             }
                         }

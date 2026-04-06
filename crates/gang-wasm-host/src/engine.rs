@@ -39,6 +39,7 @@ impl GanglionEngine {
         config.wasm_component_model(true);
         config.consume_fuel(true);
         config.epoch_interruption(true);
+        config.async_support(true);
 
         // Reasonable defaults for field deployments
         config.cranelift_opt_level(wasmtime::OptLevel::Speed);

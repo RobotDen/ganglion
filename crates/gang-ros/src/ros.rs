@@ -6,8 +6,9 @@ use gang_core::error::BrokerError;
 
 /// ROS 2 interface broker — mediates WASM capability access to the ROS 2 graph.
 ///
-/// v0.1 implementation uses rosbridge WebSocket as the ROS 2 bridge.
-/// Future versions will use rclrs for direct integration.
+/// v0.1 implementation shells out to the `ros2` CLI for graph introspection.
+/// Future versions will add rosbridge WebSocket transport and/or rclrs for
+/// direct integration.
 ///
 /// This broker enforces pattern-based access gating: each operation is checked
 /// against the capability's declared topic/service/parameter patterns before
@@ -15,8 +16,8 @@ use gang_core::error::BrokerError;
 pub struct RosInterfaceBroker {
     /// Allowed topic/service/parameter patterns.
     allowed_patterns: Vec<RosAccessRule>,
-    /// Whether a rosbridge connection is available.
-    rosbridge_available: bool,
+    /// Whether the `ros2` CLI tools are accessible (proxy for ROS 2 running).
+    ros2_available: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -28,26 +29,35 @@ pub struct RosAccessRule {
 
 impl RosInterfaceBroker {
     pub fn new(allowed_patterns: Vec<RosAccessRule>) -> Self {
-        // Check if rosbridge is available
-        let rosbridge_available = check_rosbridge();
+        let ros2_available = check_ros2_available();
 
         Self {
             allowed_patterns,
-            rosbridge_available,
+            ros2_available,
         }
     }
 
-    /// Create a broker with an explicit rosbridge availability flag.
+    /// Create a broker with an explicit `ros2_available` flag.
     /// Useful for testing or when the caller already knows the connection state.
     #[cfg(test)]
-    fn with_rosbridge_flag(
-        allowed_patterns: Vec<RosAccessRule>,
-        rosbridge_available: bool,
-    ) -> Self {
+    fn with_ros2_flag(allowed_patterns: Vec<RosAccessRule>, ros2_available: bool) -> Self {
         Self {
             allowed_patterns,
-            rosbridge_available,
+            ros2_available,
         }
+    }
+
+    /// Filter a list of ROS 2 resource names to only those matching at least
+    /// one of the broker's allowed patterns (read access is sufficient).
+    fn filter_by_allowed_patterns(&self, names: Vec<String>) -> Vec<String> {
+        names
+            .into_iter()
+            .filter(|name| {
+                self.allowed_patterns
+                    .iter()
+                    .any(|rule| glob_match::glob_match(&rule.pattern, name))
+            })
+            .collect()
     }
 
     fn check_access(&self, resource: &str, needs_write: bool) -> Result<(), BrokerError> {
@@ -80,10 +90,13 @@ impl CapabilityBroker for RosInterfaceBroker {
     ) -> Result<CapabilityResponse, BrokerError> {
         match req.operation {
             BrokerOperation::RosList => {
-                // Use ros2 CLI to list topics, services, and parameters
-                let topics = ros2_topic_list();
-                let services = ros2_service_list();
-                let nodes = ros2_node_list();
+                // Use ros2 CLI to list topics, services, and nodes, then
+                // filter each list to only resources matching the broker's
+                // allowed patterns so unprivileged components cannot
+                // enumerate the full ROS 2 graph.
+                let topics = self.filter_by_allowed_patterns(ros2_topic_list());
+                let services = self.filter_by_allowed_patterns(ros2_service_list());
+                let nodes = self.filter_by_allowed_patterns(ros2_node_list());
 
                 let listing = RosListing {
                     topics,
@@ -107,15 +120,15 @@ impl CapabilityBroker for RosInterfaceBroker {
             BrokerOperation::TopicSubscribe { ref topic } => {
                 self.check_access(topic, false)?;
 
-                if !self.rosbridge_available {
+                if !self.ros2_available {
                     return Err(BrokerError::Unavailable {
                         broker: "ros".into(),
-                        reason: "rosbridge not available — is ROS 2 running?".into(),
+                        reason: "ros2 CLI not available — is ROS 2 running?".into(),
                     });
                 }
 
-                // In full implementation: subscribe via rosbridge WebSocket
-                // and stream messages back. For now, return current topic info.
+                // In full implementation: subscribe via rosbridge WebSocket or
+                // rclrs and stream messages back. For now, return current topic info.
                 let info = ros2_topic_info(topic);
                 let data = serde_json::to_vec(&info).map_err(|e| BrokerError::Unavailable {
                     broker: "ros".into(),
@@ -136,10 +149,10 @@ impl CapabilityBroker for RosInterfaceBroker {
             } => {
                 self.check_access(service, true)?;
 
-                if !self.rosbridge_available {
+                if !self.ros2_available {
                     return Err(BrokerError::Unavailable {
                         broker: "ros".into(),
-                        reason: "rosbridge not available".into(),
+                        reason: "ros2 CLI not available".into(),
                     });
                 }
 
@@ -174,10 +187,10 @@ impl CapabilityBroker for RosInterfaceBroker {
             BrokerOperation::ParamGet { ref name } => {
                 self.check_access(name, false)?;
 
-                if !self.rosbridge_available {
+                if !self.ros2_available {
                     return Err(BrokerError::Unavailable {
                         broker: "ros".into(),
-                        reason: "rosbridge not available — is ROS 2 running?".into(),
+                        reason: "ros2 CLI not available — is ROS 2 running?".into(),
                     });
                 }
 
@@ -210,10 +223,10 @@ impl CapabilityBroker for RosInterfaceBroker {
             } => {
                 self.check_access(name, true)?;
 
-                if !self.rosbridge_available {
+                if !self.ros2_available {
                     return Err(BrokerError::Unavailable {
                         broker: "ros".into(),
-                        reason: "rosbridge not available — is ROS 2 running?".into(),
+                        reason: "ros2 CLI not available — is ROS 2 running?".into(),
                     });
                 }
 
@@ -262,9 +275,12 @@ pub struct RosListing {
     pub nodes: Vec<String>,
 }
 
-fn check_rosbridge() -> bool {
-    // Check if rosbridge_server is running by looking for the process
-    // or checking its default WebSocket port (9090)
+/// Check whether the `ros2` CLI tools are accessible, which is a proxy for
+/// whether ROS 2 is installed and the environment is sourced.
+///
+/// NOTE: When WebSocket rosbridge transport is added, this should check
+/// port 9090 connectivity instead (or in addition).
+fn check_ros2_available() -> bool {
     std::process::Command::new("ros2")
         .args(["topic", "list"])
         .output()
@@ -272,6 +288,11 @@ fn check_rosbridge() -> bool {
         .unwrap_or(false)
 }
 
+/// List all ROS 2 topics by shelling out to `ros2 topic list`.
+///
+/// Uses the ros2 CLI directly. This is intentional: the broker runs as a
+/// privileged Layer 3 host process. Rosbridge WebSocket transport is planned
+/// for future versions.
 fn ros2_topic_list() -> Vec<String> {
     std::process::Command::new("ros2")
         .args(["topic", "list"])
@@ -287,6 +308,10 @@ fn ros2_topic_list() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// List all ROS 2 services by shelling out to `ros2 service list`.
+///
+/// Uses the ros2 CLI directly. Rosbridge WebSocket transport is planned
+/// for future versions.
 fn ros2_service_list() -> Vec<String> {
     std::process::Command::new("ros2")
         .args(["service", "list"])
@@ -302,6 +327,10 @@ fn ros2_service_list() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// List all ROS 2 nodes by shelling out to `ros2 node list`.
+///
+/// Uses the ros2 CLI directly. Rosbridge WebSocket transport is planned
+/// for future versions.
 fn ros2_node_list() -> Vec<String> {
     std::process::Command::new("ros2")
         .args(["node", "list"])
@@ -317,6 +346,11 @@ fn ros2_node_list() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Get verbose info for a single ROS 2 topic by shelling out to
+/// `ros2 topic info <topic> -v`.
+///
+/// Uses the ros2 CLI directly. Rosbridge WebSocket transport is planned
+/// for future versions.
 fn ros2_topic_info(topic: &str) -> serde_json::Value {
     let output = std::process::Command::new("ros2")
         .args(["topic", "info", topic, "-v"])
@@ -343,25 +377,25 @@ fn ros2_topic_info(topic: &str) -> serde_json::Value {
 mod tests {
     use super::*;
 
-    fn rw_broker(rosbridge: bool) -> RosInterfaceBroker {
-        RosInterfaceBroker::with_rosbridge_flag(
+    fn rw_broker(ros2: bool) -> RosInterfaceBroker {
+        RosInterfaceBroker::with_ros2_flag(
             vec![RosAccessRule {
                 pattern: "/params/**".into(),
                 read: true,
                 write: true,
             }],
-            rosbridge,
+            ros2,
         )
     }
 
-    fn ro_broker(rosbridge: bool) -> RosInterfaceBroker {
-        RosInterfaceBroker::with_rosbridge_flag(
+    fn ro_broker(ros2: bool) -> RosInterfaceBroker {
+        RosInterfaceBroker::with_ros2_flag(
             vec![RosAccessRule {
                 pattern: "/params/**".into(),
                 read: true,
                 write: false,
             }],
-            rosbridge,
+            ros2,
         )
     }
 
@@ -411,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn param_set_unavailable_without_rosbridge() {
+    async fn param_set_unavailable_without_ros2() {
         let broker = rw_broker(false);
         let req = param_set_request("/params/max_speed", vec![0x01]);
         let err = broker.handle_request(req).await.unwrap_err();
@@ -421,7 +455,7 @@ mod tests {
     // --- ParamGet tests ---
 
     #[tokio::test]
-    async fn param_get_returns_data_when_rosbridge_available() {
+    async fn param_get_returns_data_when_ros2_available() {
         let broker = rw_broker(true);
         let req = CapabilityRequest {
             capability_group: "ganglion:ros/interface".into(),
@@ -441,7 +475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn param_get_unavailable_without_rosbridge() {
+    async fn param_get_unavailable_without_ros2() {
         let broker = rw_broker(false);
         let req = CapabilityRequest {
             capability_group: "ganglion:ros/interface".into(),
@@ -469,7 +503,7 @@ mod tests {
     // --- ServiceCall tests ---
 
     #[tokio::test]
-    async fn service_call_returns_data_when_rosbridge_available() {
+    async fn service_call_returns_data_when_ros2_available() {
         let broker = rw_broker(true);
         let request_payload = b"{}".to_vec();
         let req = CapabilityRequest {
@@ -491,7 +525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_call_unavailable_without_rosbridge() {
+    async fn service_call_unavailable_without_ros2() {
         let broker = rw_broker(false);
         let req = CapabilityRequest {
             capability_group: "ganglion:ros/interface".into(),
@@ -549,8 +583,8 @@ mod tests {
         }
     }
 
-    fn make_broker(patterns: Vec<RosAccessRule>, rosbridge: bool) -> RosInterfaceBroker {
-        RosInterfaceBroker::with_rosbridge_flag(patterns, rosbridge)
+    fn make_broker(patterns: Vec<RosAccessRule>, ros2: bool) -> RosInterfaceBroker {
+        RosInterfaceBroker::with_ros2_flag(patterns, ros2)
     }
 
     // -------------------------------------------------------------------
@@ -560,7 +594,7 @@ mod tests {
     #[test]
     fn test_ros_broker_default() {
         let broker = make_broker(vec![], false);
-        assert!(!broker.rosbridge_available);
+        assert!(!broker.ros2_available);
         assert!(broker.allowed_patterns.is_empty());
     }
 
@@ -660,7 +694,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_ros_topic_subscribe_no_rosbridge() {
+    async fn test_ros_topic_subscribe_no_ros2() {
         let broker = make_broker(vec![rule("/cmd_vel", true, true)], false);
         let req = CapabilityRequest {
             capability_group: "ganglion:ros/interface".into(),
@@ -671,7 +705,7 @@ mod tests {
         let err = broker.handle_request(req).await.unwrap_err();
         match err {
             BrokerError::Unavailable { reason, .. } => {
-                assert!(reason.contains("rosbridge"), "reason: {reason}");
+                assert!(reason.contains("ros2 CLI"), "reason: {reason}");
             }
             other => panic!("expected Unavailable, got {other:?}"),
         }
@@ -712,10 +746,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ros_list_succeeds_without_rosbridge() {
-        // RosList does not gate on rosbridge_available or check_access;
-        // it always attempts ros2 CLI and returns whatever it gets.
-        let broker = make_broker(vec![], false);
+    async fn test_ros_list_succeeds_without_ros2() {
+        // RosList does not gate on ros2_available; it always attempts the
+        // ros2 CLI and returns whatever it gets (filtered by allowed patterns).
+        let broker = make_broker(vec![rule("/**", true, false)], false);
         let req = CapabilityRequest {
             capability_group: "ganglion:ros/interface".into(),
             operation: BrokerOperation::RosList,
@@ -727,6 +761,35 @@ mod tests {
         let _ = listing.topics;
         let _ = listing.services;
         let _ = listing.nodes;
+    }
+
+    #[test]
+    fn test_ros_list_filters_by_allowed_patterns() {
+        // filter_by_allowed_patterns should keep only names matching at
+        // least one allowed pattern and drop the rest.
+        let broker = make_broker(
+            vec![rule("/cmd_vel", true, false), rule("/scan/**", true, false)],
+            false,
+        );
+
+        let input = vec![
+            "/cmd_vel".to_string(),
+            "/scan/front".to_string(),
+            "/scan/rear".to_string(),
+            "/secret_topic".to_string(),
+            "/odom".to_string(),
+        ];
+
+        let filtered = broker.filter_by_allowed_patterns(input);
+        assert_eq!(filtered, vec!["/cmd_vel", "/scan/front", "/scan/rear"]);
+    }
+
+    #[test]
+    fn test_ros_list_empty_patterns_filters_everything() {
+        let broker = make_broker(vec![], false);
+        let input = vec!["/topic_a".to_string(), "/topic_b".to_string()];
+        let filtered = broker.filter_by_allowed_patterns(input);
+        assert!(filtered.is_empty());
     }
 
     #[test]

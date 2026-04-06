@@ -1486,6 +1486,16 @@ pub async fn registry_publish(
     let data = std::fs::read(path)?;
     let component_cid = gang_core::artifacts::Cid::from_bytes(&data);
 
+    // Read the manifest and compute its CID
+    let manifest_path = path.with_extension("manifest.cbor");
+    let manifest_cid = if manifest_path.exists() {
+        let manifest_bytes = std::fs::read(&manifest_path)?;
+        gang_core::artifacts::Cid::from_bytes(&manifest_bytes)
+    } else {
+        // No manifest found; compute CID from the component bytes as fallback
+        gang_core::artifacts::Cid::from_bytes(&data)
+    };
+
     // Derive name from filename
     let name = path
         .file_stem()
@@ -1509,7 +1519,7 @@ pub async fn registry_publish(
         author_peer_id: author,
         language: gang_core::registry::CapabilityLanguage::Rust,
         component_cid: component_cid.clone(),
-        manifest_cid: gang_core::artifacts::Cid::from_bytes(b"manifest-placeholder"),
+        manifest_cid,
         declared_capabilities: vec![],
         published_at: chrono::Utc::now().to_rfc3339(),
         tags: tags.map(|t| t.to_vec()).unwrap_or_default(),

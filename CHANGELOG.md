@@ -2,6 +2,35 @@
 
 All notable changes to Ganglion will be documented in this file.
 
+## [0.5.0] — 2026-04-23
+
+### Security
+
+- **Filesystem broker symlink jail bypass** (`gang-ros`): Write operations to new files now canonicalize the parent directory, preventing path traversal via `../` or symlinked parents (ADR-015).
+- **RosList access control enforcement** (`gang-ros`): `RosList` now filters results through allowed patterns — components can only see topics/services/nodes matching their policy.
+- **Rosbridge naming correction** (`gang-ros`): Renamed `rosbridge_available` → `ros2_available` and `check_rosbridge()` → `check_ros2_available()` to accurately describe the current implementation (ros2 CLI, not WebSocket rosbridge).
+
+### Added
+
+- **WASM-to-broker glue layer** (`gang-wasm-host`): New `imports` module registers async host functions for all 8 WIT capability interfaces on the Wasmtime linker. WASM components can now call broker operations through their declared WIT imports, completing the Layer 2 → Layer 3 bridge that was the project's central architectural gap. Includes Val extraction helpers and JSON serialization across the WASM boundary.
+- **WASM execution path in robot agent** (`gang-ros`): `invoke_capability()` now attempts WASM execution when component bytes contain valid WASM (`\0asm` magic header). Falls back to direct broker invocation for non-WASM capabilities.
+- **Reference diagnostic capability** (`gang-capability-diagnostics`): Full implementation with `DiagnosticReport` struct, `collect()` function, `format_report()` output, and 6 tests. Replaces the empty 2-line stub.
+- **ROS broker operations** (`gang-ros`): `ServiceCall`, `ParamGet`, and `ParamSet` broker operations with structured rosbridge-protocol responses (ADR-016, ADR-017).
+- **`param-set` WIT operation** (`gang-wasm-host`): Added to `ros-interface`; WIT package version bumped to `@0.5.0` (ADR-017).
+- **`gang status` CLI command** (`gang-cli`): Reports version, identity, registry, available and WIP capabilities (ADR-018).
+- **Real CID in `gang deploy`** (`gang-cli`): Deploy now computes actual CID from manifest bytes instead of using a hardcoded placeholder.
+- **Capability loading on agent startup** (`gang-ros`): `load_installed_capabilities()` now scans the capabilities directory, deserializes manifests, verifies signatures and trust store, and logs warnings for failures.
+- **48 new tests** across 5 crates. **174 total tests passing.**
+
+### Changed
+
+- `BrokerOperation` enum gains `ParamSet` variant.
+- WIT package version `ganglion:capability@0.5.0`.
+- Wasmtime engine configured with `async_support(true)` for correct async instantiation.
+- `gang-ros` depends on `gang-wasm-host` for WASM execution path.
+
+---
+
 ## [0.4.0] — 2026-04-23
 
 ### Added
