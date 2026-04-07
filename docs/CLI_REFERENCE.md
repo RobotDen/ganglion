@@ -354,6 +354,40 @@ List all capabilities in the local registry.
 
 Show detailed information for a specific capability.
 
+## Relay server
+
+### `gang relay`
+
+Run a circuit relay v2 server for NAT traversal. This is the bootstrap relay
+described in the design spec (`relay.gang.tafy.dev`). Robot agents behind NAT
+connect to the relay so operators can reach them.
+
+```bash
+$ gang relay
+Ganglion Relay Server
+====================
+
+Peer ID:      12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
+Relay mode:   server
+Metrics port: 9090 (not yet active)
+
+Listen addresses:
+  /ip4/0.0.0.0/tcp/4001
+  /ip4/0.0.0.0/udp/4001/quic-v1
+
+Relay is running. Press Ctrl+C to stop.
+```
+
+| Flag | Description |
+|------|-------------|
+| `--listen-addr <ADDR>` | Multiaddr to listen on. Can be specified multiple times. Default: TCP and QUIC on port 4001. |
+| `--port <PORT>` | Port shorthand (sets both TCP and QUIC). Default: `4001`. |
+| `--metrics-port <PORT>` | Metrics HTTP port (placeholder). Default: `9090`. |
+
+The relay generates or loads an identity from `~/.gang/identity.key` and
+prints the full relay multiaddr that clients should put in their `relay_addrs`
+config. See `deploy/relay/README.md` for production deployment with Docker.
+
 ## Fleet management
 
 ### `gang list` [WIP]

@@ -1,0 +1,14 @@
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: deploy/relay/Dockerfile
+    ports:
+      - "4001:4001/tcp"
+      - "4001:4001/udp"
+    volumes:
+      - relay-data:/data
+    restart: unless-stopped
+
+volumes:
+  relay-data:

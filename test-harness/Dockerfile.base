@@ -8,8 +8,19 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY . .
-RUN cargo build --release -p gang -p gang-ros
+
+# Copy manifests first for layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+# Remove rust-toolchain.toml if present — the wasm32-wasip2 target is not
+# needed for the CLI binary and is not available in this base image.
+RUN rm -f rust-toolchain.toml
+
+# Build only the gang CLI binary (it transitively pulls in gang-ros and
+# everything else). Skip gang-ros as a standalone build since the CLI
+# already depends on it.
+RUN cargo build --release -p gang
 
 FROM debian:bookworm-slim
 
@@ -24,6 +35,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/gang /usr/local/bin/gang
+
+# Pre-create data directory
+RUN mkdir -p /data
 
 # Default entrypoint runs the gang CLI
 ENTRYPOINT ["gang"]

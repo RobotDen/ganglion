@@ -165,6 +165,26 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         prefer_transport: Option<Vec<String>>,
     },
+
+    /// Run a circuit relay v2 server for NAT traversal.
+    ///
+    /// Starts a Ganglion node in relay-server mode, enabling robot agents
+    /// behind NAT to accept inbound connections. This is the bootstrap relay
+    /// described in the design spec (relay.gang.tafy.dev).
+    Relay {
+        /// Multiaddr(s) to listen on. Can be specified multiple times.
+        /// Default: /ip4/0.0.0.0/tcp/4001 and /ip4/0.0.0.0/udp/4001/quic-v1
+        #[arg(long, value_name = "ADDR")]
+        listen_addr: Option<Vec<String>>,
+
+        /// TCP/UDP port to listen on (shorthand for default addrs on this port).
+        #[arg(long, default_value = "4001")]
+        port: u16,
+
+        /// Metrics HTTP port (placeholder for future Prometheus endpoint).
+        #[arg(long, default_value = "9090")]
+        metrics_port: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -334,6 +354,11 @@ async fn main() -> anyhow::Result<()> {
                 "Run `gang demo` to see current capabilities, or `gang status` for a summary."
             );
         }
+        Commands::Relay {
+            listen_addr,
+            port,
+            metrics_port,
+        } => commands::relay(listen_addr, port, metrics_port).await?,
     }
 
     Ok(())

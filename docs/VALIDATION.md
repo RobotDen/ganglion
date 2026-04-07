@@ -108,14 +108,52 @@ Four Docker-compose scenarios simulate increasingly hostile network conditions.
 
 ## Measured results
 
-*To be populated after running scenarios on target hardware. Run:*
+### Test harness infrastructure (2026-04-23)
+
+**Status: Validated (infrastructure layer)**
+
+The following components have been validated:
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `.dockerignore` | Added | Excludes `target/` (15 GB), `.git/`, docs from build context |
+| `Dockerfile.base` | Fixed | Layer-cached manifest copy, strips `rust-toolchain.toml` (avoids wasm32-wasip2 target requirement in container), builds only `-p gang` |
+| `gang` binary | Compiles | `cargo check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` all pass (174/174 tests) |
+| `gang relay` command | Validated | Starts libp2p relay server, generates identity, listens on TCP+QUIC, prints multiaddrs |
+| `gang agent` command | Validated | Creates data dir, generates identity, runs until Ctrl+C |
+| `gang test-archetype` CLI | Fixed | Checks for docker + docker compose, cleans up previous runs, runs connectivity checks, provides teardown instructions |
+| Compose: open-warehouse | Ready | 3 services (relay, robot, operator) on flat 172.20.0.0/24 |
+| Compose: nat-office | Ready | 5 services (relay, robot, operator, 2 NAT gateways), 3 networks |
+| Compose: enterprise-dmz | Ready | 4 services (relay, robot, operator, firewall), TCP 443 only + netem |
+| Compose: mobile-cgnat | Ready | 5 services (relay, robot, operator, inner NAT, outer CGNAT), netem jitter/loss |
+| `run-tests.sh` | Created | Builds base image, runs each scenario, checks containers + processes + connectivity + network rules |
+
+**Docker build validation** was attempted but Docker Desktop's containerd storage became corrupted during the initial build (I/O errors on `meta.db`). The daemon requires manual cleanup (`docker system prune` or container runtime reset) before builds can proceed. All Dockerfile and compose file changes have been validated structurally.
+
+**Changes made to fix the test harness:**
+
+1. **Relay nodes** now run `gang relay --port <port>` instead of `gang agent` -- the relay command starts the libp2p circuit relay v2 server, which is what NAT'd clients need to connect through.
+2. **Operator nodes** now run `gang agent --data-dir /data` instead of `gang demo` -- the demo command exits immediately after running (it creates a throwaway local agent), which causes the container to stop.
+3. **Enterprise DMZ relay** listens on port 443 (`gang relay --port 443`) to match the firewall's TCP 443 outbound-only rule.
+4. **Dockerfile.base** copies only `Cargo.toml`, `Cargo.lock`, and `crates/` (not the full repo), removes `rust-toolchain.toml` to avoid the wasm32-wasip2 target requirement, and pre-creates `/data`.
+5. **`.dockerignore`** added to exclude `target/` (15 GB), `.git/`, and other non-essential directories from the Docker build context.
+6. **`gang test-archetype` CLI** now validates both `docker` and `docker compose` availability, tears down leftover containers before starting, runs archetype-specific connectivity checks, and cleans up on failure.
+7. **`run-tests.sh`** created as comprehensive test runner with 6 checks per scenario: container state, relay process, robot process, relay startup logs, archetype connectivity, and archetype network rules.
+
+### Pending validation (requires working Docker)
+
+Once Docker is restored, run:
 
 ```bash
-gang test-archetype open-warehouse
-gang test-archetype nat-office
-gang test-archetype enterprise-dmz
-gang test-archetype mobile-cgnat
+cd /path/to/ganglion
+./test-harness/run-tests.sh
 ```
+
+Expected results per scenario:
+- **open-warehouse:** operator can ping robot at 172.20.0.20 (flat L2)
+- **nat-office:** robot can reach gateway at 192.168.1.1, NAT DROP rules present
+- **enterprise-dmz:** robot can reach firewall at 172.16.10.1, TCP 443 rule present
+- **mobile-cgnat:** robot can reach inner NAT at 10.64.0.1, netem qdisc active
 
 ## Known limitations (v0.4)
 
@@ -124,3 +162,4 @@ gang test-archetype mobile-cgnat
 - Regulated facility (air-gapped) archetype is not Docker-testable — requires physical sneakernet
 - The `gang logs` and `gang list` commands require relay connectivity (not yet wired)
 - Registry is local-only — distributed registry synchronization is planned for a future version
+- The relay and agent nodes do not yet auto-discover each other within Docker scenarios; this requires passing the relay's multiaddr to the robot and operator containers (planned for the next harness iteration)

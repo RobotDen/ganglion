@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Public bootstrap relay multiaddr. The peer ID suffix will be populated
+/// after the first deployment of relay.gang.tafy.dev. Until then, this
+/// constant is a placeholder and is NOT added to default config.
+#[allow(dead_code)]
+pub const BOOTSTRAP_RELAY: &str = "/dns4/relay.gang.tafy.dev/tcp/4001/p2p/<PEER_ID>";
+
 /// Configuration for the libp2p transport adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Libp2pConfig {

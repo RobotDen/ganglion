@@ -45,6 +45,7 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         "registry publish",
         "registry list",
         "registry info",
+        "relay",
         "status",
     ];
 
@@ -572,15 +573,36 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
         );
     }
 
-    // Check Docker
-    let docker_check = std::process::Command::new("docker").args(["info"]).output();
+    // Check Docker is available
+    let docker_check = std::process::Command::new("docker")
+        .args(["info"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 
     match docker_check {
-        Ok(out) if out.status.success() => {}
+        Ok(s) if s.success() => {}
         _ => {
             anyhow::bail!(
                 "Docker is required for test-archetype but is not available.\n\
                  Install Docker and try again."
+            );
+        }
+    }
+
+    // Check docker compose is available
+    let compose_check = std::process::Command::new("docker")
+        .args(["compose", "version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match compose_check {
+        Ok(s) if s.success() => {}
+        _ => {
+            anyhow::bail!(
+                "docker compose is required but not available.\n\
+                 Install the Docker Compose plugin and try again."
             );
         }
     }
@@ -617,7 +639,6 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     println!();
 
     // Locate the test-harness directory relative to the binary or CWD.
-    // Search order: ./test-harness, ../test-harness, ../../test-harness
     let scenario_dir = find_scenario_dir(archetype)?;
     let compose_file = scenario_dir.join("docker-compose.yml");
 
@@ -630,18 +651,28 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     }
 
     let project_name = format!("ganglion-{archetype}");
+    let compose_path = compose_file.to_string_lossy().to_string();
 
-    // Build
-    println!("Building container images...");
-    let build_status = std::process::Command::new("docker")
+    // Tear down any leftover from previous runs
+    let _ = std::process::Command::new("docker")
         .args([
             "compose",
             "-p",
             &project_name,
             "-f",
-            &compose_file.to_string_lossy(),
-            "build",
+            &compose_path,
+            "down",
+            "-v",
+            "--remove-orphans",
         ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // Build
+    println!("Building container images...");
+    let build_status = std::process::Command::new("docker")
+        .args(["compose", "-p", &project_name, "-f", &compose_path, "build"])
         .status()?;
 
     if !build_status.success() {
@@ -657,43 +688,54 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
             "-p",
             &project_name,
             "-f",
-            &compose_file.to_string_lossy(),
+            &compose_path,
             "up",
             "-d",
         ])
         .status()?;
 
     if !up_status.success() {
+        // Clean up on failure
+        let _ = std::process::Command::new("docker")
+            .args([
+                "compose",
+                "-p",
+                &project_name,
+                "-f",
+                &compose_path,
+                "down",
+                "-v",
+                "--remove-orphans",
+            ])
+            .status();
         anyhow::bail!("Failed to start scenario. Check output above.");
     }
 
     // Wait for stabilization
     println!("Waiting for services to stabilize...");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     // Show service status
     println!();
     let _ = std::process::Command::new("docker")
-        .args([
-            "compose",
-            "-p",
-            &project_name,
-            "-f",
-            &compose_file.to_string_lossy(),
-            "ps",
-        ])
+        .args(["compose", "-p", &project_name, "-f", &compose_path, "ps"])
         .status();
+
+    // Run connectivity checks
+    println!();
+    println!("=== Connectivity checks ===");
+    run_archetype_checks(archetype, &project_name, &compose_path);
 
     // Show logs
     println!();
-    println!("=== Service logs ===");
+    println!("=== Service logs (last 20 lines) ===");
     let _ = std::process::Command::new("docker")
         .args([
             "compose",
             "-p",
             &project_name,
             "-f",
-            &compose_file.to_string_lossy(),
+            &compose_path,
             "logs",
             "--tail",
             "20",
@@ -706,22 +748,88 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     println!("============================================");
     println!();
     println!("Inspect manually:");
-    println!(
-        "  docker compose -p {project_name} -f {} exec robot bash",
-        compose_file.display()
-    );
-    println!(
-        "  docker compose -p {project_name} -f {} logs -f",
-        compose_file.display()
-    );
+    println!("  docker compose -p {project_name} -f {compose_path} exec robot bash");
+    println!("  docker compose -p {project_name} -f {compose_path} logs -f");
     println!();
     println!("Tear down:");
-    println!(
-        "  docker compose -p {project_name} -f {} down -v",
-        compose_file.display()
-    );
+    println!("  docker compose -p {project_name} -f {compose_path} down -v");
 
     Ok(())
+}
+
+/// Run archetype-specific network connectivity checks.
+fn run_archetype_checks(archetype: &str, project_name: &str, compose_path: &str) {
+    let docker_exec = |service: &str, cmd: &[&str]| -> bool {
+        let mut args = vec![
+            "compose",
+            "-p",
+            project_name,
+            "-f",
+            compose_path,
+            "exec",
+            "-T",
+            service,
+        ];
+        args.extend_from_slice(cmd);
+        std::process::Command::new("docker")
+            .args(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+
+    match archetype {
+        "open-warehouse" => {
+            let ok = docker_exec("operator", &["ping", "-c", "2", "-W", "2", "172.20.0.20"]);
+            println!(
+                "  operator -> robot (direct):  {}",
+                if ok { "OK" } else { "FAIL" }
+            );
+            let ok = docker_exec("robot", &["ping", "-c", "2", "-W", "2", "172.20.0.10"]);
+            println!(
+                "  robot -> relay (direct):     {}",
+                if ok { "OK" } else { "FAIL" }
+            );
+        }
+        "nat-office" => {
+            let ok = docker_exec("robot", &["ping", "-c", "2", "-W", "2", "192.168.1.1"]);
+            println!(
+                "  robot -> NAT gateway:        {}",
+                if ok { "OK" } else { "FAIL" }
+            );
+            let ok = docker_exec("operator", &["ping", "-c", "2", "-W", "2", "192.168.2.1"]);
+            println!(
+                "  operator -> NAT gateway:     {}",
+                if ok { "OK" } else { "FAIL" }
+            );
+        }
+        "enterprise-dmz" => {
+            let ok = docker_exec("robot", &["ping", "-c", "2", "-W", "2", "172.16.10.1"]);
+            println!(
+                "  robot -> firewall:           {}",
+                if ok { "OK" } else { "FAIL" }
+            );
+            let ok = docker_exec("operator", &["ping", "-c", "2", "-W", "2", "10.1.0.10"]);
+            println!(
+                "  operator -> relay (direct):  {}",
+                if ok { "OK" } else { "FAIL" }
+            );
+        }
+        "mobile-cgnat" => {
+            let ok = docker_exec("robot", &["ping", "-c", "2", "-W", "2", "10.64.0.1"]);
+            println!(
+                "  robot -> inner NAT:          {}",
+                if ok { "OK" } else { "FAIL" }
+            );
+            let ok = docker_exec("operator", &["ping", "-c", "2", "-W", "2", "10.2.0.10"]);
+            println!(
+                "  operator -> relay (direct):  {}",
+                if ok { "OK" } else { "FAIL" }
+            );
+        }
+        _ => {}
+    }
 }
 
 /// Find the test-harness scenario directory by searching upward from CWD.
@@ -1587,6 +1695,76 @@ pub async fn registry_info(name: &str, _format: &OutputFormat) -> anyhow::Result
             eprintln!("{name} not found in registry.");
         }
     }
+    Ok(())
+}
+
+/// `gang relay` — run a circuit relay v2 server.
+pub async fn relay(
+    listen_addrs: Option<Vec<String>>,
+    port: u16,
+    metrics_port: u16,
+) -> anyhow::Result<()> {
+    use gang_libp2p::Libp2pConfig;
+
+    // Load or generate identity
+    let key_path = gang_core::identity::default_key_path();
+    let keypair = gang_core::identity::Keypair::load_or_generate(&key_path)?;
+    let peer_id = keypair.peer_id();
+
+    // Build listen addresses from explicit addrs or port shorthand
+    let addrs = match listen_addrs {
+        Some(addrs) if !addrs.is_empty() => addrs,
+        _ => vec![
+            format!("/ip4/0.0.0.0/tcp/{port}"),
+            format!("/ip4/0.0.0.0/udp/{port}/quic-v1"),
+        ],
+    };
+
+    let config = Libp2pConfig {
+        key_path,
+        listen_addrs: addrs.clone(),
+        relay_server: true,
+        ..Default::default()
+    };
+
+    println!("Ganglion Relay Server");
+    println!("====================");
+    println!();
+    println!("Peer ID:      {peer_id}");
+    println!("Relay mode:   server");
+    println!("Metrics port: {metrics_port} (not yet active)");
+    println!();
+    println!("Listen addresses:");
+    for addr in &addrs {
+        println!("  {addr}");
+    }
+    println!();
+
+    // Print the relay multiaddr that clients should use
+    println!("Relay multiaddrs (for client config):");
+    for addr in &addrs {
+        println!("  {addr}/p2p/{peer_id}");
+    }
+    println!();
+
+    // Create the transport adapter and run
+    let adapter = gang_libp2p::Libp2pTransportAdapter::new(config).await?;
+
+    println!("Relay is running. Press Ctrl+C to stop.");
+    println!();
+
+    // Run the event loop until interrupted
+    tokio::select! {
+        result = adapter.run_event_loop() => {
+            if let Err(e) = result {
+                eprintln!("Event loop error: {e}");
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nRelay stopped.");
+        }
+    }
+
     Ok(())
 }
 

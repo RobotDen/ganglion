@@ -9,7 +9,7 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["agent", "--data-dir", "/data"]
+    command: ["relay", "--port", "443"]
     volumes:
       - relay-data:/data
     networks:
@@ -37,7 +37,7 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["demo"]
+    command: ["agent", "--data-dir", "/data"]
     volumes:
       - operator-data:/data
     networks:

@@ -1,0 +1,11 @@
+target/
+.git/
+.github/
+.githooks/
+.claude-flow/
+.hive-mind/
+.obsidian/
+.smart-env/
+docs/
+*.md
+!crates/**/*.md

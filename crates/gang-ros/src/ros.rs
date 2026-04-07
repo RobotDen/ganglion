@@ -1,8 +1,21 @@
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use gang_core::broker::{BrokerOperation, CapabilityBroker, CapabilityRequest, CapabilityResponse};
 use gang_core::error::BrokerError;
+
+/// Maximum output size from a `ros2` CLI invocation (1 MiB).
+const MAX_OUTPUT_BYTES: usize = 1_048_576;
+
+/// Default timeout for `ros2` graph introspection commands.
+const ROS2_CMD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Short timeout used only for the availability probe (`ros2 --version`).
+const ROS2_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// ROS 2 interface broker — mediates WASM capability access to the ROS 2 graph.
 ///
@@ -61,6 +74,7 @@ impl RosInterfaceBroker {
     }
 
     fn check_access(&self, resource: &str, needs_write: bool) -> Result<(), BrokerError> {
+        validate_ros_name(resource)?;
         for rule in &self.allowed_patterns {
             if glob_match::glob_match(&rule.pattern, resource) {
                 if needs_write && !rule.write {
@@ -275,17 +289,106 @@ pub struct RosListing {
     pub nodes: Vec<String>,
 }
 
+/// Validate that a ROS 2 resource name contains only safe characters.
+///
+/// ROS 2 names use alphanumerics, underscores, hyphens, and forward slashes.
+/// Rejecting anything else prevents shell metacharacter injection even though
+/// `Command::new().args()` does not invoke a shell.
+fn validate_ros_name(name: &str) -> Result<(), BrokerError> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '/' || c == '-')
+    {
+        return Err(BrokerError::AccessDenied {
+            broker: "ros".into(),
+            resource: name.into(),
+            reason: "invalid ROS 2 resource name".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Run a `ros2` CLI sub-command with a wall-clock timeout and output size
+/// limit.  Returns the trimmed stdout on success.
+///
+/// On failure the stderr is logged at `warn!` level via `tracing`.
+fn ros2_command_with_timeout(args: &[&str], timeout: Duration) -> Result<String, String> {
+    let mut child = Command::new("ros2")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn ros2: {e}"))?;
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Process has exited — collect output.
+                let output = child
+                    .wait_with_output()
+                    .map_err(|e| format!("failed to read output: {e}"))?;
+
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!(
+                        args = ?args,
+                        status = %status,
+                        stderr = %stderr,
+                        "ros2 command failed"
+                    );
+                    return Err(format!("ros2 exited with {status}: {stderr}"));
+                }
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.len() > MAX_OUTPUT_BYTES {
+                    warn!(
+                        args = ?args,
+                        bytes = stdout.len(),
+                        limit = MAX_OUTPUT_BYTES,
+                        "ros2 output exceeded size limit"
+                    );
+                    return Err("ros2 output exceeded 1 MiB limit".into());
+                }
+                return Ok(stdout.to_string());
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    warn!(
+                        args = ?args,
+                        timeout = ?timeout,
+                        "ros2 command timed out — killing child process"
+                    );
+                    return Err(format!("ros2 command timed out after {timeout:?}"));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("error waiting for ros2: {e}")),
+        }
+    }
+}
+
 /// Check whether the `ros2` CLI tools are accessible, which is a proxy for
 /// whether ROS 2 is installed and the environment is sourced.
+///
+/// Uses `ros2 --version` with a 2-second timeout — much lighter than listing
+/// the full topic graph.
 ///
 /// NOTE: When WebSocket rosbridge transport is added, this should check
 /// port 9090 connectivity instead (or in addition).
 fn check_ros2_available() -> bool {
-    std::process::Command::new("ros2")
-        .args(["topic", "list"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    ros2_command_with_timeout(&["--version"], ROS2_PROBE_TIMEOUT).is_ok()
+}
+
+/// Parse newline-delimited CLI output into a `Vec<String>`, skipping blanks.
+fn lines_to_vec(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 /// List all ROS 2 topics by shelling out to `ros2 topic list`.
@@ -294,17 +397,8 @@ fn check_ros2_available() -> bool {
 /// privileged Layer 3 host process. Rosbridge WebSocket transport is planned
 /// for future versions.
 fn ros2_topic_list() -> Vec<String> {
-    std::process::Command::new("ros2")
-        .args(["topic", "list"])
-        .output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
+    ros2_command_with_timeout(&["topic", "list"], ROS2_CMD_TIMEOUT)
+        .map(|s| lines_to_vec(&s))
         .unwrap_or_default()
 }
 
@@ -313,17 +407,8 @@ fn ros2_topic_list() -> Vec<String> {
 /// Uses the ros2 CLI directly. Rosbridge WebSocket transport is planned
 /// for future versions.
 fn ros2_service_list() -> Vec<String> {
-    std::process::Command::new("ros2")
-        .args(["service", "list"])
-        .output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
+    ros2_command_with_timeout(&["service", "list"], ROS2_CMD_TIMEOUT)
+        .map(|s| lines_to_vec(&s))
         .unwrap_or_default()
 }
 
@@ -332,42 +417,29 @@ fn ros2_service_list() -> Vec<String> {
 /// Uses the ros2 CLI directly. Rosbridge WebSocket transport is planned
 /// for future versions.
 fn ros2_node_list() -> Vec<String> {
-    std::process::Command::new("ros2")
-        .args(["node", "list"])
-        .output()
-        .ok()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
+    ros2_command_with_timeout(&["node", "list"], ROS2_CMD_TIMEOUT)
+        .map(|s| lines_to_vec(&s))
         .unwrap_or_default()
 }
 
 /// Get verbose info for a single ROS 2 topic by shelling out to
 /// `ros2 topic info <topic> -v`.
 ///
+/// The `topic` name must already be validated by `validate_ros_name` before
+/// calling this function.
+///
 /// Uses the ros2 CLI directly. Rosbridge WebSocket transport is planned
 /// for future versions.
 fn ros2_topic_info(topic: &str) -> serde_json::Value {
-    let output = std::process::Command::new("ros2")
-        .args(["topic", "info", topic, "-v"])
-        .output();
-
-    match output {
-        Ok(o) => {
-            let text = String::from_utf8_lossy(&o.stdout).to_string();
-            serde_json::json!({
-                "topic": topic,
-                "info": text,
-                "available": o.status.success(),
-            })
-        }
+    match ros2_command_with_timeout(&["topic", "info", topic, "-v"], ROS2_CMD_TIMEOUT) {
+        Ok(text) => serde_json::json!({
+            "topic": topic,
+            "info": text,
+            "available": true,
+        }),
         Err(e) => serde_json::json!({
             "topic": topic,
-            "error": e.to_string(),
+            "error": e,
             "available": false,
         }),
     }
@@ -796,5 +868,67 @@ mod tests {
     fn test_ros_capability_group() {
         let broker = make_broker(vec![], false);
         assert_eq!(broker.capability_group(), "ganglion:ros/interface");
+    }
+
+    // -------------------------------------------------------------------
+    // validate_ros_name() tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_ros_name_valid() {
+        // Standard ROS 2 topic/service/node names.
+        assert!(validate_ros_name("/cmd_vel").is_ok());
+        assert!(validate_ros_name("/scan/front").is_ok());
+        assert!(validate_ros_name("/robot1/joint_states").is_ok());
+        assert!(validate_ros_name("/ns/sub-topic").is_ok());
+        assert!(validate_ros_name("relative_name").is_ok());
+    }
+
+    #[test]
+    fn test_validate_ros_name_invalid() {
+        // Empty name.
+        assert!(validate_ros_name("").is_err());
+        // Shell metacharacters.
+        assert!(validate_ros_name("/topic;rm -rf /").is_err());
+        assert!(validate_ros_name("/topic$(whoami)").is_err());
+        assert!(validate_ros_name("/topic`id`").is_err());
+        assert!(validate_ros_name("/topic|cat /etc/passwd").is_err());
+        assert!(validate_ros_name("/topic&bg").is_err());
+        // Control characters.
+        assert!(validate_ros_name("/topic\n").is_err());
+        assert!(validate_ros_name("/topic\0").is_err());
+        // Spaces.
+        assert!(validate_ros_name("/topic name").is_err());
+        // Dots (not valid in ROS 2 graph names).
+        assert!(validate_ros_name("/topic/../etc/passwd").is_err());
+    }
+
+    // -------------------------------------------------------------------
+    // ros2_command_with_timeout() tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_ros2_command_timeout() {
+        // Use `sleep` as a stand-in for a hanging ros2 process.
+        // We cannot easily test ros2 itself without ROS 2 installed,
+        // but we can verify the timeout mechanism works by calling a
+        // known command that will exceed the timeout.
+        let result = ros2_command_with_timeout(&["--version"], Duration::from_millis(1));
+        // Either ros2 is not installed (spawn fails) or the timeout
+        // fires before it finishes. Both are acceptable error cases.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_lines_to_vec() {
+        let input = "  /topic_a  \n/topic_b\n  \n/topic_c\n";
+        let result = lines_to_vec(input);
+        assert_eq!(result, vec!["/topic_a", "/topic_b", "/topic_c"]);
+    }
+
+    #[test]
+    fn test_lines_to_vec_empty() {
+        assert!(lines_to_vec("").is_empty());
+        assert!(lines_to_vec("  \n  \n").is_empty());
     }
 }

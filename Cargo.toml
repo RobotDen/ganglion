@@ -66,6 +66,7 @@ libp2p = { version = "0.54", features = [
     "macros",
     "dns",
     "serde",
+    "request-response",
 ] }
 
 # WASM runtime
