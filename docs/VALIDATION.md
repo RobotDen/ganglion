@@ -118,7 +118,7 @@ The following components have been validated:
 |-----------|--------|-------|
 | `.dockerignore` | Added | Excludes `target/` (15 GB), `.git/`, docs from build context |
 | `Dockerfile.base` | Fixed | Layer-cached manifest copy, strips `rust-toolchain.toml` (avoids wasm32-wasip2 target requirement in container), builds only `-p gang` |
-| `gang` binary | Compiles | `cargo check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` all pass (174/174 tests) |
+| `gang` binary | Compiles | `cargo check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` all pass (188/188 tests) |
 | `gang relay` command | Validated | Starts libp2p relay server, generates identity, listens on TCP+QUIC, prints multiaddrs |
 | `gang agent` command | Validated | Creates data dir, generates identity, runs until Ctrl+C |
 | `gang test-archetype` CLI | Fixed | Checks for docker + docker compose, cleans up previous runs, runs connectivity checks, provides teardown instructions |
