@@ -19,7 +19,7 @@ use crate::logs::LogStreamBroker;
 
 /// The robot agent — the central process running on a deployed robot.
 /// Manages installed capabilities, brokers, policy enforcement, and audit logging.
-#[allow(dead_code)] // Fields used as agent runtime is fleshed out
+#[allow(dead_code)] // keypair retained for future outbound signing
 pub struct RobotAgent {
     /// This robot's identity.
     keypair: Keypair,

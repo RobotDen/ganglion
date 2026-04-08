@@ -157,7 +157,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 # Prerequisites: Rust 1.85+, cargo
 cargo build --release
 
-# Run all tests (158+ tests across 9 crates)
+# Run all tests (188 tests across 9 crates)
 cargo test
 
 # Run with warnings as errors (matches CI)

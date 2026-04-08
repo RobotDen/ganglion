@@ -20,7 +20,7 @@ All notable changes to Ganglion will be documented in this file.
 - **`gang status` CLI command** (`gang-cli`): Reports version, identity, registry, available and WIP capabilities (ADR-018).
 - **Real CID in `gang deploy`** (`gang-cli`): Deploy now computes actual CID from manifest bytes instead of using a hardcoded placeholder.
 - **Capability loading on agent startup** (`gang-ros`): `load_installed_capabilities()` now scans the capabilities directory, deserializes manifests, verifies signatures and trust store, and logs warnings for failures.
-- **48 new tests** across 5 crates. **174 total tests passing.**
+- **62 new tests** across 5 crates. **188 total tests passing.**
 
 ### Changed
 

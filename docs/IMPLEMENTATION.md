@@ -1,6 +1,6 @@
 # Ganglion: implementation plan and checklist
 
-**Status:** Active — tracks implementation from v0.1 through v0.4
+**Status:** Active — tracks implementation from v0.1 through v0.5
 **Source of truth:** [DesignSpec.md](./DesignSpec.md)
 
 ### Progress
@@ -45,6 +45,25 @@
 | 19. v0.4 release | Done | 2 | — |
 
 **Total: 126 tests passing across 7 crates (45 core + 46 ros + 10 wasm-host + 8 param-inspect + 7 diag-bundle + 10 net-archetype).**
+
+**v0.5** (tagged `v0.5.0`):
+
+| Phase | Status | Tests | Commit |
+|-------|--------|-------|--------|
+| 20. WASM-to-broker glue layer | Done | 8 | — |
+| 21. ROS broker operations (ServiceCall, ParamGet, ParamSet) | Done | 14 | — |
+| 22. Filesystem broker symlink jail fix | Done | 5 | — |
+| 23. RosList access control enforcement | Done | 2 | — |
+| 24. Transport layer completion (request_response, relay server) | Done | 9 | — |
+| 25. Reference diagnostic capability | Done | 6 | — |
+| 26. gang status CLI command | Done | — | — |
+| 27. Capability loading on agent startup | Done | 2 | — |
+| 28. Docker test harness fixes | Done | — | — |
+| 29. Bootstrap relay deployment config | Done | — | — |
+| 30. ROS helper hardening (validation, timeouts) | Done | 16 | — |
+| 31. v0.5 release | Done | — | — |
+
+**Total: 188 tests passing across 9 crates (46 core + 84 ros + 18 wasm-host + 9 libp2p + 6 diagnostics + 8 param-inspect + 7 diag-bundle + 10 net-archetype).**
 
 ---
 

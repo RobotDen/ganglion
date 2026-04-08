@@ -1,24 +1,24 @@
 # Validation results
 
-Test results and validation status for Ganglion v0.4.0.
+Test results and validation status for Ganglion v0.5.0.
 
 ## Test environment
 
 - **Host:** macOS / Linux
-- **Ganglion version:** v0.4.0
+- **Ganglion version:** v0.5.0
 - **Rust:** 1.85+
 - **CI:** GitHub Actions (ubuntu-latest + macos-latest matrix)
 
 ## Unit test summary
 
-174 tests across 9 crates, all passing:
+188 tests across 9 crates, all passing:
 
 | Crate | Tests | Coverage areas |
 |-------|-------|---------------|
 | gang-core | 46 | Identity (keypair gen, persist, sign/verify, registry), messages (CBOR framing, varint), manifests (sign, verify, tamper detection, hash verification, v2 fields, schema version), policy (default-deny, patterns, peer auth, TOML roundtrip, process/network/metrics groups, read-write required for param-set), audit (write/read, rotation), artifacts (CID determinism, dedup, chunking, LRU eviction, persist/reload), registry (publish, search, tags, versions, persist/reload, remove) |
-| gang-ros | 79 | Diagnostics broker (system info, network, processes), filesystem broker (read/write/list/stat, pattern gating, symlink jail, write-to-new-file traversal denial, symlink parent jail, nonexistent parent denial), log stream broker (source enumeration, pattern filtering), ROS broker (check_access exact/glob/wildcard/denied/read-only/read-write/empty patterns/first-match, RosList filtering by allowed patterns, topic subscribe with/without ros2, service call with/without ros2, param get/set with/without ros2, access denied propagation, unsupported ops, capability group), robot agent (deploy, invoke, trust verification, capability loading with trust store check), archetype detection (classify all 5 archetypes, display, recommendations), process broker (allowlist exact/glob/wildcard, spawn echo, denied command, handle request, unsupported op), network probe broker (DNS lookup, port check, traceroute, handle request, unsupported op), metrics broker (emit, batch, ring buffer eviction, drain, unsupported op) |
+| gang-ros | 84 | Diagnostics broker (system info, network, processes), filesystem broker (read/write/list/stat, pattern gating, symlink jail, write-to-new-file traversal denial, symlink parent jail, nonexistent parent denial), log stream broker (source enumeration, pattern filtering), ROS broker (check_access exact/glob/wildcard/denied/read-only/read-write/empty patterns/first-match, RosList filtering by allowed patterns, topic subscribe with/without ros2, service call with/without ros2, param get/set with/without ros2, access denied propagation, unsupported ops, capability group, input validation, timeouts), robot agent (deploy, invoke, trust verification, capability loading with trust store check), archetype detection (classify all 5 archetypes, display, recommendations), process broker (allowlist exact/glob/wildcard, spawn echo, denied command, handle request, unsupported op), network probe broker (DNS lookup, port check, traceroute, handle request, unsupported op), metrics broker (emit, batch, ring buffer eviction, drain, unsupported op) |
 | gang-wasm-host | 18 | WIT interface parsing, component runtime setup, fuel metering, capability host (declared/undeclared/registered groups), WASM-to-broker import registration (all 8 interfaces), broker routing (declared/undeclared/missing), Val extraction (byte list, string list, option string) |
-| gang-libp2p | 0 | Integration-tested via test-harness scenarios |
+| gang-libp2p | 9 | Swarm config defaults, swarm build, relay server config, capability tracking, peer connection tracking, transport stats, peer ID determinism, protocol codec, request-response setup |
 | gang-cli | 0 | Integration-tested via `gang demo`, `gang status`, and manual CLI exercises |
 | gang-capability-diagnostics | 6 | Report construction, serialization roundtrip, format output sections, empty disk handling, optional fields |
 | gang-capability-param-inspect | 8 | Snapshot construction, diff (added/removed/changed), empty snapshots, identical snapshots, format output, mixed types, nested paths |
@@ -33,7 +33,7 @@ Test results and validation status for Ganglion v0.4.0.
 | v0.2.0 | 8 | 60 |
 | v0.3.0 | 10 | 70 |
 | v0.4.0 | 56 | 126 |
-| v0.5.0 | 48 | 174 |
+| v0.5.0 | 62 | 188 |
 
 ## CI pipeline
 
@@ -155,10 +155,9 @@ Expected results per scenario:
 - **enterprise-dmz:** robot can reach firewall at 172.16.10.1, TCP 443 rule present
 - **mobile-cgnat:** robot can reach inner NAT at 10.64.0.1, netem qdisc active
 
-## Known limitations (v0.4)
+## Known limitations (v0.5)
 
-- WASM component runtime host-function wiring is partially complete — capabilities can be loaded and fuel-metered, but full broker integration requires additional glue code
-- Docker test scenarios verify network topology and reachability; full end-to-end protocol flow testing requires the WASM host integration
+- Docker test scenarios verify network topology and reachability; full end-to-end protocol flow testing requires live relay connectivity
 - Regulated facility (air-gapped) archetype is not Docker-testable — requires physical sneakernet
 - The `gang logs` and `gang list` commands require relay connectivity (not yet wired)
 - Registry is local-only — distributed registry synchronization is planned for a future version
