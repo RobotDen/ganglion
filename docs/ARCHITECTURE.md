@@ -105,7 +105,7 @@ Layer 2 runs signed WASM components in a sandboxed runtime. Components have no a
 Ganglion defines its host-guest contract using WASM Interface Types (WIT). The `ganglion-capability` world imports eight interfaces:
 
 ```wit
-package ganglion:capability@0.4.0;
+package ganglion:capability@0.5.0;
 
 world ganglion-capability {
     import ros-interface;

@@ -13,7 +13,7 @@ WASM components need a typed interface to request broker operations. Options:
 
 ## Decision
 
-Define all capability interfaces in WIT (`ganglion.wit`). Each capability group is a separate WIT interface under the `ganglion:capability@0.4.0` package:
+Define all capability interfaces in WIT (`ganglion.wit`). Each capability group is a separate WIT interface under the `ganglion:capability@0.5.0` package:
 
 - `ros-interface` — topic subscribe, service call, param get
 - `logs-stream` — source enumeration, log streaming

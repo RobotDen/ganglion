@@ -17,7 +17,7 @@ Show Ganglion version, identity status, available commands, and WIP commands.
 
 ```bash
 $ gang status
-Ganglion v0.4.0
+Ganglion v0.5.0
 
 Identity:   12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
 Key file:   /home/user/.gang/identity.key
@@ -167,7 +167,7 @@ $ gang logs robot-42 --follow
 |------|-------------|
 | `--follow` | Continuously stream new log entries (like `tail -f`). |
 
-> Note: Requires relay connectivity (not yet available in v0.4). Run `gang demo` for local testing or `gang status` for a summary of available commands.
+> Note: Requires relay connectivity (not yet available in v0.5). Run `gang demo` for local testing or `gang status` for a summary of available commands.
 
 ## Diagnostics
 
@@ -394,7 +394,7 @@ config. See `deploy/relay/README.md` for production deployment with Docker.
 
 List reachable robots in the fleet.
 
-> Note: Requires relay connectivity (not yet available in v0.4). Run `gang demo` for local testing or `gang status` for a summary of available commands.
+> Note: Requires relay connectivity (not yet available in v0.5). Run `gang demo` for local testing or `gang status` for a summary of available commands.
 
 ### `gang connect <robot>` [WIP]
 
@@ -408,7 +408,7 @@ $ gang connect robot-42 --prefer-transport quic,tcp
 |------|-------------|
 | `--prefer-transport <t1,t2>` | Preferred transport order for happy-eyeballs selection. |
 
-> Note: Requires relay connectivity (not yet available in v0.4). Run `gang demo` for local testing or `gang status` for a summary of available commands.
+> Note: Requires relay connectivity (not yet available in v0.5). Run `gang demo` for local testing or `gang status` for a summary of available commands.
 
 ## Exit codes
 
