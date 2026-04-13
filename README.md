@@ -60,7 +60,8 @@ ganglion/
 │   ├── QUICKSTART.md                       # 5-minute getting-started guide
 │   ├── VALIDATION.md                       # Test harness results and measurements
 │   ├── DesignSpec.md                       # Original design specification
-│   └── IMPLEMENTATION.md                   # Implementation plan and progress
+│   ├── IMPLEMENTATION.md                   # Implementation plan and progress
+│   └── adr/                                # Architecture Decision Records (ADR-001 to ADR-020)
 ├── .github/workflows/
 │   ├── ci.yml                              # CI: check, fmt, clippy, test, doc
 │   └── release.yml                         # Release: validate + GitHub Release on tags

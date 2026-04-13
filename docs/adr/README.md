@@ -47,3 +47,9 @@ Each ADR follows a consistent format:
 | 017 | [Add param-set to WIT ros-interface](ADR-017-wit-param-set.md) | Accepted |
 | 018 | [Document CLI stubbed commands](ADR-018-document-cli-stubs.md) | Accepted |
 | 019 | [ROS broker test coverage](ADR-019-ros-broker-test-coverage.md) | Accepted |
+
+### Remote dispatch (v0.6 — proposed)
+
+| # | Title | Status |
+|---|-------|--------|
+| 020 | [Remote dispatch via control protocol and e2e test](ADR-020-remote-dispatch-and-e2e-test.md) | Proposed |

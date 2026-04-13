@@ -65,6 +65,19 @@
 
 **Total: 188 tests passing across 9 crates (46 core + 84 ros + 18 wasm-host + 9 libp2p + 6 diagnostics + 8 param-inspect + 7 diag-bundle + 10 net-archetype).**
 
+**v0.6** (proposed — [ADR-020](adr/ADR-020-remote-dispatch-and-e2e-test.md)):
+
+| Phase | Status | Tests | Commit |
+|-------|--------|-------|--------|
+| 32. Robot agent serve loop (listen on /ganglion/control/1.0) | — | — | — |
+| 33. Agent CLI startup with transport (--relay flag, dial relay) | — | — | — |
+| 34. Operator remote dispatch (--peer flag for deploy/run/caps) | — | — | — |
+| 35. Reference WASM component build (diagnostics → .wasm) | — | — | — |
+| 36. E2E Docker test scenario (relay + robot + operator) | — | — | — |
+| 37. v0.6 release | — | — | — |
+
+**Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`) to the CLI and robot agent so that `gang deploy --peer <id> --relay <addr>` sends a capability over a relay circuit to a remote robot, and `gang run --peer <id> --relay <addr>` invokes it and returns the result. Validate with a Docker e2e scenario that exercises the full flow. See ADR-020 for detailed design.
+
 ---
 
 ## Repository layout
@@ -661,6 +674,7 @@ Track decisions made during implementation that deviate from or clarify the spec
 | 017 | [WIT param-set](adr/ADR-017-wit-param-set.md) | Add write symmetry for parameters; enable field tuning capabilities | v0.5 |
 | 018 | [Document CLI stubs](adr/ADR-018-document-cli-stubs.md) | Mark WIP commands clearly; add gang status command | v0.5 |
 | 019 | [ROS broker tests](adr/ADR-019-ros-broker-test-coverage.md) | Zero unit tests on RosBroker; cover check_access and handle_request | v0.5 |
+| 020 | [Remote dispatch and e2e test](adr/ADR-020-remote-dispatch-and-e2e-test.md) | Connect transport infra to CLI/agent; validate with Docker e2e scenario | v0.6 (proposed) |
 
 ---
 
