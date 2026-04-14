@@ -219,7 +219,29 @@ A new Docker Compose scenario (`test-harness/e2e-dispatch/`) that validates the 
 
 **Test runner:** `test-harness/e2e-dispatch/run-test.sh` builds the base image, compiles the test WASM component, starts the scenario, runs the operator script, checks results, tears down.
 
-### 8. Reference WASM component build
+### 8. Shell completions (`gang-cli`)
+
+Add `gang completions <shell>` to generate shell completion scripts for popular shells:
+
+```
+gang completions bash    > /etc/bash_completion.d/gang
+gang completions zsh     > ~/.zfunc/_gang
+gang completions fish    > ~/.config/fish/completions/gang.fish
+gang completions elvish  > ~/.config/elvish/lib/gang.elv
+gang completions powershell > gang.ps1
+```
+
+**Implementation:** clap provides `clap_complete::generate()` which produces completions from the existing `Cli` struct. This is a one-function addition:
+
+1. Add `clap_complete` to `gang-cli` dependencies.
+2. Add a `Completions { shell: clap_complete::Shell }` variant to `Commands`.
+3. In the match arm, call `clap_complete::generate(shell, &mut Cli::command(), "gang", &mut io::stdout())`.
+
+**Dynamic completions for peer names:** clap_complete supports custom value hints. Register a completer for `<robot>` positional arguments that reads `~/.gang/peers.json` and returns registered peer names. This gives tab-completion for `gang run <TAB>` → `warehouse-bot`, `lab-arm`, etc.
+
+**Dynamic completions for capability names:** For commands like `gang run <robot> <TAB>`, complete capability names by reading the local cache of installed capabilities (from the last `gang caps` result or the local agent's capabilities directory). This is best-effort — network queries for live completion are too slow.
+
+### 9. Reference WASM component build
 
 Add a build target for `gang-capability-diagnostics` that produces a signed `.wasm` component:
 
@@ -250,6 +272,7 @@ A terminal UI for Ganglion is planned but out of scope for v0.6. The v0.6 CLI de
 - **Validates the WASM component pipeline.** Building a real `.wasm` component from `gang-capability-diagnostics` proves the authoring pipeline works end-to-end.
 - **CI-testable.** The flat-network e2e scenario runs on GitHub Actions ubuntu-latest without privilege escalation.
 - **TUI-ready.** The peer registry, config file, and structured command outputs form the data layer a future TUI needs.
+- **Shell completions.** Tab-completion for commands, subcommands, flags, and dynamic peer names reduces typing and discoverability friction. Works across bash, zsh, fish, elvish, and PowerShell.
 
 ### Negative
 
@@ -274,3 +297,5 @@ A terminal UI for Ganglion is planned but out of scope for v0.6. The v0.6 CLI de
 12. The e2e Docker test scenario passes: relay + robot + operator, register peer, deploy, invoke, verify output.
 13. All existing tests (188) continue to pass.
 14. `gang deploy robot1 tool.wasm` (no registered peer, no `--peer`) continues to use the local path.
+15. `gang completions bash` produces valid bash completion script.
+16. Tab-completing `gang run <TAB>` suggests registered peer names.

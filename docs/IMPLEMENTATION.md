@@ -75,9 +75,10 @@
 | 35. Operator remote dispatch (name/prefix/peer-id resolution) | — | — | — |
 | 36. SSH-style identity verification (TOFU, key-change warning) | — | — | — |
 | 37. Operator config file (~/.gang/config.toml) | — | — | — |
-| 38. Reference WASM component build (diagnostics → .wasm) | — | — | — |
-| 39. E2E Docker test scenario (relay + robot + operator) | — | — | — |
-| 40. v0.6 release | — | — | — |
+| 38. Shell completions (bash, zsh, fish, elvish, powershell) | — | — | — |
+| 39. Reference WASM component build (diagnostics → .wasm) | — | — | — |
+| 40. E2E Docker test scenario (relay + robot + operator) | — | — | — |
+| 41. v0.6 release | — | — | — |
 
 **Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`, `PeerRegistry`, `TrustStore`) to the CLI and robot agent. Named peers, abbreviated peer ID matching (Docker-style), SSH-style host key verification, and a config file eliminate verbose flags. `gang deploy warehouse-bot diagnostics.wasm` sends a capability over a relay circuit to a named remote robot and returns the result. Validate with a Docker e2e scenario. See ADR-020 for detailed design.
 
