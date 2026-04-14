@@ -70,13 +70,16 @@
 | Phase | Status | Tests | Commit |
 |-------|--------|-------|--------|
 | 32. Robot agent serve loop (listen on /ganglion/control/1.0) | — | — | — |
-| 33. Agent CLI startup with transport (--relay flag, dial relay) | — | — | — |
-| 34. Operator remote dispatch (--peer flag for deploy/run/caps) | — | — | — |
-| 35. Reference WASM component build (diagnostics → .wasm) | — | — | — |
-| 36. E2E Docker test scenario (relay + robot + operator) | — | — | — |
-| 37. v0.6 release | — | — | — |
+| 33. Agent CLI startup with transport (-r flag, dial relay) | — | — | — |
+| 34. Peer registry CLI (gang peer add/remove/list/show/rename) | — | — | — |
+| 35. Operator remote dispatch (name/prefix/peer-id resolution) | — | — | — |
+| 36. SSH-style identity verification (TOFU, key-change warning) | — | — | — |
+| 37. Operator config file (~/.gang/config.toml) | — | — | — |
+| 38. Reference WASM component build (diagnostics → .wasm) | — | — | — |
+| 39. E2E Docker test scenario (relay + robot + operator) | — | — | — |
+| 40. v0.6 release | — | — | — |
 
-**Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`) to the CLI and robot agent so that `gang deploy --peer <id> --relay <addr>` sends a capability over a relay circuit to a remote robot, and `gang run --peer <id> --relay <addr>` invokes it and returns the result. Validate with a Docker e2e scenario that exercises the full flow. See ADR-020 for detailed design.
+**Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`, `PeerRegistry`, `TrustStore`) to the CLI and robot agent. Named peers, abbreviated peer ID matching (Docker-style), SSH-style host key verification, and a config file eliminate verbose flags. `gang deploy warehouse-bot diagnostics.wasm` sends a capability over a relay circuit to a named remote robot and returns the result. Validate with a Docker e2e scenario. See ADR-020 for detailed design.
 
 ---
 
