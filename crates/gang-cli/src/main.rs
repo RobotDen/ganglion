@@ -179,6 +179,12 @@ enum Commands {
         action: PeerAction,
     },
 
+    /// View or edit operator configuration (~/.gang/config.toml).
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
     /// Show Ganglion status: version, identity, available and WIP capabilities.
     Status,
 
@@ -310,6 +316,27 @@ enum PeerAction {
         /// Peer name.
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Show current configuration.
+    Show,
+    /// Set a configuration value.
+    Set {
+        /// Key to set (e.g., "default_relay", "host_key_policy").
+        key: String,
+        /// Value to set.
+        value: String,
+    },
+    /// Initialize a default config file.
+    Init {
+        /// Overwrite existing config.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show the config file path.
+    Path,
 }
 
 #[derive(Subcommand)]
@@ -457,6 +484,14 @@ async fn main() -> anyhow::Result<()> {
             PeerAction::TrustReset { name } => {
                 commands::peer_trust_reset(&name, &cli.format).await?
             }
+        },
+        Commands::Config { action } => match action {
+            ConfigAction::Show => commands::config_show(&cli.format).await?,
+            ConfigAction::Set { key, value } => {
+                commands::config_set(&key, &value, &cli.format).await?
+            }
+            ConfigAction::Init { force } => commands::config_init(force, &cli.format).await?,
+            ConfigAction::Path => commands::config_path().await?,
         },
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "gang", &mut std::io::stdout());

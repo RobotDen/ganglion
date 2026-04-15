@@ -1,6 +1,56 @@
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::OutputFormat;
+
+// --- Operator config ---
+
+/// Operator configuration loaded from `~/.gang/config.toml`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OperatorConfig {
+    /// Default relay multiaddr when --relay is not specified and the peer
+    /// registry entry has no relay_addrs.
+    pub default_relay: Option<String>,
+
+    /// Identity verification policy: "strict" (default), "tofu", or "none".
+    #[serde(default = "default_host_key_policy")]
+    pub host_key_policy: String,
+}
+
+fn default_host_key_policy() -> String {
+    "strict".to_string()
+}
+
+impl OperatorConfig {
+    /// Load config from `~/.gang/config.toml`. Returns defaults if file is missing.
+    pub fn load() -> Self {
+        let path = gang_core::identity::default_config_dir().join("config.toml");
+        Self::load_from(&path)
+    }
+
+    /// Load config from a specific path. Returns defaults if file is missing.
+    pub fn load_from(path: &Path) -> Self {
+        if !path.exists() {
+            return Self::default();
+        }
+        match std::fs::read_to_string(path) {
+            Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Save config to `~/.gang/config.toml`.
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = gang_core::identity::default_config_dir().join("config.toml");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let toml_str = toml::to_string_pretty(self)?;
+        std::fs::write(&path, toml_str)?;
+        Ok(())
+    }
+}
 
 /// `gang status` — show version, identity, and capability summary.
 pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
@@ -24,6 +74,16 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         Err(_) => 0,
     };
 
+    // Peer count
+    let peer_registry =
+        gang_core::identity::PeerRegistry::load(&gang_core::identity::default_registry_path())
+            .unwrap_or_default();
+    let peer_count = peer_registry.list().count();
+
+    // Config
+    let config = OperatorConfig::load();
+    let config_path = gang_core::identity::default_config_dir().join("config.toml");
+
     let available = [
         "identity show",
         "identity generate",
@@ -45,6 +105,9 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         "registry publish",
         "registry list",
         "registry info",
+        "peer add/remove/list/show/rename",
+        "config show/set/init/path",
+        "completions",
         "relay",
         "status",
     ];
@@ -58,6 +121,10 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
                 "identity": identity_status,
                 "key_path": key_path.display().to_string(),
                 "registry_capabilities": registry_count,
+                "registered_peers": peer_count,
+                "config_path": config_path.display().to_string(),
+                "default_relay": config.default_relay,
+                "host_key_policy": config.host_key_policy,
                 "available_commands": available,
                 "wip_commands": wip,
             });
@@ -69,6 +136,18 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
             println!("Identity:   {identity_status}");
             println!("Key file:   {}", key_path.display());
             println!("Registry:   {} capability(ies) registered", registry_count);
+            println!("Peers:      {} registered", peer_count);
+            println!(
+                "Config:     {}",
+                if config_path.exists() {
+                    config_path.display().to_string()
+                } else {
+                    "(not initialized — run `gang config init`)".to_string()
+                }
+            );
+            if let Some(relay) = &config.default_relay {
+                println!("Def. relay: {relay}");
+            }
             println!();
             println!("Available commands:");
             for cmd in &available {
@@ -149,11 +228,23 @@ pub fn resolve_target(
 ) -> anyhow::Result<ResolvedTarget> {
     use gang_core::identity::{PeerId, PeerRegistry, default_registry_path};
 
+    // Load config for default_relay fallback
+    let config = OperatorConfig::load();
+
+    // Relay resolution helper: CLI flag > peer registry entry > config default
+    let resolve_relay =
+        |explicit: Option<&str>, registry_addrs: Option<&Vec<String>>| -> Option<String> {
+            explicit
+                .map(String::from)
+                .or_else(|| registry_addrs.and_then(|addrs| addrs.first().cloned()))
+                .or_else(|| config.default_relay.clone())
+        };
+
     // 1. Explicit --peer flag
     if let Some(peer_str) = explicit_peer {
         return Ok(ResolvedTarget {
             peer_id: Some(PeerId::new(peer_str)),
-            relay_addr: explicit_relay.map(String::from),
+            relay_addr: resolve_relay(explicit_relay, None),
             name: None,
             is_local: false,
         });
@@ -165,12 +256,9 @@ pub fn resolve_target(
 
     // 2. Registered name
     if let Some(entry) = registry.lookup(robot) {
-        let relay = explicit_relay
-            .map(String::from)
-            .or_else(|| entry.relay_addrs.first().cloned());
         return Ok(ResolvedTarget {
             peer_id: Some(entry.peer_id.clone()),
-            relay_addr: relay,
+            relay_addr: resolve_relay(explicit_relay, Some(&entry.relay_addrs)),
             name: Some(robot.to_string()),
             is_local: false,
         });
@@ -185,12 +273,9 @@ pub fn resolve_target(
             ),
             1 => {
                 let (name, entry) = matches[0];
-                let relay = explicit_relay
-                    .map(String::from)
-                    .or_else(|| entry.relay_addrs.first().cloned());
                 return Ok(ResolvedTarget {
                     peer_id: Some(entry.peer_id.clone()),
-                    relay_addr: relay,
+                    relay_addr: resolve_relay(explicit_relay, Some(&entry.relay_addrs)),
                     name: Some(name.to_string()),
                     is_local: false,
                 });
@@ -210,7 +295,7 @@ pub fn resolve_target(
     if robot.starts_with("12D3-") && robot.len() == 37 {
         return Ok(ResolvedTarget {
             peer_id: Some(PeerId::new(robot)),
-            relay_addr: explicit_relay.map(String::from),
+            relay_addr: resolve_relay(explicit_relay, None),
             name: None,
             is_local: false,
         });
@@ -482,6 +567,102 @@ pub async fn peer_trust_reset(name: &str, format: &OutputFormat) -> anyhow::Resu
 }
 
 // --- End peer registry commands ---
+
+// --- Config commands ---
+
+/// `gang config show`
+pub async fn config_show(format: &OutputFormat) -> anyhow::Result<()> {
+    let config = OperatorConfig::load();
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&config)?);
+        }
+        OutputFormat::Text => {
+            let path = gang_core::identity::default_config_dir().join("config.toml");
+            println!("Config file: {}", path.display());
+            println!();
+            println!(
+                "default_relay    = {}",
+                config.default_relay.as_deref().unwrap_or("(not set)")
+            );
+            println!("host_key_policy  = {}", config.host_key_policy);
+        }
+    }
+    Ok(())
+}
+
+/// `gang config set`
+pub async fn config_set(key: &str, value: &str, format: &OutputFormat) -> anyhow::Result<()> {
+    let mut config = OperatorConfig::load();
+    match key {
+        "default_relay" => {
+            if value == "none" || value.is_empty() {
+                config.default_relay = None;
+            } else {
+                config.default_relay = Some(value.to_string());
+            }
+        }
+        "host_key_policy" => {
+            if !["strict", "tofu", "none"].contains(&value) {
+                anyhow::bail!(
+                    "Invalid host_key_policy '{value}'. Valid options: strict, tofu, none"
+                );
+            }
+            config.host_key_policy = value.to_string();
+        }
+        _ => {
+            anyhow::bail!("Unknown config key '{key}'. Valid keys: default_relay, host_key_policy")
+        }
+    }
+    config.save()?;
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({"status": "set", "key": key, "value": value})
+            );
+        }
+        OutputFormat::Text => println!("Set {key} = {value}"),
+    }
+    Ok(())
+}
+
+/// `gang config init`
+pub async fn config_init(force: bool, format: &OutputFormat) -> anyhow::Result<()> {
+    let path = gang_core::identity::default_config_dir().join("config.toml");
+    if path.exists() && !force {
+        anyhow::bail!(
+            "Config file already exists at {}. Use --force to overwrite.",
+            path.display()
+        );
+    }
+
+    let default_config = OperatorConfig::default();
+    default_config.save()?;
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({"status": "initialized", "path": path.display().to_string()})
+            );
+        }
+        OutputFormat::Text => {
+            println!("Initialized config at {}", path.display());
+            println!("Edit the file or use `gang config set <key> <value>`.");
+        }
+    }
+    Ok(())
+}
+
+/// `gang config path`
+pub async fn config_path() -> anyhow::Result<()> {
+    let path = gang_core::identity::default_config_dir().join("config.toml");
+    println!("{}", path.display());
+    Ok(())
+}
+
+// --- End config commands ---
 
 /// `gang sign`
 pub async fn sign(
