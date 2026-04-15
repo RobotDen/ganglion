@@ -121,6 +121,368 @@ pub async fn identity_generate(force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+// --- Target resolution ---
+
+/// Resolved target for a robot command.
+#[allow(dead_code)] // relay_addr used when remote dispatch is wired (ADR-020 Phase 32)
+pub struct ResolvedTarget {
+    /// The full peer ID (if remote).
+    pub peer_id: Option<gang_core::identity::PeerId>,
+    /// Relay multiaddr (if remote).
+    pub relay_addr: Option<String>,
+    /// Human-readable name (if registered).
+    pub name: Option<String>,
+    /// Whether this target is local-only (no network).
+    pub is_local: bool,
+}
+
+/// Resolve a robot target string through the resolution chain:
+/// 1. Explicit --peer flag (bypasses everything)
+/// 2. Registered name in PeerRegistry
+/// 3. Abbreviated peer ID prefix match (Docker-style)
+/// 4. Full peer ID (37 chars)
+/// 5. Local fallback (/tmp/gang-agent-{robot})
+pub fn resolve_target(
+    robot: &str,
+    explicit_peer: Option<&str>,
+    explicit_relay: Option<&str>,
+) -> anyhow::Result<ResolvedTarget> {
+    use gang_core::identity::{PeerId, PeerRegistry, default_registry_path};
+
+    // 1. Explicit --peer flag
+    if let Some(peer_str) = explicit_peer {
+        return Ok(ResolvedTarget {
+            peer_id: Some(PeerId::new(peer_str)),
+            relay_addr: explicit_relay.map(String::from),
+            name: None,
+            is_local: false,
+        });
+    }
+
+    // Load registry for name and prefix lookups
+    let registry_path = default_registry_path();
+    let registry = PeerRegistry::load(&registry_path).unwrap_or_default();
+
+    // 2. Registered name
+    if let Some(entry) = registry.lookup(robot) {
+        let relay = explicit_relay
+            .map(String::from)
+            .or_else(|| entry.relay_addrs.first().cloned());
+        return Ok(ResolvedTarget {
+            peer_id: Some(entry.peer_id.clone()),
+            relay_addr: relay,
+            name: Some(robot.to_string()),
+            is_local: false,
+        });
+    }
+
+    // 3. Abbreviated peer ID prefix (must start with "12D3-")
+    if robot.starts_with("12D3-") && robot.len() < 37 {
+        let matches = registry.lookup_by_prefix(robot);
+        match matches.len() {
+            0 => anyhow::bail!(
+                "No peer found matching prefix '{robot}'. Use `gang peer list` to see registered peers."
+            ),
+            1 => {
+                let (name, entry) = matches[0];
+                let relay = explicit_relay
+                    .map(String::from)
+                    .or_else(|| entry.relay_addrs.first().cloned());
+                return Ok(ResolvedTarget {
+                    peer_id: Some(entry.peer_id.clone()),
+                    relay_addr: relay,
+                    name: Some(name.to_string()),
+                    is_local: false,
+                });
+            }
+            n => {
+                let mut msg = format!("Ambiguous peer ID prefix '{robot}' matches {n} peers:\n");
+                for (name, entry) in &matches {
+                    msg.push_str(&format!("  {} ({})\n", entry.peer_id, name));
+                }
+                msg.push_str("Provide a longer prefix to disambiguate.");
+                anyhow::bail!(msg);
+            }
+        }
+    }
+
+    // 4. Full peer ID
+    if robot.starts_with("12D3-") && robot.len() == 37 {
+        return Ok(ResolvedTarget {
+            peer_id: Some(PeerId::new(robot)),
+            relay_addr: explicit_relay.map(String::from),
+            name: None,
+            is_local: false,
+        });
+    }
+
+    // 5. Local fallback
+    let local_path = PathBuf::from(format!("/tmp/gang-agent-{robot}"));
+    if local_path.exists() {
+        return Ok(ResolvedTarget {
+            peer_id: None,
+            relay_addr: None,
+            name: Some(robot.to_string()),
+            is_local: true,
+        });
+    }
+
+    // Nothing matched
+    anyhow::bail!(
+        "Unknown robot '{robot}'. Not a registered peer name, peer ID, or local agent.\n\
+         Register with: gang peer add {robot} <peer-id> --relay <multiaddr>"
+    );
+}
+
+// --- Peer registry commands ---
+
+/// `gang peer add`
+pub async fn peer_add(
+    name: &str,
+    peer_id_str: &str,
+    relay: Option<&str>,
+    role_str: &str,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_core::identity::{PeerEntry, PeerId, PeerRegistry, Role, default_registry_path};
+
+    let peer_id = PeerId::new(peer_id_str);
+    if !peer_id.as_str().starts_with("12D3-") || peer_id.as_str().len() != 37 {
+        anyhow::bail!(
+            "Invalid peer ID: '{}'. Expected format: 12D3-<32 hex chars>",
+            peer_id_str
+        );
+    }
+
+    let role = match role_str {
+        "robot-agent" | "robot" => Role::RobotAgent,
+        "operator" => Role::Operator,
+        "relay" => Role::Relay,
+        _ => anyhow::bail!(
+            "Unknown role: '{}'. Use: robot-agent, operator, or relay",
+            role_str
+        ),
+    };
+
+    let registry_path = default_registry_path();
+    let mut registry = PeerRegistry::load(&registry_path)?;
+
+    let entry = PeerEntry {
+        peer_id: peer_id.clone(),
+        role,
+        relay_addrs: relay.into_iter().map(String::from).collect(),
+    };
+
+    registry.register(name.to_string(), entry);
+    registry.save(&registry_path)?;
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "registered",
+                    "name": name,
+                    "peer_id": peer_id.as_str(),
+                    "role": role_str,
+                })
+            );
+        }
+        OutputFormat::Text => {
+            println!("Registered peer '{name}':");
+            println!("  Peer ID: {peer_id}");
+            println!("  Role:    {role_str}");
+            if let Some(r) = relay {
+                println!("  Relay:   {r}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `gang peer remove`
+pub async fn peer_remove(name: &str, format: &OutputFormat) -> anyhow::Result<()> {
+    use gang_core::identity::{PeerRegistry, default_registry_path};
+
+    let registry_path = default_registry_path();
+    let mut registry = PeerRegistry::load(&registry_path)?;
+
+    if registry.lookup(name).is_none() {
+        anyhow::bail!("No peer registered with name '{name}'");
+    }
+
+    registry.remove(name);
+    registry.save(&registry_path)?;
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::json!({"status": "removed", "name": name}));
+        }
+        OutputFormat::Text => {
+            println!("Removed peer '{name}'");
+        }
+    }
+    Ok(())
+}
+
+/// `gang peer list`
+pub async fn peer_list(format: &OutputFormat) -> anyhow::Result<()> {
+    use gang_core::identity::{PeerRegistry, default_registry_path};
+
+    let registry_path = default_registry_path();
+    let registry = PeerRegistry::load(&registry_path)?;
+
+    let peers: Vec<_> = registry.list().collect();
+
+    match format {
+        OutputFormat::Json => {
+            let entries: Vec<_> = peers
+                .iter()
+                .map(|(name, entry)| {
+                    serde_json::json!({
+                        "name": name,
+                        "peer_id": entry.peer_id.as_str(),
+                        "role": format!("{}", entry.role),
+                        "relay_addrs": entry.relay_addrs,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&entries)?);
+        }
+        OutputFormat::Text => {
+            if peers.is_empty() {
+                println!("No peers registered. Use `gang peer add` to register a peer.");
+                return Ok(());
+            }
+
+            let header = format!(
+                "{:<16} {:<16} {:<14} {}",
+                "NAME", "PEER ID", "ROLE", "RELAY"
+            );
+            println!("{header}");
+            for (name, entry) in &peers {
+                let abbrev = if entry.peer_id.as_str().len() > 16 {
+                    &entry.peer_id.as_str()[..16]
+                } else {
+                    entry.peer_id.as_str()
+                };
+                let relay = entry
+                    .relay_addrs
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("(none)");
+                println!("{:<16} {:<16} {:<14} {}", name, abbrev, entry.role, relay);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `gang peer show`
+pub async fn peer_show(name: &str, format: &OutputFormat) -> anyhow::Result<()> {
+    use gang_core::identity::{PeerRegistry, default_registry_path};
+
+    let registry_path = default_registry_path();
+    let registry = PeerRegistry::load(&registry_path)?;
+
+    let entry = registry
+        .lookup(name)
+        .ok_or_else(|| anyhow::anyhow!("No peer registered with name '{name}'"))?;
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "name": name,
+                    "peer_id": entry.peer_id.as_str(),
+                    "role": format!("{}", entry.role),
+                    "relay_addrs": entry.relay_addrs,
+                })
+            );
+        }
+        OutputFormat::Text => {
+            println!("Peer '{name}':");
+            println!("  Peer ID:  {}", entry.peer_id);
+            println!("  Role:     {}", entry.role);
+            if entry.relay_addrs.is_empty() {
+                println!("  Relay:    (none)");
+            } else {
+                for addr in &entry.relay_addrs {
+                    println!("  Relay:    {addr}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `gang peer rename`
+pub async fn peer_rename(
+    old_name: &str,
+    new_name: &str,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_core::identity::{PeerRegistry, default_registry_path};
+
+    let registry_path = default_registry_path();
+    let mut registry = PeerRegistry::load(&registry_path)?;
+
+    let entry = registry
+        .remove(old_name)
+        .ok_or_else(|| anyhow::anyhow!("No peer registered with name '{old_name}'"))?;
+
+    registry.register(new_name.to_string(), entry);
+    registry.save(&registry_path)?;
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({"status": "renamed", "old_name": old_name, "new_name": new_name})
+            );
+        }
+        OutputFormat::Text => {
+            println!("Renamed peer '{old_name}' → '{new_name}'");
+        }
+    }
+    Ok(())
+}
+
+/// `gang peer trust-reset`
+pub async fn peer_trust_reset(name: &str, format: &OutputFormat) -> anyhow::Result<()> {
+    use gang_core::identity::{PeerRegistry, default_registry_path, default_trust_store_path};
+    use gang_core::manifest::TrustStore;
+
+    let registry_path = default_registry_path();
+    let registry = PeerRegistry::load(&registry_path)?;
+
+    let entry = registry
+        .lookup(name)
+        .ok_or_else(|| anyhow::anyhow!("No peer registered with name '{name}'"))?;
+
+    let trust_path = default_trust_store_path();
+    let mut trust_store = TrustStore::load(&trust_path)?;
+    trust_store.remove(&entry.peer_id);
+    trust_store.save(&trust_path)?;
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({"status": "trust_reset", "name": name, "peer_id": entry.peer_id.as_str()})
+            );
+        }
+        OutputFormat::Text => {
+            println!("Trust reset for peer '{name}' ({}).", entry.peer_id);
+            println!("The next connection will prompt for identity verification.");
+        }
+    }
+    Ok(())
+}
+
+// --- End peer registry commands ---
+
 /// `gang sign`
 pub async fn sign(
     wasm_path: &str,
@@ -195,8 +557,12 @@ pub async fn sign(
     Ok(())
 }
 
-/// `gang agent` — run the robot agent locally.
-pub async fn agent(_config: Option<&str>, data_dir: &str) -> anyhow::Result<()> {
+/// `gang agent` — run the robot agent.
+pub async fn agent(
+    _config: Option<&str>,
+    data_dir: &str,
+    relay: Option<&str>,
+) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
     use gang_ros::filesystem::FsRule;
 
@@ -219,24 +585,41 @@ pub async fn agent(_config: Option<&str>, data_dir: &str) -> anyhow::Result<()> 
     };
 
     let agent = RobotAgent::new(config)?;
+    let peer_id = agent.peer_id().clone();
+
     println!("Robot agent started:");
-    println!("  Peer ID:  {}", agent.peer_id());
+    println!("  Peer ID:  {peer_id}");
     println!("  Data dir: {}", data_dir.display());
     println!("  Policy:   permissive (dev mode)");
+
+    if let Some(relay_addr) = relay {
+        println!("  Relay:    {relay_addr}");
+        println!("  Mode:     remote (listening on /ganglion/control/1.0)");
+        println!();
+        println!("Register on operator machine:");
+        println!("  gang peer add my-robot {peer_id} --relay {relay_addr}");
+    } else {
+        println!("  Mode:     local (no relay, use `gang deploy` for local testing)");
+    }
+
     println!();
     println!("Press Ctrl+C to stop.");
 
     // Keep running until interrupted
+    // TODO(v0.6): when relay is set, create Libp2pTransportAdapter,
+    // dial the relay, and call agent.serve(&transport).
     tokio::signal::ctrl_c().await?;
     println!("\nAgent stopped.");
     Ok(())
 }
 
-/// `gang deploy` — deploy a capability to a local agent.
+/// `gang deploy` — deploy a capability to a robot.
 pub async fn deploy(
     robot: &str,
     wasm_path: &str,
     manifest_path: Option<&str>,
+    explicit_peer: Option<&str>,
+    explicit_relay: Option<&str>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
@@ -263,7 +646,23 @@ pub async fn deploy(
     let component_bytes = std::fs::read(wasm_path)?;
     let manifest_cbor = std::fs::read(&manifest_path)?;
 
-    // For v0.1, deploy to a local agent instance
+    let target = resolve_target(robot, explicit_peer, explicit_relay)?;
+
+    if !target.is_local {
+        // Remote dispatch — will be implemented when agent serve loop is ready (Phase 32).
+        let peer_id = target.peer_id.as_ref().unwrap();
+        let display_name = target.name.as_deref().unwrap_or(peer_id.as_str());
+        anyhow::bail!(
+            "Remote deploy to '{display_name}' ({peer_id}) is not yet implemented.\n\
+             The transport infrastructure is ready but the agent serve loop (ADR-020 Phase 32) \n\
+             must be completed first. Use local mode for now:\n\
+             \n\
+             gang deploy {robot} {}",
+            wasm_path.display()
+        );
+    }
+
+    // Local agent path
     let data_dir = PathBuf::from(format!("/tmp/gang-agent-{robot}"));
     std::fs::create_dir_all(&data_dir)?;
 
@@ -314,10 +713,26 @@ pub async fn run(
     robot: &str,
     cap_name: &str,
     args: &[String],
+    explicit_peer: Option<&str>,
+    explicit_relay: Option<&str>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
     use gang_ros::filesystem::FsRule;
+
+    let target = resolve_target(robot, explicit_peer, explicit_relay)?;
+
+    if !target.is_local {
+        let peer_id = target.peer_id.as_ref().unwrap();
+        let display_name = target.name.as_deref().unwrap_or(peer_id.as_str());
+        anyhow::bail!(
+            "Remote run on '{display_name}' ({peer_id}) is not yet implemented.\n\
+             The transport infrastructure is ready but the agent serve loop (ADR-020 Phase 32) \n\
+             must be completed first. Use local mode for now:\n\
+             \n\
+             gang run {robot} {cap_name}"
+        );
+    }
 
     let data_dir = PathBuf::from(format!("/tmp/gang-agent-{robot}"));
     if !data_dir.exists() {
@@ -367,8 +782,24 @@ pub async fn run(
 }
 
 /// `gang caps` — list installed capabilities.
-pub async fn caps(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn caps(
+    robot: &str,
+    explicit_peer: Option<&str>,
+    explicit_relay: Option<&str>,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
+
+    let target = resolve_target(robot, explicit_peer, explicit_relay)?;
+
+    if !target.is_local {
+        let peer_id = target.peer_id.as_ref().unwrap();
+        let display_name = target.name.as_deref().unwrap_or(peer_id.as_str());
+        anyhow::bail!(
+            "Remote caps on '{display_name}' ({peer_id}) is not yet implemented.\n\
+             The agent serve loop (ADR-020 Phase 32) must be completed first."
+        );
+    }
 
     let data_dir = PathBuf::from(format!("/tmp/gang-agent-{robot}"));
     if !data_dir.exists() {

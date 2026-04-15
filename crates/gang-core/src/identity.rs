@@ -17,8 +17,18 @@ impl PeerId {
         Self(format!("12D3-{}", hex::encode(&hash.as_bytes()[..16])))
     }
 
+    /// Construct a peer ID from a string (e.g., parsed from CLI input or config).
+    pub fn new(s: &str) -> Self {
+        Self(s.to_string())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Check whether `prefix` is a prefix of this peer ID.
+    pub fn starts_with(&self, prefix: &str) -> bool {
+        self.0.starts_with(prefix)
     }
 }
 
@@ -172,6 +182,16 @@ impl PeerRegistry {
 
     pub fn list(&self) -> impl Iterator<Item = (&str, &PeerEntry)> {
         self.entries.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Find peers whose peer ID starts with the given prefix.
+    /// Returns all matches — callers should reject ambiguous prefixes.
+    pub fn lookup_by_prefix(&self, prefix: &str) -> Vec<(&str, &PeerEntry)> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| entry.peer_id.starts_with(prefix))
+            .map(|(name, entry)| (name.as_str(), entry))
+            .collect()
     }
 }
 
