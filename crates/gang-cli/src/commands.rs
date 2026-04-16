@@ -664,6 +664,147 @@ pub async fn config_path() -> anyhow::Result<()> {
 
 // --- End config commands ---
 
+// --- Identity verification (SSH-style TOFU) ---
+
+/// Result of verifying a remote peer's identity.
+#[allow(dead_code)] // Called by remote dispatch when connections are wired (ADR-020 Phase 32)
+pub enum HostKeyVerification {
+    /// Peer is already trusted and key matches.
+    Trusted,
+    /// Peer was unknown but has been accepted (TOFU).
+    Accepted,
+    /// Identity verification is disabled.
+    Skipped,
+}
+
+/// Compute an SSH-style fingerprint from a public key.
+#[allow(dead_code)]
+fn key_fingerprint(public_key: &[u8]) -> String {
+    let hash = blake3::hash(public_key);
+    format!("BLAKE3:{}", &hash.to_hex()[..32])
+}
+
+/// Verify the remote peer's public key using the configured host key policy.
+///
+/// - `strict`: TOFU on first connect (prompts interactively), hard fail on key change.
+/// - `tofu`: auto-accept new keys without prompting, hard fail on key change.
+/// - `none`: no verification (prints warning).
+#[allow(dead_code)]
+pub fn verify_host_key(
+    peer_id: &gang_core::identity::PeerId,
+    remote_public_key: &[u8],
+    peer_name: Option<&str>,
+) -> anyhow::Result<HostKeyVerification> {
+    use gang_core::identity::default_trust_store_path;
+    use gang_core::manifest::{TrustStore, TrustedPeer};
+
+    let config = OperatorConfig::load();
+    let trust_path = default_trust_store_path();
+    let mut trust_store = TrustStore::load(&trust_path)?;
+
+    match config.host_key_policy.as_str() {
+        "none" => {
+            eprintln!("WARNING: Host key verification is disabled (host_key_policy = \"none\").");
+            eprintln!("This is insecure and should only be used for development/testing.");
+            Ok(HostKeyVerification::Skipped)
+        }
+        policy @ ("strict" | "tofu") => {
+            if let Some(stored_key) = trust_store.get_public_key(peer_id) {
+                // Known peer — verify key matches
+                if stored_key == remote_public_key {
+                    return Ok(HostKeyVerification::Trusted);
+                }
+
+                // Key mismatch!
+                let display_name = peer_name
+                    .map(|n| format!("'{n}' ({})", peer_id))
+                    .unwrap_or_else(|| peer_id.to_string());
+                let idx = trust_store.index_of(peer_id).unwrap_or(0);
+
+                eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+                eprintln!("@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!    @");
+                eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+                eprintln!("IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!");
+                eprintln!("The Ed25519 host key for robot {display_name} has changed.");
+                eprintln!(
+                    "Fingerprint for the new key: {}",
+                    key_fingerprint(remote_public_key)
+                );
+                eprintln!(
+                    "Add correct host key in {} to get rid of this message.",
+                    trust_path.display()
+                );
+                eprintln!("Offending key stored at index {idx}.");
+                eprintln!("Robot key verification failed.");
+
+                let reset_hint = if let Some(name) = peer_name {
+                    format!("`gang peer trust-reset {name}`")
+                } else {
+                    format!(
+                        "remove the entry for {} from {}",
+                        peer_id,
+                        trust_path.display()
+                    )
+                };
+                anyhow::bail!(
+                    "Host key verification failed for {display_name}. \
+                     Run {reset_hint} to clear the old key, then reconnect."
+                );
+            }
+
+            // Unknown peer — TOFU
+            let fingerprint = key_fingerprint(remote_public_key);
+
+            if policy == "strict" {
+                eprintln!(
+                    "The authenticity of robot '{}' can't be established.",
+                    peer_id
+                );
+                eprintln!("Ed25519 key fingerprint is {fingerprint}.");
+
+                // Read from stdin for interactive prompt
+                eprint!("Are you sure you want to continue connecting (yes/no)? ");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let answer = input.trim().to_lowercase();
+                if answer != "yes" && answer != "y" {
+                    anyhow::bail!("Host key verification aborted by user.");
+                }
+            } else {
+                // tofu — auto-accept
+                eprintln!(
+                    "Auto-accepted host key for {} (fingerprint: {fingerprint}).",
+                    peer_id
+                );
+            }
+
+            // Store the key
+            let name = peer_name.unwrap_or("unknown").to_string();
+            trust_store.add(TrustedPeer {
+                peer_id: peer_id.clone(),
+                name,
+                public_key: remote_public_key.to_vec(),
+            });
+            trust_store.save(&trust_path)?;
+
+            eprintln!(
+                "Warning: Permanently added '{}' ({fingerprint}) to the list of known robots.",
+                peer_id
+            );
+
+            Ok(HostKeyVerification::Accepted)
+        }
+        other => {
+            anyhow::bail!(
+                "Unknown host_key_policy '{other}'. Valid options: strict, tofu, none. \
+                 Set with: gang config set host_key_policy <policy>"
+            );
+        }
+    }
+}
+
+// --- End identity verification ---
+
 /// `gang sign`
 pub async fn sign(
     wasm_path: &str,

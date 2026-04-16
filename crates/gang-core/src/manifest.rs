@@ -210,6 +210,13 @@ impl TrustStore {
     pub fn remove(&mut self, peer_id: &PeerId) {
         self.trusted_peers.retain(|p| &p.peer_id != peer_id);
     }
+
+    /// Find the index of a trusted peer entry, if it exists.
+    pub fn index_of(&self, peer_id: &PeerId) -> Option<usize> {
+        self.trusted_peers
+            .iter()
+            .position(|p| &p.peer_id == peer_id)
+    }
 }
 
 #[cfg(test)]
