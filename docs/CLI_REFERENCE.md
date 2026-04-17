@@ -95,19 +95,21 @@ The manifest includes:
 
 ### `gang agent`
 
-Start a local robot agent for development and testing.
+Start a robot agent. Without `--relay`, runs in local-only mode for development. With `--relay`, starts a libp2p transport, dials the relay, and serves incoming control messages on `/ganglion/control/1.0`.
 
 ```bash
+# Local mode (development)
 $ gang agent --data-dir /tmp/gang-agent
-Starting Ganglion agent...
-Peer ID: 12D3-...
-Listening for operator connections.
+
+# Remote mode (connects to relay, accepts operator connections)
+$ gang agent --data-dir /tmp/gang-agent -r /ip4/relay.example.com/tcp/4001/p2p/12D3-relay
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--config <path>` | Path to agent config file. |
 | `--data-dir <path>` | Directory for capabilities and state. Default: `/tmp/gang-agent`. |
+| `--relay <multiaddr>`, `-r` | Relay multiaddr to dial for remote connectivity. |
 
 ## Capability deployment and invocation
 
@@ -124,9 +126,13 @@ Evaluating policy... OK
 Deployed successfully.
 ```
 
+The `<robot>` argument resolves through: registered name → abbreviated peer ID prefix → full peer ID → local fallback.
+
 | Flag | Description |
 |------|-------------|
 | `--manifest <path>` | Path to the manifest file. Auto-detected if adjacent to the `.wasm` file. |
+| `--peer <peer-id>`, `-p` | Explicit peer ID (bypasses name/prefix resolution). |
+| `--relay <multiaddr>`, `-r` | Override relay address. |
 
 ### `gang run <robot> <cap-name> [args...]`
 
@@ -387,6 +393,84 @@ Relay is running. Press Ctrl+C to stop.
 The relay generates or loads an identity from `~/.gang/identity.key` and
 prints the full relay multiaddr that clients should put in their `relay_addrs`
 config. See `deploy/relay/README.md` for production deployment with Docker.
+
+## Peer management
+
+### `gang peer add <name> <peer-id>`
+
+Register a known peer (robot, relay, or operator).
+
+```bash
+$ gang peer add warehouse-bot 12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890 --relay /ip4/relay.example.com/tcp/4001/p2p/12D3-relay
+```
+
+| Flag | Description |
+|------|-------------|
+| `--relay <multiaddr>`, `-r` | Relay multiaddr for reaching this peer. |
+| `--role <role>` | Role: `robot-agent`, `operator`, or `relay`. Default: `robot-agent`. |
+
+### `gang peer remove <name>`
+
+Remove a registered peer.
+
+### `gang peer list`
+
+List all registered peers with their peer IDs, roles, and relay addresses.
+
+### `gang peer show <name>`
+
+Show details for a specific peer.
+
+### `gang peer rename <old-name> <new-name>`
+
+Rename a registered peer.
+
+### `gang peer trust-reset <name>`
+
+Clear the stored host key for a peer. The next connection will re-verify the peer's identity.
+
+## Configuration
+
+### `gang config show`
+
+Show current configuration from `~/.gang/config.toml`.
+
+### `gang config set <key> <value>`
+
+Set a configuration value.
+
+```bash
+$ gang config set default_relay /ip4/relay.example.com/tcp/4001/p2p/12D3-relay
+$ gang config set host_key_policy tofu
+```
+
+Valid keys: `default_relay`, `host_key_policy` (strict, tofu, none).
+
+### `gang config init`
+
+Initialize a default config file.
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Overwrite existing config. |
+
+### `gang config path`
+
+Print the config file path.
+
+## Shell completions
+
+### `gang completions <shell>`
+
+Generate shell completion scripts.
+
+```bash
+gang completions bash > ~/.bash_completion.d/gang
+gang completions zsh > ~/.zfunc/_gang
+gang completions fish > ~/.config/fish/completions/gang.fish
+```
+
+Supported shells: bash, zsh, fish, elvish, powershell.
 
 ## Fleet management
 

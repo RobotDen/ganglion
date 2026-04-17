@@ -1,6 +1,6 @@
 # ADR-020: Remote dispatch via control protocol and end-to-end validation
 
-**Status:** Proposed
+**Status:** Implemented
 **Date:** 2026-04-24
 
 ## Context
