@@ -409,6 +409,144 @@ impl RobotAgent {
         Ok(output)
     }
 
+    /// Start serving incoming control protocol messages over the transport.
+    ///
+    /// Registers a handler on `/ganglion/control/1.0` that deserializes
+    /// incoming `ControlMessage` requests, dispatches to the appropriate
+    /// agent method, and writes the response back.
+    pub async fn serve(
+        self: &Arc<Self>,
+        transport: &dyn gang_core::transport::TransportAdapter,
+    ) -> anyhow::Result<()> {
+        use gang_core::message::{
+            CapabilityInfo, ControlMessage, InvokeStatus, decode_message, encode_message,
+        };
+        use gang_core::protocol::ProtocolId;
+        use gang_core::transport::StreamHandler;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let agent = Arc::clone(self);
+
+        let handler: StreamHandler = Box::new(move |mut stream| {
+            let agent = Arc::clone(&agent);
+            Box::pin(async move {
+                // Read all request bytes from the stream
+                let mut request_bytes = Vec::new();
+                if let Err(e) = stream.inner.read_to_end(&mut request_bytes).await {
+                    warn!("Failed to read request from {}: {e}", stream.remote_peer);
+                    return;
+                }
+
+                if request_bytes.is_empty() {
+                    return;
+                }
+
+                // Decode the control message
+                let msg: ControlMessage = match decode_message(&request_bytes) {
+                    Ok((msg, _)) => msg,
+                    Err(e) => {
+                        warn!(
+                            "Failed to decode control message from {}: {e}",
+                            stream.remote_peer
+                        );
+                        return;
+                    }
+                };
+
+                let remote_peer = stream.remote_peer.clone();
+                info!(peer = %remote_peer, "Received control message");
+
+                // Dispatch and build response
+                let response: ControlMessage = match msg {
+                    ControlMessage::DeployCapability {
+                        manifest_cbor,
+                        component_bytes,
+                        ..
+                    } => {
+                        match agent
+                            .deploy_capability(&manifest_cbor, &component_bytes, &remote_peer)
+                            .await
+                        {
+                            Ok(name) => ControlMessage::InvokeResult {
+                                request_id: String::new(),
+                                status: InvokeStatus::Success,
+                                output: name.into_bytes(),
+                            },
+                            Err(e) => ControlMessage::Error {
+                                request_id: None,
+                                code: "deploy_failed".into(),
+                                message: e.to_string(),
+                            },
+                        }
+                    }
+                    ControlMessage::InvokeCapability {
+                        name,
+                        args,
+                        request_id,
+                    } => match agent.invoke_capability(&name, &args, &remote_peer).await {
+                        Ok(output) => ControlMessage::InvokeResult {
+                            request_id,
+                            status: InvokeStatus::Success,
+                            output,
+                        },
+                        Err(e) => ControlMessage::Error {
+                            request_id: Some(request_id),
+                            code: "invoke_failed".into(),
+                            message: e.to_string(),
+                        },
+                    },
+                    ControlMessage::ListCapabilities => {
+                        let caps = agent.list_capabilities().await;
+                        ControlMessage::CapabilityList {
+                            capabilities: caps
+                                .into_iter()
+                                .map(|c| CapabilityInfo {
+                                    name: c.name,
+                                    version: c.version,
+                                    author: c.author_peer_id,
+                                    declared_capabilities: c
+                                        .declared_capabilities
+                                        .iter()
+                                        .map(|g| g.qualified_name())
+                                        .collect(),
+                                })
+                                .collect(),
+                        }
+                    }
+                    ControlMessage::Presence { .. } => {
+                        info!(peer = %remote_peer, "Received presence announcement");
+                        return; // No response for presence
+                    }
+                    _ => ControlMessage::Error {
+                        request_id: None,
+                        code: "unexpected_message".into(),
+                        message: "unexpected message type for robot agent".into(),
+                    },
+                };
+
+                // Encode and write response
+                match encode_message(&response) {
+                    Ok(response_bytes) => {
+                        if let Err(e) = stream.inner.write_all(&response_bytes).await {
+                            warn!("Failed to write response to {}: {e}", remote_peer);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to encode response: {e}");
+                    }
+                }
+            })
+        });
+
+        transport
+            .listen(ProtocolId::control(), handler)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to register control handler: {e}"))?;
+
+        info!(peer_id = %self.peer_id, "Robot agent serving on /ganglion/control/1.0");
+        Ok(())
+    }
+
     /// Load capabilities from the capabilities directory on startup.
     fn load_installed_capabilities(&self) {
         let caps_dir = &self.capabilities_dir;

@@ -479,6 +479,61 @@ impl Libp2pTransportAdapter {
         &self.keypair
     }
 
+    /// Send an RPC request with a payload and wait for the response.
+    /// This is the primary method for operator→robot control messages.
+    pub async fn send_rpc(
+        &self,
+        peer: &PeerId,
+        request_bytes: Vec<u8>,
+    ) -> Result<Vec<u8>, TransportError> {
+        let libp2p_peer_id = {
+            let conn = self.connected_peers.read().await;
+            match conn.get(peer.as_str()) {
+                Some(peer_conn) => peer_conn.libp2p_peer_id,
+                None => {
+                    return Err(TransportError::DialFailed {
+                        peer: peer.to_string(),
+                        reason: "peer not connected, use dial_multiaddr first".into(),
+                    });
+                }
+            }
+        };
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request_id = {
+            let mut swarm = self.swarm.lock().await;
+            swarm
+                .behaviour_mut()
+                .ganglion_rpc
+                .send_request(&libp2p_peer_id, request_bytes)
+        };
+
+        {
+            let mut pending = self.pending_requests.lock().await;
+            pending.insert(
+                request_id,
+                PendingRequest {
+                    peer_id: peer.clone(),
+                    protocol: ProtocolId::control(),
+                    response_tx,
+                },
+            );
+        }
+
+        {
+            let mut peers = self.connected_peers.write().await;
+            if let Some(conn) = peers.get_mut(peer.as_str()) {
+                conn.messages_sent += 1;
+            }
+        }
+
+        response_rx.await.map_err(|_| TransportError::DialFailed {
+            peer: peer.to_string(),
+            reason: "response channel closed".into(),
+        })?
+    }
+
     /// Get the libp2p peer ID for this node.
     pub fn libp2p_peer_id(&self) -> &Libp2pPeerId {
         &self.libp2p_peer_id

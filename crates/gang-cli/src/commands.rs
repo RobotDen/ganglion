@@ -887,6 +887,7 @@ pub async fn agent(
 ) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
     use gang_ros::filesystem::FsRule;
+    use std::sync::Arc;
 
     let data_dir = PathBuf::from(data_dir);
     std::fs::create_dir_all(&data_dir)?;
@@ -906,7 +907,7 @@ pub async fn agent(
         log_allowed_sources: vec!["**".into()],
     };
 
-    let agent = RobotAgent::new(config)?;
+    let agent = Arc::new(RobotAgent::new(config)?);
     let peer_id = agent.peer_id().clone();
 
     println!("Robot agent started:");
@@ -920,18 +921,50 @@ pub async fn agent(
         println!();
         println!("Register on operator machine:");
         println!("  gang peer add my-robot {peer_id} --relay {relay_addr}");
+        println!();
+        println!("Starting transport...");
+
+        // Create libp2p transport with agent identity
+        let transport_config = gang_libp2p::Libp2pConfig {
+            key_path: data_dir.join("identity.key"),
+            relay_addrs: vec![relay_addr.to_string()],
+            ..Default::default()
+        };
+
+        let transport = gang_libp2p::Libp2pTransportAdapter::new(transport_config).await?;
+
+        // Register the control protocol handler
+        agent.serve(&transport).await?;
+
+        // Dial the relay to establish a circuit reservation
+        transport
+            .dial_multiaddr(relay_addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to relay {relay_addr}: {e}"))?;
+
+        println!("Connected to relay. Waiting for operator connections...");
+        println!("Press Ctrl+C to stop.");
+
+        // Run the event loop alongside Ctrl+C
+        tokio::select! {
+            result = transport.run_event_loop() => {
+                if let Err(e) = result {
+                    eprintln!("Transport event loop error: {e}");
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("\nAgent stopped.");
+            }
+        }
     } else {
         println!("  Mode:     local (no relay, use `gang deploy` for local testing)");
+        println!();
+        println!("Press Ctrl+C to stop.");
+
+        tokio::signal::ctrl_c().await?;
+        println!("\nAgent stopped.");
     }
 
-    println!();
-    println!("Press Ctrl+C to stop.");
-
-    // Keep running until interrupted
-    // TODO(v0.6): when relay is set, create Libp2pTransportAdapter,
-    // dial the relay, and call agent.serve(&transport).
-    tokio::signal::ctrl_c().await?;
-    println!("\nAgent stopped.");
     Ok(())
 }
 
