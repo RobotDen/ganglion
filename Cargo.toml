@@ -11,6 +11,9 @@ members = [
     "crates/gang-capability-diagnostic-bundle",
     "crates/gang-capability-network-archetype",
 ]
+exclude = [
+    "test-harness/e2e-dispatch/test-component",
+]
 
 [workspace.package]
 version = "0.5.0"

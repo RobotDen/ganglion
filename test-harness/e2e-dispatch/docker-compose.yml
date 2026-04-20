@@ -1,0 +1,63 @@
+# E2E dispatch test: relay + robot + operator on a flat bridge network.
+# Validates the full deploy→invoke→result flow over libp2p.
+#
+# Usage:
+#   ./run-test.sh          # builds, runs, validates, tears down
+#   docker compose up -d   # manual: start all services
+#   docker compose logs -f # manual: watch logs
+
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: ["gang", "relay", "--port", "4001"]
+    networks:
+      ganglion-e2e:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "4001"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  robot:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    command: >
+      gang agent
+        --data-dir /data
+        -r /ip4/172.28.0.10/tcp/4001
+    depends_on:
+      relay:
+        condition: service_healthy
+    networks:
+      ganglion-e2e:
+        ipv4_address: 172.28.0.20
+    volumes:
+      - robot-data:/data
+
+  operator:
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
+    entrypoint: ["/bin/bash", "/test-data/run-operator-test.sh"]
+    depends_on:
+      relay:
+        condition: service_healthy
+    networks:
+      ganglion-e2e:
+        ipv4_address: 172.28.0.30
+    volumes:
+      - ./test-data:/test-data:ro
+
+volumes:
+  robot-data:
+
+networks:
+  ganglion-e2e:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

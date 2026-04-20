@@ -1,0 +1,20 @@
+[package]
+name = "test-diagnostics-component"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wit-bindgen = "0.41"
+wit-bindgen-rt = "0.41"
+
+[package.metadata.component]
+package = "ganglion:test-diagnostics"
+
+[package.metadata.component.target]
+world = "ganglion-capability"
+path = "wit"
