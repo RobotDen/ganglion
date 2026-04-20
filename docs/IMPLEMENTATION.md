@@ -65,17 +65,17 @@
 
 **Total: 188 tests passing across 9 crates (46 core + 84 ros + 18 wasm-host + 9 libp2p + 6 diagnostics + 8 param-inspect + 7 diag-bundle + 10 net-archetype).**
 
-**v0.6** (proposed — [ADR-020](adr/ADR-020-remote-dispatch-and-e2e-test.md)):
+**v0.6** ([ADR-020](adr/ADR-020-remote-dispatch-and-e2e-test.md)):
 
 | Phase | Status | Tests | Commit |
 |-------|--------|-------|--------|
-| 32. Robot agent serve loop (listen on /ganglion/control/1.0) | — | — | — |
-| 33. Agent CLI startup with transport (-r flag, dial relay) | — | — | — |
-| 34. Peer registry CLI (gang peer add/remove/list/show/rename) | — | — | — |
-| 35. Operator remote dispatch (name/prefix/peer-id resolution) | — | — | — |
-| 36. SSH-style identity verification (TOFU, key-change warning) | — | — | — |
-| 37. Operator config file (~/.gang/config.toml) | — | — | — |
-| 38. Shell completions (bash, zsh, fish, elvish, powershell) | — | — | — |
+| 32. Robot agent serve loop (listen on /ganglion/control/1.0) | Done | 188 | b729630 |
+| 33. Agent CLI startup with transport (-r flag, dial relay) | Done | 188 | b729630 |
+| 34. Peer registry CLI (gang peer add/remove/list/show/rename) | Done | 188 | 05810d7 |
+| 35. Operator remote dispatch (name/prefix/peer-id resolution) | Done | 188 | 05810d7 |
+| 36. SSH-style identity verification (TOFU, key-change warning) | Done | 188 | f00e329 |
+| 37. Operator config file (~/.gang/config.toml) | Done | 188 | 42a8f63 |
+| 38. Shell completions (bash, zsh, fish, elvish, powershell) | Done | 188 | 05810d7 |
 | 39. Reference WASM component build (diagnostics → .wasm) | — | — | — |
 | 40. E2E Docker test scenario (relay + robot + operator) | — | — | — |
 | 41. v0.6 release | — | — | — |

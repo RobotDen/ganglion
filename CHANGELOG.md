@@ -2,6 +2,29 @@
 
 All notable changes to Ganglion will be documented in this file.
 
+## [0.6.0] — 2026-04-24
+
+### Added
+
+- **Robot agent serve loop** (`gang-ros`): `RobotAgent::serve()` registers a handler on `/ganglion/control/1.0` that deserializes incoming `ControlMessage` requests and dispatches to `deploy_capability()`, `invoke_capability()`, and `list_capabilities()` (ADR-020 Phase 32).
+- **Agent transport startup** (`gang-cli`): `gang agent -r <relay>` creates a libp2p transport, dials the relay, registers the control handler, and runs the event loop. Without `-r`, agent runs in local mode for backward compatibility (ADR-020 Phase 33).
+- **Peer registry CLI** (`gang-cli`): `gang peer add/remove/list/show/rename/trust-reset` subcommands for managing known peers stored in `~/.gang/peers.json` (ADR-020 Phase 34).
+- **Operator remote dispatch** (`gang-cli`): Unified target resolution chain for `gang deploy`, `gang run`, and `gang caps`: registered name → abbreviated peer ID prefix (Docker-style) → full peer ID → local fallback. `-p`/`--peer` and `-r`/`--relay` flags on all commands (ADR-020 Phase 35).
+- **SSH-style identity verification** (`gang-cli`): `verify_host_key()` with three policies: `strict` (TOFU with interactive prompt, hard fail on mismatch), `tofu` (auto-accept, hard fail on mismatch), `none` (development only). SSH-style warning banner on key change (ADR-020 Phase 36).
+- **Operator config file** (`gang-cli`): `~/.gang/config.toml` with `default_relay` and `host_key_policy`. `gang config show/set/init/path` subcommands. Config integrates into target resolution relay fallback chain (ADR-020 Phase 37).
+- **Shell completions** (`gang-cli`): `gang completions <shell>` for bash, zsh, fish, elvish, and powershell via `clap_complete` (ADR-020 Phase 38).
+- **`send_rpc()` method** (`gang-libp2p`): Send request bytes to a connected peer and await response bytes, used for operator→robot control messages.
+- **`TrustStore::index_of()`** (`gang-core`): Locate the index of a trusted peer entry for SSH-style "offending key at index N" messages.
+- **`PeerId::new()`, `PeerId::starts_with()`** (`gang-core`): Construct peer IDs from strings and check prefixes for Docker-style abbreviated matching.
+- **`PeerRegistry::lookup_by_prefix()`** (`gang-core`): Find peers by abbreviated peer ID prefix.
+- **`gang status` enhancements** (`gang-cli`): Now shows peer count, config path, default relay, and lists all new commands.
+
+### Changed
+
+- `gang deploy`, `gang run`, `gang caps` accept `-p`/`--peer` and `-r`/`--relay` flags.
+- `gang agent` accepts `-r`/`--relay` flag for remote mode.
+- **188 total tests passing** (unchanged — new features are CLI commands without unit tests; integration coverage planned for Phase 40).
+
 ## [0.5.0] — 2026-04-23
 
 ### Security

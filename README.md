@@ -76,7 +76,7 @@ ganglion/
 gang identity show                    Show your PeerId and public key
 gang identity generate [--force]      Generate a new Ed25519 keypair
 gang sign <wasm> [--key K] [--name N] Sign a WASM component, produce .manifest.cbor
-gang agent [--config C] [--data-dir]  Run a local robot agent
+gang agent [--data-dir] [-r relay]    Run a robot agent (local or remote mode)
 gang deploy <robot> <wasm>            Deploy a signed capability to a robot
 gang run <robot> <cap> [args...]      Invoke an installed capability
 gang caps <robot>                     List capabilities installed on a robot
@@ -94,8 +94,18 @@ gang registry install <name>          Install a capability from the registry
 gang registry publish <wasm>          Publish a capability to the registry
 gang registry list                    List all registry capabilities
 gang registry info <name>             Show capability details
-gang list                             List reachable robots in the fleet
-gang connect <robot>                  Establish a session with a robot via relay
+gang peer add <name> <peer-id>        Register a known peer
+gang peer remove <name>               Remove a registered peer
+gang peer list                        List all registered peers
+gang peer show <name>                 Show details for a specific peer
+gang peer rename <old> <new>          Rename a registered peer
+gang config show                      Show current configuration
+gang config set <key> <value>         Set a configuration value
+gang config init [--force]            Initialize default config file
+gang completions <shell>              Generate shell completions (bash/zsh/fish)
+gang relay [--port P]                 Run a circuit relay v2 server
+gang list                             List reachable robots in the fleet [WIP]
+gang connect <robot>                  Establish a session via relay [WIP]
 ```
 
 See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full details, flags, and examples.

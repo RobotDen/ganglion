@@ -31,9 +31,13 @@ Pre-commit hook runs: `cargo fmt --check`, `cargo clippy --all-targets -- -D war
 ```bash
 gang demo                            # Self-contained end-to-end demo
 gang identity show                   # Show peer ID
+gang status                          # Version, identity, capabilities summary
 gang diagnose                        # Detect network archetype
 gang capability scaffold my-tool     # Generate capability skeleton
 gang registry list                   # List registered capabilities
+gang peer list                       # List registered peers
+gang config show                     # Show operator configuration
+gang completions bash                # Generate bash completions
 ```
 
 ### Docker test harness

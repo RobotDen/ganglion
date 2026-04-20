@@ -48,8 +48,8 @@ Each ADR follows a consistent format:
 | 018 | [Document CLI stubbed commands](ADR-018-document-cli-stubs.md) | Accepted |
 | 019 | [ROS broker test coverage](ADR-019-ros-broker-test-coverage.md) | Accepted |
 
-### Remote dispatch (v0.6 — proposed)
+### Remote dispatch (v0.6)
 
 | # | Title | Status |
 |---|-------|--------|
-| 020 | [Remote dispatch via control protocol and e2e test](ADR-020-remote-dispatch-and-e2e-test.md) | Proposed |
+| 020 | [Remote dispatch via control protocol and e2e test](ADR-020-remote-dispatch-and-e2e-test.md) | Implemented |
