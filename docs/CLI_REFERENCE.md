@@ -17,7 +17,7 @@ Show Ganglion version, identity status, available commands, and WIP commands.
 
 ```bash
 $ gang status
-Ganglion v0.5.0
+Ganglion v0.6.0
 
 Identity:   12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
 Key file:   /home/user/.gang/identity.key

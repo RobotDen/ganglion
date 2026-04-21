@@ -1,6 +1,6 @@
 # Ganglion: implementation plan and checklist
 
-**Status:** Active — tracks implementation from v0.1 through v0.5
+**Status:** Active — tracks implementation from v0.1 through v0.6
 **Source of truth:** [DesignSpec.md](./DesignSpec.md)
 
 ### Progress
@@ -76,9 +76,9 @@
 | 36. SSH-style identity verification (TOFU, key-change warning) | Done | 188 | f00e329 |
 | 37. Operator config file (~/.gang/config.toml) | Done | 188 | 42a8f63 |
 | 38. Shell completions (bash, zsh, fish, elvish, powershell) | Done | 188 | 05810d7 |
-| 39. Reference WASM component build (diagnostics → .wasm) | — | — | — |
-| 40. E2E Docker test scenario (relay + robot + operator) | — | — | — |
-| 41. v0.6 release | — | — | — |
+| 39. Reference WASM component build (diagnostics → .wasm) | Done | 188 | b1d6099 |
+| 40. E2E Docker test scenario (relay + robot + operator) | Done | 188 | b1d6099 |
+| 41. v0.6 release | Done | 188 | e89167a |
 
 **Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`, `PeerRegistry`, `TrustStore`) to the CLI and robot agent. Named peers, abbreviated peer ID matching (Docker-style), SSH-style host key verification, and a config file eliminate verbose flags. `gang deploy warehouse-bot diagnostics.wasm` sends a capability over a relay circuit to a named remote robot and returns the result. Validate with a Docker e2e scenario. See ADR-020 for detailed design.
 

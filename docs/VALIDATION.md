@@ -1,11 +1,11 @@
 # Validation results
 
-Test results and validation status for Ganglion v0.5.0.
+Test results and validation status for Ganglion v0.6.0.
 
 ## Test environment
 
 - **Host:** macOS / Linux
-- **Ganglion version:** v0.5.0
+- **Ganglion version:** v0.6.0
 - **Rust:** 1.85+
 - **CI:** GitHub Actions (ubuntu-latest + macos-latest matrix)
 
@@ -34,6 +34,7 @@ Test results and validation status for Ganglion v0.5.0.
 | v0.3.0 | 10 | 70 |
 | v0.4.0 | 56 | 126 |
 | v0.5.0 | 62 | 188 |
+| v0.6.0 | 0 | 188 |
 
 ## CI pipeline
 
@@ -155,7 +156,7 @@ Expected results per scenario:
 - **enterprise-dmz:** robot can reach firewall at 172.16.10.1, TCP 443 rule present
 - **mobile-cgnat:** robot can reach inner NAT at 10.64.0.1, netem qdisc active
 
-## Known limitations (v0.5)
+## Known limitations (v0.6)
 
 - Docker test scenarios verify network topology and reachability; full end-to-end protocol flow testing requires live relay connectivity
 - Regulated facility (air-gapped) archetype is not Docker-testable — requires physical sneakernet
