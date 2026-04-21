@@ -421,7 +421,7 @@ async fn main() -> anyhow::Result<()> {
             robot: _,
             follow: _,
         } => {
-            eprintln!("This command requires relay connectivity (not yet available in v0.5).");
+            eprintln!("This command requires relay connectivity (not yet available in v0.6).");
             eprintln!(
                 "Run `gang demo` to see current capabilities, or `gang status` for a summary."
             );
@@ -498,7 +498,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Status => commands::status(&cli.format).await?,
         Commands::List => {
-            eprintln!("This command requires relay connectivity (not yet available in v0.5).");
+            eprintln!("This command requires relay connectivity (not yet available in v0.6).");
             eprintln!(
                 "Run `gang demo` to see current capabilities, or `gang status` for a summary."
             );
@@ -507,7 +507,7 @@ async fn main() -> anyhow::Result<()> {
             robot: _,
             prefer_transport: _,
         } => {
-            eprintln!("This command requires relay connectivity (not yet available in v0.5).");
+            eprintln!("This command requires relay connectivity (not yet available in v0.6).");
             eprintln!(
                 "Run `gang demo` to see current capabilities, or `gang status` for a summary."
             );

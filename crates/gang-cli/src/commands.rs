@@ -678,7 +678,6 @@ pub enum HostKeyVerification {
 }
 
 /// Compute an SSH-style fingerprint from a public key.
-#[allow(dead_code)]
 fn key_fingerprint(public_key: &[u8]) -> String {
     let hash = blake3::hash(public_key);
     format!("BLAKE3:{}", &hash.to_hex()[..32])
