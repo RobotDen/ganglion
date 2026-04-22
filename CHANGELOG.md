@@ -19,11 +19,17 @@ All notable changes to Ganglion will be documented in this file.
 - **`PeerRegistry::lookup_by_prefix()`** (`gang-core`): Find peers by abbreviated peer ID prefix.
 - **`gang status` enhancements** (`gang-cli`): Now shows peer count, config path, default relay, and lists all new commands.
 
+- **Standard library expansion**: Three new capability crates completing the v0.4 design spec standard library:
+  - `gang-capability-log-normalize` — converts varied log formats (journald, ROS 2, syslog, plaintext) into a unified structured schema for fleet-wide analysis. 11 tests.
+  - `gang-capability-topic-echo` — subscribes to ROS 2 topics and captures serialized messages with configurable decimation and per-topic statistics. 11 tests.
+  - `gang-capability-canary-probe` — fleet-scale health check with configurable thresholds for memory, disk, uptime, and reachability. Returns pass/degraded/unhealthy/unreachable status. 11 tests.
+- **Capability Author Guide** (`docs/CAPABILITY_AUTHOR_GUIDE.md`): Comprehensive guide for building capabilities in Rust, C++, Python, and Go with language-specific WIT binding instructions, build commands, and best practices.
+
 ### Changed
 
 - `gang deploy`, `gang run`, `gang caps` accept `-p`/`--peer` and `-r`/`--relay` flags.
 - `gang agent` accepts `-r`/`--relay` flag for remote mode.
-- **188 total tests passing** (unchanged — new features are CLI commands without unit tests; integration coverage planned for Phase 40).
+- **221 total tests passing** across 12 crates (33 new tests from standard library capabilities).
 
 ## [0.5.0] — 2026-04-23
 

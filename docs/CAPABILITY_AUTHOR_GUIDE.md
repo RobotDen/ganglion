@@ -4,33 +4,26 @@ Build, sign, and distribute Ganglion capabilities in Rust, C++, Python, or Go.
 
 ## Overview
 
-A Ganglion capability is a WASM component that runs inside the sandboxed Layer 2 runtime on a robot. Capabilities interact with the robot through well-defined WIT interfaces — they cannot access resources they haven't declared, and the policy engine enforces boundaries at load time.
+A Ganglion capability is a signed WebAssembly component that runs inside the robot agent's sandbox. The component exports a single entry point:
 
-## Quick Start (Rust)
+```wit
+export run: func(args: list<string>) -> result<list<u8>, string>;
+```
+
+It may import any of the eight host interfaces defined in `ganglion:capability@0.5.0`. The host only links interfaces declared in the component's signed manifest; undeclared imports trap at instantiation.
+
+## Quick start
 
 ```bash
-# Scaffold a new capability
-gang capability scaffold my-diagnostics --language rust
+# Generate a project skeleton (Rust, C++, Python, or Go)
+gang capability scaffold my-tool --language rust
 
-# Build
-cd my-diagnostics
-cargo build --target wasm32-wasip2 --release
-
-# Create component from module
-wasm-tools component new target/wasm32-wasip2/release/my_diagnostics.wasm \
-  -o my-diagnostics.component.wasm
-
-# Sign with your identity
-gang sign my-diagnostics.component.wasm --name my-diagnostics --version 0.1.0
-
-# Test locally
-gang deploy localhost my-diagnostics.component.wasm
-gang run localhost my-diagnostics
-
-# Publish to registry
-gang registry publish my-diagnostics.component.wasm \
-  --description "Custom diagnostics for my robot" \
-  --tags diagnostics,custom
+# Build, sign, and deploy
+cd my-tool
+make component
+gang sign my-tool.component.wasm --name my-tool --version 0.1.0
+gang deploy robot-42 my-tool.component.wasm
+gang run robot-42 my-tool
 ```
 
 ## Architecture
@@ -52,58 +45,62 @@ Operator                          Robot
 ### Capability lifecycle
 
 1. **Author** writes capability code targeting WIT interfaces
-2. **Build** compiles to `wasm32-wasip2` target
+2. **Build** compiles to a WASM module (language-specific toolchain)
 3. **Component** creation wraps the module as a WASM component
 4. **Sign** with Ed25519 identity produces `<name>.manifest.cbor`
-5. **Deploy** sends component + manifest to robot
+5. **Deploy** sends component + manifest to robot over libp2p
 6. **Verify** — robot checks signature, trust store, policy
 7. **Run** — WASM runtime instantiates with declared interfaces only
 
-## WIT Interfaces
+## Available host interfaces
 
-Your capability declares which interfaces it needs. Available groups:
+Your capability declares which interfaces it needs. The policy engine evaluates each at load time.
 
-| Interface | WIT Name | What it provides |
-|-----------|----------|-----------------|
-| ROS Interface | `ganglion:ros/interface` | Topic subscribe, service call, param get |
-| Log Stream | `ganglion:logs/stream` | Log source enumeration, filtered streaming |
-| Filesystem | `ganglion:fs/bounded` | Path-gated file read/write/list |
-| Diagnostics | `ganglion:diagnostics/collect` | System info, process list, network state |
-| Artifacts | `ganglion:artifacts/publish` | Content-addressed data publishing |
-| Process | `ganglion:process/spawn` | Bounded subprocess invocation |
-| Network Probe | `ganglion:network/probe` | Ping, DNS, port check, traceroute |
-| Metrics | `ganglion:metrics/emit` | Structured metric emission |
+| Interface | WIT module | Key functions |
+|-----------|-----------|---------------|
+| ROS Interface | `ganglion:ros/interface` | `topic-subscribe`, `service-call`, `param-get`, `param-set`, `list-ros` |
+| Log Stream | `ganglion:logs/stream` | `list-sources`, `stream-logs` |
+| Filesystem | `ganglion:fs/bounded` | `read-file`, `write-file`, `list-dir`, `stat-file` |
+| Diagnostics | `ganglion:diagnostics/collect` | `system-info`, `process-list`, `network-state` |
+| Artifacts | `ganglion:artifacts/publish` | `publish`, `exists` |
+| Process | `ganglion:process/spawn` | `spawn`, `spawn-with-env` |
+| Network Probe | `ganglion:network/probe` | `ping`, `dns-lookup`, `port-check`, `traceroute` |
+| Metrics | `ganglion:metrics/emit` | `emit`, `emit-batch` |
 
-### Entry point
+The full WIT definition is at `crates/gang-wasm-host/wit/ganglion.wit`.
 
-Every capability exports a single function:
+## Sandbox constraints
 
-```wit
-export run: func(args: list<string>) -> result<list<u8>, string>;
-```
+- **Fuel metering**: each WASM instruction costs fuel. Default budget: 1,000,000 units.
+- **Wall-clock deadline**: default 300 seconds (5 minutes).
+- **Memory limit**: default 256 MB.
+- **No ambient authority**: no network sockets, no filesystem access outside the `fs-bounded` interface, no environment variables.
+- **Default-deny policy**: the robot operator's policy file controls which interfaces and patterns are allowed per capability.
 
-`args` are operator-supplied arguments. Return serialized result data on success, or an error string on failure.
+Override resource limits in the manifest at signing time or via policy.
 
-## Language-Specific Guides
+## Language-specific instructions
 
 ### Rust
 
-**Prerequisites:** Rust toolchain with `wasm32-wasip2` target.
+Rust is the primary authoring language. The `cargo-component` toolchain handles WIT binding generation and component creation in a single step.
+
+**Prerequisites:**
 
 ```bash
 rustup target add wasm32-wasip2
-cargo install wasm-tools
+cargo install cargo-component
 ```
 
-**Project structure:**
+**Project structure** (generated by `gang capability scaffold my-tool --language rust`):
 
 ```
 my-capability/
-  Cargo.toml
-  src/
-    lib.rs          # Capability implementation
-  wit/
-    ganglion.wit    # Copy from ganglion repo
+├── Cargo.toml
+├── src/lib.rs
+├── wit/
+│   └── ganglion.wit      # Copy from crates/gang-wasm-host/wit/
+└── Makefile
 ```
 
 **Cargo.toml:**
@@ -120,88 +117,171 @@ crate-type = ["cdylib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+wit-bindgen = "0.41"
+wit-bindgen-rt = "0.41"
+
+[package.metadata.component]
+package = "ganglion:my-capability"
+
+[package.metadata.component.target]
+world = "ganglion-capability"
+path = "wit"
 ```
 
 **src/lib.rs:**
 
 ```rust
-// WIT bindings would be generated here via wit-bindgen
-// For now, this shows the pattern:
+mod bindings;
 
-use serde::Serialize;
+use bindings::ganglion::capability::diagnostics_collect;
+use bindings::Guest;
 
-#[derive(Serialize)]
-struct DiagResult {
-    hostname: String,
-    status: String,
+struct MyCapability;
+
+impl Guest for MyCapability {
+    fn run(args: Vec<String>) -> Result<Vec<u8>, String> {
+        let info = diagnostics_collect::system_info()
+            .map_err(|e| format!("system_info failed: {e}"))?;
+
+        let report = serde_json::json!({
+            "status": "ok",
+            "entries": info.len(),
+        });
+
+        serde_json::to_vec(&report)
+            .map_err(|e| format!("serialization failed: {e}"))
+    }
 }
 
-// Entry point — called by the Ganglion runtime
-pub fn run(args: Vec<String>) -> Result<Vec<u8>, String> {
-    let result = DiagResult {
-        hostname: "robot-01".into(),
-        status: "healthy".into(),
-    };
-    serde_json::to_vec(&result).map_err(|e| e.to_string())
-}
+bindings::export!(MyCapability with_types_in bindings);
 ```
 
 **Build:**
 
 ```bash
-cargo build --target wasm32-wasip2 --release
-wasm-tools component new target/wasm32-wasip2/release/my_capability.wasm \
-  -o my-capability.component.wasm
+cargo component build --release
+# Output: target/wasm32-wasip2/release/my_capability.wasm
 ```
+
+**Key details:**
+- `wit-bindgen` generates a `bindings` module from the WIT definition at build time.
+- The `Guest` trait is generated from the `ganglion-capability` world.
+- Import host functions via `bindings::ganglion::capability::<interface>`.
+- Return `Ok(bytes)` for success, `Err(string)` for failure.
 
 ### C++
 
-**Prerequisites:** wasi-sdk, wit-bindgen for C++.
+C++ capabilities use the wasi-sdk compiler and wit-bindgen for C bindings. This path is relevant for teams working primarily in C++ (the ROS 2 community's dominant language) and for deployments requiring minimal binary size.
+
+**Prerequisites:**
 
 ```bash
-# Install wasi-sdk
-curl -LO https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
-tar xf wasi-sdk-25.0-x86_64-linux.tar.gz
-export WASI_SDK_PATH=$(pwd)/wasi-sdk-25.0
+# Install wasi-sdk (v26+, from github.com/WebAssembly/wasi-sdk/releases)
+export WASI_SDK_PATH=/opt/wasi-sdk
+
+# Install wit-bindgen CLI and wasm-tools
+cargo install wit-bindgen-cli wasm-tools
 ```
 
-**Project structure:**
+**Project structure** (generated by `gang capability scaffold my-tool --language cpp`):
 
 ```
 my-capability/
-  Makefile
-  src/
-    main.cpp
-  wit/
-    ganglion.wit
+├── src/main.cpp
+├── gen/                     # Generated by wit-bindgen
+│   ├── ganglion_capability.h
+│   ├── ganglion_capability.c
+│   └── ganglion_capability_component_type.o
+├── wit/
+│   └── ganglion.wit
+├── Makefile
+└── build.sh
 ```
 
-**Build (Makefile):**
+**Build steps:**
 
-```makefile
-WASI_SDK ?= $(WASI_SDK_PATH)
-CC = $(WASI_SDK)/bin/clang++
+```bash
+# 1. Generate C bindings from WIT
+wit-bindgen c ./wit --world ganglion-capability --out-dir gen
 
-my-capability.wasm: src/main.cpp
-	$(CC) -o $@ $< --target=wasm32-wasip2 -O2
-	wasm-tools component new $@ -o my-capability.component.wasm
+# 2. Compile with wasi-sdk
+$WASI_SDK_PATH/bin/clang++ \
+    --target=wasm32-wasip1 \
+    -mexec-model=reactor \
+    -fno-exceptions \
+    -I gen \
+    -o my-capability.core.wasm \
+    gen/ganglion_capability.c \
+    gen/ganglion_capability_component_type.o \
+    src/main.cpp
+
+# 3. Create component
+wasm-tools component embed ./wit my-capability.core.wasm \
+    -o my-capability.embedded.wasm
+wasm-tools component new my-capability.embedded.wasm \
+    -o my-capability.component.wasm
 ```
+
+**src/main.cpp:**
+
+```cpp
+#include "ganglion_capability.h"
+#include <cstring>
+
+// Entry point — wit-bindgen generates the exact signature from the WIT world.
+bool exports_ganglion_capability_run(
+    ganglion_capability_list_string_t *args,
+    ganglion_capability_result_list_u8_string_t *ret
+) {
+    // Call a host import (example: diagnostics)
+    ganglion_capability_list_diagnostic_entry_t info;
+    ganglion_capability_string_t err;
+    bool ok = ganglion_capability_diagnostics_collect_system_info(&info, &err);
+
+    if (!ok) {
+        ret->is_err = true;
+        ret->val.err = err;
+        return true;
+    }
+
+    // Build response
+    const char *response = "{\"status\":\"ok\"}";
+    size_t len = strlen(response);
+
+    ret->is_err = false;
+    ret->val.ok.ptr = (uint8_t *)cabi_realloc(NULL, 0, 1, len);
+    memcpy(ret->val.ok.ptr, response, len);
+    ret->val.ok.len = len;
+
+    return true;
+}
+```
+
+**Key details:**
+- Compile with `-fno-exceptions` (required by wasi-sdk).
+- The three-step build (bindgen → compile → componentize) is manual but produces the smallest binaries (10-100 KB).
+- Memory management is manual — use `cabi_realloc` for canonical ABI allocations.
+- No C++ standard library threads (`THREAD_MODEL=single`).
+- wit-bindgen uses flat C naming: `ganglion_capability_diagnostics_collect_system_info`.
 
 ### Python
 
-**Prerequisites:** componentize-py.
+Python capabilities use `componentize-py` to bundle a CPython interpreter and your source code into a single WASM component. Best for operations teams writing quick diagnostic or analysis scripts.
+
+**Prerequisites:**
 
 ```bash
 pip install componentize-py
 ```
 
-**Project structure:**
+**Project structure** (generated by `gang capability scaffold my-tool --language python`):
 
 ```
 my-capability/
-  app.py
-  wit/
-    ganglion.wit
+├── app.py
+├── wit/
+│   └── ganglion.wit
+└── Makefile
 ```
 
 **app.py:**
@@ -209,37 +289,65 @@ my-capability/
 ```python
 import json
 
-def run(args: list[str]) -> bytes:
-    result = {
-        "message": "Hello from Python capability",
-        "args": args,
-    }
-    return json.dumps(result).encode()
+
+class GanglionCapability:
+    """Implements the ganglion-capability world.
+
+    The class name must match the world name converted to PascalCase.
+    """
+
+    def run(self, args: list[str]) -> bytes:
+        """Entry point. Return bytes on success, raise for errors."""
+        from ganglion_capability.imports import diagnostics_collect
+
+        entries = diagnostics_collect.system_info()
+        report = {
+            "status": "ok",
+            "entries": len(entries),
+            "args": args,
+        }
+        return json.dumps(report).encode("utf-8")
 ```
 
 **Build:**
 
 ```bash
-componentize-py -d wit/ganglion.wit -w ganglion-capability componentize app -o my-capability.component.wasm
+componentize-py \
+    -d ./wit \
+    -w ganglion-capability \
+    componentize app \
+    -o my-capability.component.wasm
 ```
+
+**Key details:**
+- Output components are 30-50 MB (they embed a CPython interpreter). Suitable for development and diagnostics; consider Rust or C++ for bandwidth-constrained deployments.
+- Only pure-Python dependencies work. C extensions (numpy, cryptography) will not compile.
+- Raise an exception to return the error variant of `result<list<u8>, string>`.
+- Host imports are available via `from ganglion_capability.imports import <interface>`.
 
 ### Go (TinyGo)
 
-**Prerequisites:** TinyGo with WASI support.
+Go capabilities compile via TinyGo targeting the `wasip2` architecture. The most ergonomic non-Rust option for teams familiar with Go.
+
+**Prerequisites:**
 
 ```bash
-# Install TinyGo
-brew install tinygo  # or see https://tinygo.org/getting-started/install/
+# Install TinyGo (0.34.0+)
+# See https://tinygo.org/getting-started/install/
+
+# Install wasm-tools
+cargo install wasm-tools
 ```
 
-**Project structure:**
+**Project structure** (generated by `gang capability scaffold my-tool --language go`):
 
 ```
 my-capability/
-  main.go
-  go.mod
-  wit/
-    ganglion.wit
+├── main.go
+├── go.mod
+├── wit/
+│   └── ganglion.wit
+└── Makefile
 ```
 
 **main.go:**
@@ -249,17 +357,24 @@ package main
 
 import "encoding/json"
 
+//go:generate go run go.bytecodealliance.org/cmd/wit-bindgen-go \
+//    generate --world ganglion-capability --out gen ./wit
+
 type Result struct {
-    Status string `json:"status"`
+    Status  string `json:"status"`
     Message string `json:"message"`
 }
 
-//export run
-func run() {
-    result := Result{Status: "ok", Message: "Hello from Go"}
-    data, _ := json.Marshal(result)
-    // Write to WASI stdout
-    println(string(data))
+func init() {
+    // Register exports via generated binding (wit-bindgen-go)
+}
+
+func run(args []string) ([]byte, error) {
+    result := Result{
+        Status:  "ok",
+        Message: "Hello from Go capability",
+    }
+    return json.Marshal(result)
 }
 
 func main() {}
@@ -268,63 +383,105 @@ func main() {}
 **Build:**
 
 ```bash
-tinygo build -o my-capability.wasm -target=wasip2 .
-wasm-tools component new my-capability.wasm -o my-capability.component.wasm
+tinygo build -target=wasip2 -o my-capability.wasm .
+wasm-tools component new my-capability.wasm \
+    -o my-capability.component.wasm
 ```
 
-## Manifest and Signing
+**Key details:**
+- TinyGo is not standard Go. Many stdlib packages are missing or limited (`net/http`, `reflect`). Check compatibility at tinygo.org/docs/reference/lang-support.
+- Binary size is moderate (1-5 MB), between C (tiny) and Python (large).
+- TinyGo's `wasip2` target may require `wasi:cli/imports` in the WIT world. If the Ganglion host does not provide those interfaces, use `wasm-tools component embed` with a WASI adapter.
+- `main()` is empty because the component is a reactor, not a command.
 
-Every deployed capability requires a signed manifest:
+## Signing and deployment
 
-```bash
-# Sign the component
-gang sign my-capability.component.wasm \
-  --name my-capability \
-  --version 0.1.0
+Every capability must be signed before deployment. The manifest includes:
 
-# This produces: my-capability.manifest.cbor
-```
-
-The manifest contains:
 - Component name and version
-- Declared capability groups (WIT interfaces used)
-- Author peer ID
-- Ed25519 signature over component bytes + manifest fields
-- Optional resource limits (max memory, CPU budget, wall-clock deadline)
-
-## Policy and Security
-
-Capabilities run under **default-deny** policy:
-
-- Only declared WIT interfaces are linked — undeclared imports trap immediately
-- Pattern-based access control for ROS topics, filesystem paths, log sources
-- Fuel metering prevents runaway CPU usage
-- Epoch-based wall-clock deadlines prevent hanging
-- Memory limits enforced by the WASM runtime
-- Process spawning restricted to command allowlists
-
-The robot operator controls policy. Your capability must declare everything it needs, and the operator's policy must permit it.
-
-## Publishing to the Registry
+- Author peer ID (from your `~/.gang/identity.key`)
+- Blake3 hash of the `.wasm` binary
+- Declared capability groups (extracted from the component)
+- Ed25519 signature
 
 ```bash
-# Publish to local registry
+# Sign
+gang sign my-capability.component.wasm \
+    --name my-capability --version 0.1.0
+# Output: my-capability.manifest.cbor
+
+# Deploy to a robot
+gang deploy robot-42 my-capability.component.wasm
+
+# Invoke
+gang run robot-42 my-capability -- --verbose
+```
+
+The robot verifies the signature against its trust store before loading.
+
+## Publishing to the registry
+
+```bash
+# Publish to the local registry
 gang registry publish my-capability.component.wasm \
-  --description "My custom diagnostic capability" \
-  --tags diagnostics,custom,ros2
+    --description "Custom diagnostics for my robot" \
+    --tags diagnostics,custom
 
-# Others can discover it
+# Others can discover and install it
 gang registry search diagnostics
-
-# And install it
 gang registry install my-capability
 ```
 
-## Best Practices
+## Testing
 
-1. **Declare minimally.** Only request the capability groups you actually need. Fewer declarations = easier policy approval.
-2. **Handle errors gracefully.** Return descriptive error strings — the operator sees them.
-3. **Respect resource limits.** Design for bounded execution. If you need to process large data, use streaming patterns.
-4. **Version your output format.** Include a version field in your serialized output so operators can handle schema evolution.
-5. **Test without ROS.** Structure your code so the business logic is testable as a regular library without requiring a ROS 2 environment.
-6. **Use content addressing.** For large outputs, publish artifacts via `ganglion:artifacts/publish` and return the CID.
+### Unit tests (native Rust library)
+
+The standard library capabilities export their logic as Rust libraries, testable with `cargo test`:
+
+```bash
+cargo test -p gang-capability-diagnostics
+cargo test -p gang-capability-log-normalize
+```
+
+### Integration tests (WASM component)
+
+Build the component and run through the agent:
+
+```bash
+gang agent --data-dir /tmp/test-agent &
+gang deploy local my-capability.component.wasm
+gang run local my-capability -- --verbose
+```
+
+### Docker e2e tests
+
+Full relay + robot + operator scenarios:
+
+```bash
+cd test-harness/e2e-dispatch
+./run-test.sh
+```
+
+## Standard library capabilities
+
+These ship with Ganglion as reference implementations:
+
+| Capability | Purpose | Host interfaces |
+|-----------|---------|----------------|
+| `gang-capability-diagnostics` | Basic system diagnostics | `diagnostics-collect` |
+| `gang-capability-param-inspect` | ROS 2 parameter snapshot and diff | `ros-interface` |
+| `gang-capability-diagnostic-bundle` | Comprehensive diagnostics with health checks | `diagnostics-collect`, `logs-stream`, `network-probe` |
+| `gang-capability-network-archetype` | Network environment classification | `network-probe`, `process-spawn` |
+| `gang-capability-log-normalize` | Log format normalization (journald, ROS 2, syslog) | `logs-stream` |
+| `gang-capability-topic-echo` | ROS 2 topic capture with decimation | `ros-interface` |
+| `gang-capability-canary-probe` | Fleet-scale health polling | `diagnostics-collect`, `network-probe`, `metrics-emit` |
+
+## Best practices
+
+1. **Declare minimally.** Only request the capability groups you need. Fewer declarations = easier policy approval.
+2. **Handle errors gracefully.** Return descriptive error strings — the operator sees them in the CLI.
+3. **Respect resource limits.** Design for bounded execution. If processing large data, use streaming or artifact publishing.
+4. **Version your output format.** Include a version field so operators can handle schema evolution.
+5. **Test without ROS.** Structure code so business logic is testable as a library without a ROS 2 environment.
+6. **Use content addressing.** For large outputs, publish via `ganglion:artifacts/publish` and return the CID.
+7. **Keep binary size in mind.** Rust and C++ produce small components suitable for constrained links. Python components are large but convenient for development.

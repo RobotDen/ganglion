@@ -46,6 +46,8 @@
 
 **Total: 126 tests passing across 7 crates (45 core + 46 ros + 10 wasm-host + 8 param-inspect + 7 diag-bundle + 10 net-archetype).**
 
+> **Note:** Phase 16 (standard capability library) originally shipped only the Rust capabilities (param-inspect, diagnostic-bundle, network-archetype). The three multi-language reference capabilities (log-normalize, topic-echo, canary-probe) and Phase 18 (CAPABILITY_AUTHOR_GUIDE.md) were completed in v0.6.
+
 **v0.5** (tagged `v0.5.0`):
 
 | Phase | Status | Tests | Commit |
@@ -78,7 +80,7 @@
 | 38. Shell completions (bash, zsh, fish, elvish, powershell) | Done | 188 | 05810d7 |
 | 39. Reference WASM component build (diagnostics → .wasm) | Done | 188 | b1d6099 |
 | 40. E2E Docker test scenario (relay + robot + operator) | Done | 188 | b1d6099 |
-| 41. v0.6 release | Done | 188 | e89167a |
+| 41. v0.6 release | Done | 221 | e89167a |
 
 **Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`, `PeerRegistry`, `TrustStore`) to the CLI and robot agent. Named peers, abbreviated peer ID matching (Docker-style), SSH-style host key verification, and a config file eliminate verbose flags. `gang deploy warehouse-bot diagnostics.wasm` sends a capability over a relay circuit to a named remote robot and returns the result. Validate with a Docker e2e scenario. See ADR-020 for detailed design.
 

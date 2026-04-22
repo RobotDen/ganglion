@@ -1,0 +1,13 @@
+[package]
+name = "gang-capability-canary-probe"
+description = "Fleet-scale health check — quick canary probe for 'is this robot responsive' polling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

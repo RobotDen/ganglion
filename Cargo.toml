@@ -10,6 +10,9 @@ members = [
     "crates/gang-capability-param-inspect",
     "crates/gang-capability-diagnostic-bundle",
     "crates/gang-capability-network-archetype",
+    "crates/gang-capability-log-normalize",
+    "crates/gang-capability-topic-echo",
+    "crates/gang-capability-canary-probe",
 ]
 exclude = [
     "test-harness/e2e-dispatch/test-component",

@@ -1,0 +1,13 @@
+[package]
+name = "gang-capability-topic-echo"
+description = "ROS 2 topic echo capability — subscribes to topics and streams serialized messages with optional decimation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

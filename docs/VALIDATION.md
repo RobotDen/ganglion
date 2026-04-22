@@ -11,7 +11,7 @@ Test results and validation status for Ganglion v0.6.0.
 
 ## Unit test summary
 
-188 tests across 9 crates, all passing:
+221 tests across 12 crates, all passing:
 
 | Crate | Tests | Coverage areas |
 |-------|-------|---------------|
@@ -24,6 +24,9 @@ Test results and validation status for Ganglion v0.6.0.
 | gang-capability-param-inspect | 8 | Snapshot construction, diff (added/removed/changed), empty snapshots, identical snapshots, format output, mixed types, nested paths |
 | gang-capability-diagnostic-bundle | 7 | Bundle construction, system section, journal section, network section, ROS graph section, health analysis (memory/disk/CPU/systemd), severity ordering, report formatting |
 | gang-capability-network-archetype | 10 | Probe construction, archetype classification (all 5 types), connectivity scoring (all pass, partial, all fail), recommendation generation, report formatting |
+| gang-capability-log-normalize | 11 | ROS 2 line parsing, journald line parsing, syslog line parsing, plaintext fallback, empty line, batch normalization with mixed formats, severity keyword parsing, serialization roundtrip, report formatting, syslog severity extraction |
+| gang-capability-topic-echo | 11 | Decimation (no reduction, every-second, with max, empty stream), sequence numbers, report aggregation, argument parsing (basic, defaults), serialization roundtrip, report formatting, byte tracking |
+| gang-capability-canary-probe | 11 | Healthy robot, degraded memory, unhealthy disk, unreachable robot, recent reboot detection, missing data skip, oneliner formatting, report formatting, serialization roundtrip, custom thresholds, default thresholds |
 
 ### Test breakdown by version
 
@@ -34,7 +37,7 @@ Test results and validation status for Ganglion v0.6.0.
 | v0.3.0 | 10 | 70 |
 | v0.4.0 | 56 | 126 |
 | v0.5.0 | 62 | 188 |
-| v0.6.0 | 0 | 188 |
+| v0.6.0 | 33 | 221 |
 
 ## CI pipeline
 

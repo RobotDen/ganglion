@@ -42,10 +42,13 @@ ganglion/
 │   ├── gang-wasm-host/                     # Wasmtime component runtime with WIT interfaces
 │   ├── gang-ros/                           # ROS 2 brokers, robot agent, archetype detection
 │   ├── gang-cli/                           # `gang` CLI binary
-│   ├── gang-capability-diagnostics/        # Reference WASM capability (WIP)
+│   ├── gang-capability-diagnostics/        # Basic system diagnostics
 │   ├── gang-capability-param-inspect/      # ROS 2 parameter snapshot and diff
 │   ├── gang-capability-diagnostic-bundle/  # Comprehensive diagnostic bundle with health checks
-│   └── gang-capability-network-archetype/  # Network archetype detection with connectivity scoring
+│   ├── gang-capability-network-archetype/  # Network archetype detection with connectivity scoring
+│   ├── gang-capability-log-normalize/      # Log format normalization (journald, ROS 2, syslog)
+│   ├── gang-capability-topic-echo/         # ROS 2 topic capture with decimation
+│   └── gang-capability-canary-probe/       # Fleet-scale canary health probe
 ├── test-harness/                           # Docker-compose network archetype scenarios
 │   ├── open-warehouse/                     # Flat L2, direct connectivity
 │   ├── nat-office/                         # Consumer NAT, relay + DCUtR
