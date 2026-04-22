@@ -1,0 +1,13 @@
+[package]
+name = "gang-capability-rosbag-slice"
+description = "Rosbag slicing capability — captures time-bounded slices of ROS 2 bag data and publishes them content-addressed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

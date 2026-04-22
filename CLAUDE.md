@@ -12,7 +12,7 @@ Part of the Tafy Labs / RobotDen vault ecosystem. Ganglion is the open-source co
 cargo build                          # Debug build
 cargo build --release                # Release build
 cargo install --path crates/gang-cli # Install `gang` CLI to PATH
-cargo test                           # Run all 221 tests
+cargo test                           # Run all 240 tests
 cargo clippy --all-targets           # Lint (CI runs with -Dwarnings)
 cargo fmt --check                    # Check formatting
 cargo doc --no-deps                  # Build rustdoc
@@ -49,7 +49,7 @@ gang test-archetype enterprise-dmz   # VLAN, TCP 443 only
 gang test-archetype mobile-cgnat     # Symmetric NAT, jitter, loss
 ```
 
-## Workspace (12 crates)
+## Workspace (13 crates)
 
 ```
 crates/
@@ -65,7 +65,8 @@ crates/
 ├── gang-capability-network-archetype/  # Archetype detection with connectivity scoring
 ├── gang-capability-log-normalize/      # Log format normalization (journald, ROS 2, syslog)
 ├── gang-capability-topic-echo/         # ROS 2 topic capture with decimation
-└── gang-capability-canary-probe/       # Fleet-scale health polling
+├── gang-capability-canary-probe/       # Fleet-scale health polling
+└── gang-capability-rosbag-slice/       # Time-bounded rosbag2 slicing
 ```
 
 ### Dependency rule

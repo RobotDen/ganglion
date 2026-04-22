@@ -24,12 +24,17 @@ All notable changes to Ganglion will be documented in this file.
   - `gang-capability-topic-echo` — subscribes to ROS 2 topics and captures serialized messages with configurable decimation and per-topic statistics. 11 tests.
   - `gang-capability-canary-probe` — fleet-scale health check with configurable thresholds for memory, disk, uptime, and reachability. Returns pass/degraded/unhealthy/unreachable status. 11 tests.
 - **Capability Author Guide** (`docs/CAPABILITY_AUTHOR_GUIDE.md`): Comprehensive guide for building capabilities in Rust, C++, Python, and Go with language-specific WIT binding instructions, build commands, and best practices.
+- **Rosbag slicing capability** (`gang-capability-rosbag-slice`): Time-bounded rosbag2 slice configuration with relative time parsing ("-60s", "-5m", "now"), topic filtering (exact match + glob), sqlite3/mcap format support, and `ros2 bag record` command building for content-addressed artifact distribution. 19 tests.
+- **Multi-language reference implementations** (`examples/`): Three complete examples proving the WASM Component Model authoring pathway works beyond Rust:
+  - `examples/python/` — Python log-normalize using componentize-py
+  - `examples/cpp/` — C++ topic-echo using wasi-sdk + wit-bindgen
+  - `examples/go/` — Go canary-probe using TinyGo
 
 ### Changed
 
 - `gang deploy`, `gang run`, `gang caps` accept `-p`/`--peer` and `-r`/`--relay` flags.
 - `gang agent` accepts `-r`/`--relay` flag for remote mode.
-- **221 total tests passing** across 12 crates (33 new tests from standard library capabilities).
+- **240 total tests passing** across 13 crates (52 new tests from standard library capabilities and rosbag slicing).
 
 ## [0.5.0] — 2026-04-23
 

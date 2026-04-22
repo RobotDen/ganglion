@@ -48,7 +48,12 @@ ganglion/
 │   ├── gang-capability-network-archetype/  # Network archetype detection with connectivity scoring
 │   ├── gang-capability-log-normalize/      # Log format normalization (journald, ROS 2, syslog)
 │   ├── gang-capability-topic-echo/         # ROS 2 topic capture with decimation
-│   └── gang-capability-canary-probe/       # Fleet-scale canary health probe
+│   ├── gang-capability-canary-probe/       # Fleet-scale canary health probe
+│   └── gang-capability-rosbag-slice/       # Time-bounded rosbag2 slicing
+├── examples/                               # Multi-language reference implementations
+│   ├── python/                             # Python log-normalize (componentize-py)
+│   ├── cpp/                                # C++ topic-echo (wasi-sdk + wit-bindgen)
+│   └── go/                                 # Go canary-probe (TinyGo)
 ├── test-harness/                           # Docker-compose network archetype scenarios
 │   ├── open-warehouse/                     # Flat L2, direct connectivity
 │   ├── nat-office/                         # Consumer NAT, relay + DCUtR
@@ -171,7 +176,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 # Prerequisites: Rust 1.85+, cargo
 cargo build --release
 
-# Run all tests (188 tests across 9 crates)
+# Run all tests (240 tests across 13 crates)
 cargo test
 
 # Run with warnings as errors (matches CI)

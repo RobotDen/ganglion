@@ -31,7 +31,7 @@
 | Phase | Status | Tests | Commit |
 |-------|--------|-------|--------|
 | 12. Content-addressed artifact store | Done | 10 | `7acc3be` |
-| 13. Rosbag slicing capability | Deferred | — | — |
+| 13. Rosbag slicing capability | Done | 19 | — |
 | 14. v0.3 CLI + release | Done | — | `7acc3be` |
 
 **v0.4** (tagged `v0.4.0`):

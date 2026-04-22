@@ -13,6 +13,7 @@ members = [
     "crates/gang-capability-log-normalize",
     "crates/gang-capability-topic-echo",
     "crates/gang-capability-canary-probe",
+    "crates/gang-capability-rosbag-slice",
 ]
 exclude = [
     "test-harness/e2e-dispatch/test-component",
