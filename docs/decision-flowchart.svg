@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 620" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="11">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <filter id="shadow" x="-2%" y="-2%" width="104%" height="104%">
+      <feDropShadow dx="1" dy="1" stdDeviation="1.5" flood-opacity="0.08"/>
+    </filter>
+    <!-- Decision diamond -->
+    <style>
+      .decision { fill: #eff6ff; stroke: #3b82f6; stroke-width: 1.4; }
+      .outcome  { fill: #f0fdf4; stroke: #22c55e; stroke-width: 1.4; rx: 6; }
+      .start    { fill: #1e3a5f; rx: 8; }
+      .label-d  { fill: #1e40af; font-weight: 600; text-anchor: middle; }
+      .label-o  { fill: #15803d; font-weight: 600; text-anchor: middle; }
+      .label-s  { fill: #fff;    font-weight: 700; text-anchor: middle; font-size: 13px; }
+      .edge     { fill: none; stroke: #64748b; stroke-width: 1.2; marker-end: url(#arrow); }
+      .edge-lbl { fill: #475569; font-size: 10px; font-weight: 600; text-anchor: middle; }
+      .branding { fill: #94a3b8; font-size: 9px; font-weight: 500; letter-spacing: 1.5px; }
+      .sub      { fill: #64748b; font-size: 9.5px; text-anchor: middle; }
+      .archetype{ font-weight: 700; font-size: 11.5px; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="620" fill="#fafbfc" rx="0"/>
+
+  <!-- Branding -->
+  <text x="748" y="608" text-anchor="end" class="branding">GANGLION</text>
+
+  <!-- ===== START NODE ===== -->
+  <rect class="start" x="290" y="18" width="220" height="38" filter="url(#shadow)"/>
+  <text class="label-s" x="400" y="42">What does your network look like?</text>
+
+  <!-- Arrow: Start -> Air-gapped? -->
+  <line class="edge" x1="400" y1="56" x2="400" y2="88"/>
+
+  <!-- ===== DECISION: Air-gapped? ===== -->
+  <polygon class="decision" points="400,88 480,123 400,158 320,123" filter="url(#shadow)"/>
+  <text class="label-d" x="400" y="126">Air-gapped?</text>
+
+  <!-- YES -> Regulated facility -->
+  <line class="edge" x1="480" y1="123" x2="680" y2="123"/>
+  <text class="edge-lbl" x="570" y="116">YES</text>
+
+  <rect class="outcome" x="680" y="92" width="110" height="62" filter="url(#shadow)"/>
+  <text class="label-o archetype" x="735" y="111">Regulated Facility</text>
+  <text class="sub" x="735" y="125">Offline signed bundles</text>
+  <text class="sub" x="735" y="138">No relay needed</text>
+  <text class="sub" x="735" y="151">Sneakernet delivery</text>
+
+  <!-- NO -> Direct connectivity? -->
+  <line class="edge" x1="400" y1="158" x2="400" y2="190"/>
+  <text class="edge-lbl" x="413" y="178">NO</text>
+
+  <!-- ===== DECISION: Direct connectivity? ===== -->
+  <polygon class="decision" points="400,190 500,230 400,270 300,230" filter="url(#shadow)"/>
+  <text class="label-d" x="400" y="228">Direct</text>
+  <text class="label-d" x="400" y="240">connectivity?</text>
+
+  <!-- YES -> Open warehouse -->
+  <line class="edge" x1="300" y1="230" x2="120" y2="230"/>
+  <text class="edge-lbl" x="215" y="223">YES</text>
+
+  <rect class="outcome" x="10" y="199" width="110" height="62" filter="url(#shadow)"/>
+  <text class="label-o archetype" x="65" y="218">Open Warehouse</text>
+  <text class="sub" x="65" y="232">Flat L2 network</text>
+  <text class="sub" x="65" y="245">Direct TCP / QUIC</text>
+  <text class="sub" x="65" y="258">No relay needed</text>
+
+  <!-- NO -> Outbound ports restricted? -->
+  <line class="edge" x1="400" y1="270" x2="400" y2="305"/>
+  <text class="edge-lbl" x="413" y="292">NO</text>
+
+  <!-- ===== DECISION: Outbound ports restricted? ===== -->
+  <polygon class="decision" points="400,305 510,345 400,385 290,345" filter="url(#shadow)"/>
+  <text class="label-d" x="400" y="342">Outbound ports</text>
+  <text class="label-d" x="400" y="354">restricted?</text>
+
+  <!-- YES (only 443) -> Enterprise DMZ -->
+  <line class="edge" x1="510" y1="345" x2="680" y2="345"/>
+  <text class="edge-lbl" x="590" y="338">YES (443 only)</text>
+
+  <rect class="outcome" x="680" y="310" width="110" height="70" filter="url(#shadow)"/>
+  <text class="label-o archetype" x="735" y="329">Enterprise DMZ</text>
+  <text class="sub" x="735" y="343">VLAN isolation</text>
+  <text class="sub" x="735" y="356">TCP 443 relay</text>
+  <text class="sub" x="735" y="369">Circuit relay required</text>
+
+  <!-- NO -> NAT type? -->
+  <line class="edge" x1="400" y1="385" x2="400" y2="420"/>
+  <text class="edge-lbl" x="413" y="406">NO</text>
+
+  <!-- ===== DECISION: Symmetric NAT? ===== -->
+  <polygon class="decision" points="400,420 500,460 400,500 300,460" filter="url(#shadow)"/>
+  <text class="label-d" x="400" y="457">Symmetric</text>
+  <text class="label-d" x="400" y="469">NAT?</text>
+
+  <!-- YES -> Mobile / CGNAT -->
+  <line class="edge" x1="500" y1="460" x2="680" y2="460"/>
+  <text class="edge-lbl" x="585" y="453">YES</text>
+
+  <rect class="outcome" x="680" y="427" width="110" height="66" filter="url(#shadow)"/>
+  <text class="label-o archetype" x="735" y="446">Mobile / CGNAT</text>
+  <text class="sub" x="735" y="460">Symmetric NAT</text>
+  <text class="sub" x="735" y="473">Relay-only (no punch)</text>
+  <text class="sub" x="735" y="486">Circuit relay required</text>
+
+  <!-- NO (cone NAT) -> NAT'd Office -->
+  <line class="edge" x1="300" y1="460" x2="120" y2="460"/>
+  <text class="edge-lbl" x="215" y="453">NO (cone NAT)</text>
+
+  <rect class="outcome" x="10" y="427" width="110" height="66" filter="url(#shadow)"/>
+  <text class="label-o archetype" x="65" y="446">NAT'd Office</text>
+  <text class="sub" x="65" y="460">Consumer NAT</text>
+  <text class="sub" x="65" y="473">DCUtR hole-punching</text>
+  <text class="sub" x="65" y="486">Relay as fallback</text>
+
+  <!-- ===== LEGEND ===== -->
+  <rect x="20" y="540" width="760" height="66" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="0.8"/>
+  <text x="40" y="558" font-size="10" font-weight="700" fill="#334155">TRANSPORT STACK</text>
+
+  <!-- libp2p -->
+  <rect x="40"  y="566" width="10" height="10" rx="2" fill="#3b82f6"/>
+  <text x="56"  y="576" font-size="9.5" fill="#334155"><tspan font-weight="600">libp2p</tspan> — TCP, QUIC, Circuit Relay, DCUtR hole-punching</text>
+
+  <!-- WASM -->
+  <rect x="370" y="566" width="10" height="10" rx="2" fill="#8b5cf6"/>
+  <text x="386" y="576" font-size="9.5" fill="#334155"><tspan font-weight="600">WASM</tspan> — Signed sandboxed tool components</text>
+
+  <!-- Native Brokers -->
+  <rect x="580" y="566" width="10" height="10" rx="2" fill="#f59e0b"/>
+  <text x="596" y="576" font-size="9.5" fill="#334155"><tspan font-weight="600">Native Brokers</tspan> — Host-privileged mediators</text>
+
+  <text x="40" y="598" font-size="9" fill="#64748b">All archetypes use the three-layer Ganglion stack. The decision tree selects the connectivity strategy within the libp2p layer.</text>
+</svg>

@@ -146,6 +146,19 @@ The following components have been validated:
 6. **`gang test-archetype` CLI** now validates both `docker` and `docker compose` availability, tears down leftover containers before starting, runs archetype-specific connectivity checks, and cleans up on failure.
 7. **`run-tests.sh`** created as comprehensive test runner with 6 checks per scenario: container state, relay process, robot process, relay startup logs, archetype connectivity, and archetype network rules.
 
+### Expected performance targets
+
+| Metric | Open Warehouse | NAT'd Office | Enterprise DMZ | Mobile/CGNAT |
+|--------|---------------|---------------|----------------|--------------|
+| Connection establishment | <100ms | <2s (relay) + DCUtR upgrade | <3s (relay on 443) | <5s (double relay) |
+| Steady-state RTT | <1ms (loopback) | <5ms (direct after DCUtR) | ~10ms (+5ms TLS inspect) | ~140ms (50±30 + 20±10 cumulative) |
+| Control message roundtrip | <5ms | <15ms | <25ms | <300ms |
+| Bulk transfer throughput | >100 MB/s (loopback) | >50 MB/s (direct) | >10 MB/s (relay) | >1 MB/s (relay + loss) |
+| Reconnection time | <500ms | <3s | <5s | <10s |
+| DCUtR upgrade | N/A | Expected success | Expected failure (UDP blocked) | Expected failure (symmetric NAT) |
+
+> **Note:** These are expected targets based on Docker-compose netem parameters. Actual measurements pending Docker Desktop restoration. Run `./test-harness/run-tests.sh` to collect real numbers.
+
 ### Pending validation (requires working Docker)
 
 Once Docker is restored, run:

@@ -145,6 +145,10 @@ These are the recommended starting points. Pin exact versions in `Cargo.lock`; u
 
 ---
 
+---
+
+> **Note:** The detailed checklists below are the original planning artifacts from the design spec. The progress tables above are the authoritative source of truth for what shipped. All phases marked "Done" in the tables above have been implemented and tested, even if individual checklist items below remain unchecked. The checklists are preserved for historical reference and to guide future work on phases not yet started.
+
 ## v0.1 — Reference control plane
 
 ### Phase 1: Repo scaffolding and core traits
