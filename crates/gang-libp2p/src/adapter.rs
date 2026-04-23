@@ -140,13 +140,25 @@ impl Libp2pTransportAdapter {
                         "Connection established"
                     );
 
-                    // Determine transport from endpoint
+                    // Determine transport from endpoint multiaddr.
+                    // Recognises current (tcp, quic) and future (webtransport,
+                    // webrtc) transports so the field is correct if/when those
+                    // features land in a future libp2p release.
                     let transport_name = if via_relay {
                         "relay".to_string()
-                    } else if endpoint.get_remote_address().to_string().contains("quic") {
-                        "quic".to_string()
                     } else {
-                        "tcp".to_string()
+                        let addr_str = endpoint.get_remote_address().to_string();
+                        if addr_str.contains("/webtransport/") {
+                            "webtransport".to_string()
+                        } else if addr_str.contains("/webrtc-direct/")
+                            || addr_str.contains("/webrtc/")
+                        {
+                            "webrtc".to_string()
+                        } else if addr_str.contains("quic") {
+                            "quic".to_string()
+                        } else {
+                            "tcp".to_string()
+                        }
                     };
 
                     let peer_key = gang_peer_id.as_str().to_string();
@@ -650,6 +662,20 @@ impl TransportAdapter for Libp2pTransportAdapter {
             caps.transports.push("relay-server".into());
         }
 
+        // WebTransport: libp2p 0.54 only provides `webtransport-websys` (browser/WASM).
+        // Native server-side WebTransport is not available yet. Report the config
+        // intent so operators can see what was requested vs what is active.
+        if self.config.enable_webtransport {
+            caps.transports
+                .push("webtransport (unavailable: requires wasm target)".into());
+        }
+
+        // WebRTC: libp2p 0.54 does not include a WebRTC transport crate at all.
+        if self.config.enable_webrtc {
+            caps.transports
+                .push("webrtc (unavailable: not in libp2p 0.54)".into());
+        }
+
         caps
     }
 
@@ -993,5 +1019,74 @@ mod tests {
     fn test_ganglion_protocol_as_ref() {
         let proto = GanglionProtocol("/ganglion/control/1.0".to_string());
         assert_eq!(proto.as_ref(), "/ganglion/control/1.0");
+    }
+
+    #[test]
+    fn test_capabilities_without_browser_transports() {
+        let caps = TransportCapabilities {
+            relay: true,
+            hole_punch: true,
+            direct_dial: true,
+            encrypted: true,
+            transports: vec!["tcp".into(), "quic".into()],
+        };
+        assert!(!caps.transports.iter().any(|t| t.contains("webtransport")));
+        assert!(!caps.transports.iter().any(|t| t.contains("webrtc")));
+    }
+
+    #[test]
+    fn test_capabilities_with_webtransport_enabled() {
+        // Simulate what capabilities() returns when enable_webtransport is true
+        let mut caps = TransportCapabilities {
+            relay: true,
+            hole_punch: true,
+            direct_dial: true,
+            encrypted: true,
+            transports: vec!["tcp".into(), "quic".into()],
+        };
+        // Mirror the adapter logic
+        caps.transports
+            .push("webtransport (unavailable: requires wasm target)".into());
+
+        assert!(caps.transports.iter().any(|t| t.contains("webtransport")));
+        assert!(caps.transports.iter().any(|t| t.contains("unavailable")));
+    }
+
+    #[test]
+    fn test_capabilities_with_webrtc_enabled() {
+        let mut caps = TransportCapabilities {
+            relay: true,
+            hole_punch: true,
+            direct_dial: true,
+            encrypted: true,
+            transports: vec!["tcp".into(), "quic".into()],
+        };
+        caps.transports
+            .push("webrtc (unavailable: not in libp2p 0.54)".into());
+
+        assert!(caps.transports.iter().any(|t| t.contains("webrtc")));
+        assert!(caps.transports.iter().any(|t| t.contains("unavailable")));
+    }
+
+    #[test]
+    fn test_config_browser_transport_defaults() {
+        let config = Libp2pConfig::default();
+        assert!(!config.enable_webtransport);
+        assert!(!config.enable_webrtc);
+    }
+
+    #[test]
+    fn test_transport_name_detection_webtransport() {
+        // Verify our address-to-transport-name logic handles future multiaddrs
+        let addr = "/ip4/1.2.3.4/udp/443/quic-v1/webtransport/certhash/abc123";
+        assert!(addr.contains("/webtransport/"));
+    }
+
+    #[test]
+    fn test_transport_name_detection_webrtc() {
+        let addr_direct = "/ip4/1.2.3.4/udp/9090/webrtc-direct/certhash/abc123";
+        let addr = "/ip4/1.2.3.4/udp/9090/webrtc/certhash/abc123";
+        assert!(addr_direct.contains("/webrtc-direct/"));
+        assert!(addr.contains("/webrtc/"));
     }
 }

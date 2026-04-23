@@ -38,6 +38,24 @@ pub struct Libp2pConfig {
     /// Maximum number of inbound connections.
     #[serde(default = "default_max_connections")]
     pub max_inbound_connections: u32,
+
+    /// Enable WebTransport listener.
+    ///
+    /// NOTE: libp2p 0.54 only provides `webtransport-websys`, which targets
+    /// browser/WASM environments. Native (server-side) WebTransport is not yet
+    /// available in the libp2p Rust stack. This flag is reserved for future use
+    /// when a native WebTransport transport ships. Setting it to `true` today
+    /// has no effect on the swarm but will be reported in capabilities.
+    #[serde(default)]
+    pub enable_webtransport: bool,
+
+    /// Enable WebRTC listener for browser-based operator UIs.
+    ///
+    /// NOTE: libp2p 0.54 does not ship a WebRTC transport crate. This flag is
+    /// reserved for future use. Setting it to `true` today has no effect on
+    /// the swarm but will be reported in capabilities.
+    #[serde(default)]
+    pub enable_webrtc: bool,
 }
 
 fn default_listen_addrs() -> Vec<String> {
@@ -65,6 +83,8 @@ impl Default for Libp2pConfig {
             relay_server: false,
             idle_timeout_secs: default_idle_timeout(),
             max_inbound_connections: default_max_connections(),
+            enable_webtransport: false,
+            enable_webrtc: false,
         }
     }
 }
