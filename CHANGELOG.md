@@ -24,6 +24,9 @@ All notable changes to Ganglion will be documented in this file.
   - `gang-capability-topic-echo` — subscribes to ROS 2 topics and captures serialized messages with configurable decimation and per-topic statistics. 11 tests.
   - `gang-capability-canary-probe` — fleet-scale health check with configurable thresholds for memory, disk, uptime, and reachability. Returns pass/degraded/unhealthy/unreachable status. 11 tests.
 - **Capability Author Guide** (`docs/CAPABILITY_AUTHOR_GUIDE.md`): Comprehensive guide for building capabilities in Rust, C++, Python, and Go with language-specific WIT binding instructions, build commands, and best practices.
+- **Decision flowchart** (`docs/decision-flowchart.svg`): One-page architectural selection flowchart mapping network archetype → transport strategy → relay requirements.
+- **Happy-eyeballs `dial_parallel()`** (`gang-core`): Real implementation replacing the stub — stagger delays between transport attempts, first successful connection wins, timeout enforcement, and transport filtering against capabilities. 7 tests with MockTransport.
+- **WebTransport/WebRTC preparation** (`gang-libp2p`): Config flags (`enable_webtransport`, `enable_webrtc`), capability reporting, and multiaddr transport detection. Native transport integration deferred — libp2p 0.54's `webtransport-websys` is browser-only and `webrtc` is not available for native targets. 6 tests.
 - **Rosbag slicing capability** (`gang-capability-rosbag-slice`): Time-bounded rosbag2 slice configuration with relative time parsing ("-60s", "-5m", "now"), topic filtering (exact match + glob), sqlite3/mcap format support, and `ros2 bag record` command building for content-addressed artifact distribution. 19 tests.
 - **Multi-language reference implementations** (`examples/`): Three complete examples proving the WASM Component Model authoring pathway works beyond Rust:
   - `examples/python/` — Python log-normalize using componentize-py
@@ -34,7 +37,7 @@ All notable changes to Ganglion will be documented in this file.
 
 - `gang deploy`, `gang run`, `gang caps` accept `-p`/`--peer` and `-r`/`--relay` flags.
 - `gang agent` accepts `-r`/`--relay` flag for remote mode.
-- **240 total tests passing** across 13 crates (52 new tests from standard library capabilities and rosbag slicing).
+- **254 total tests passing** across 13 crates (66 new tests from standard library, rosbag slicing, and transport improvements).
 
 ## [0.5.0] — 2026-04-23
 
