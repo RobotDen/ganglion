@@ -2,6 +2,39 @@
 
 All notable changes to Ganglion will be documented in this file.
 
+## [1.0.0] — 2026-04-24
+
+### Stability commitments
+
+Ganglion v1.0 marks the first stability commitment. The following surfaces are now stable:
+
+- **Stream protocols**: `/ganglion/control/1.0`, `/ganglion/tool/1.0`, `/ganglion/bulk/1.0` — wire format and framing are frozen. Future versions will negotiate via protocol ID versioning.
+- **WIT interfaces**: `ganglion:capability@0.5.0` — all eight capability group interfaces are stable. New interfaces may be added in future minor versions; existing interfaces will not break within a major version.
+- **CLI surface**: All commands documented in `docs/CLI_REFERENCE.md` are stable. Commands marked `[WIP]` (`gang list`, `gang connect`) may change. New commands may be added.
+- **Manifest schema**: v2.0 is stable. Future fields will use `#[serde(default)]` for backward compatibility.
+
+### Added
+
+- **libp2p 0.56 upgrade**: Updated from libp2p 0.54 to 0.56. Removes async-std (tokio-only), adds peer-store support. One code change for request-response API evolution.
+- **Happy-eyeballs `dial_parallel()`** (`gang-core`): Real implementation replacing the stub — stagger delays between transport attempts, first successful connection wins, timeout enforcement, and transport filtering against capabilities. 7 tests with MockTransport.
+- **WebTransport/WebRTC preparation** (`gang-libp2p`): Config flags (`enable_webtransport`, `enable_webrtc`), capability reporting, and multiaddr transport detection. Native transport integration deferred — no libp2p release (including 0.56) provides native WebTransport or WebRTC. Config and detection are in place for when upstream ships native support.
+- **Decision flowchart** (`docs/decision-flowchart.svg`): One-page architectural selection flowchart mapping network archetype → transport strategy → relay requirements.
+- **Rosbag slicing capability** (`gang-capability-rosbag-slice`): Time-bounded rosbag2 slice configuration with relative time parsing, topic filtering, sqlite3/mcap format support. 19 tests.
+- **Multi-language reference implementations** (`examples/`): Python log-normalize (componentize-py), C++ topic-echo (wasi-sdk + wit-bindgen), Go canary-probe (TinyGo).
+- **Standard library completion**: log-normalize (11 tests), topic-echo (11 tests), canary-probe (11 tests).
+- **Capability Author Guide** (`docs/CAPABILITY_AUTHOR_GUIDE.md`): Comprehensive guide for Rust, C++, Python, and Go.
+- **Performance targets** in `docs/VALIDATION.md`: Expected RTT, throughput, and connection times per network archetype.
+- **254 total tests passing** across 13 crates.
+
+### Known limitations
+
+- Native WebTransport blocked by upstream (libp2p draft PR #4348, tracking issue #2993)
+- Native WebRTC blocked by upstream (libp2p-webrtc v0.9.0-alpha.1 exists but is alpha, Linux-only)
+- Docker e2e measured metrics pending Docker Desktop restoration
+- `gang list` and `gang connect` remain WIP stubs requiring relay connectivity
+
+---
+
 ## [0.6.0] — 2026-04-24
 
 ### Added

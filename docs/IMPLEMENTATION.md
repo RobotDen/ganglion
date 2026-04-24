@@ -1,6 +1,6 @@
 # Ganglion: implementation plan and checklist
 
-**Status:** Active — tracks implementation from v0.1 through v0.6
+**Status:** Complete — tracks implementation from v0.1 through v1.0
 **Source of truth:** [DesignSpec.md](./DesignSpec.md)
 
 ### Progress
@@ -83,6 +83,24 @@
 | 41. v0.6 release | Done | 221 | e89167a |
 
 **Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`, `PeerRegistry`, `TrustStore`) to the CLI and robot agent. Named peers, abbreviated peer ID matching (Docker-style), SSH-style host key verification, and a config file eliminate verbose flags. `gang deploy warehouse-bot diagnostics.wasm` sends a capability over a relay circuit to a named remote robot and returns the result. Validate with a Docker e2e scenario. See ADR-020 for detailed design.
+
+**v1.0** (first stability commitment):
+
+| Phase | Status | Tests | Commit |
+|-------|--------|-------|--------|
+| 42. Standard library completion (log-normalize, topic-echo, canary-probe) | Done | 254 | 2203377 |
+| 43. Rosbag slicing capability | Done | 254 | 53e3344 |
+| 44. Multi-language examples (Python, C++, Go) | Done | 254 | 53e3344 |
+| 45. Capability Author Guide | Done | 254 | 2203377 |
+| 46. Decision flowchart | Done | 254 | eaeb64e |
+| 47. Happy-eyeballs dial_parallel | Done | 254 | 0342447 |
+| 48. WebTransport/WebRTC config preparation | Done | 254 | 0342447 |
+| 49. libp2p 0.56 upgrade | Done | 254 | b567714 |
+| 50. v1.0 stability commitments and release | Done | 254 | — |
+
+**Total: 254 tests passing across 13 crates.**
+
+**Stability commitments:** Stream protocols (`/ganglion/control/1.0`, `/ganglion/tool/1.0`, `/ganglion/bulk/1.0`), WIT interfaces (`ganglion:capability@0.5.0`), CLI surface (all non-WIP commands), and manifest schema v2.0 are frozen for the v1.x series.
 
 ---
 

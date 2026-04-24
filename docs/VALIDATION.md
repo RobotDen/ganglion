@@ -1,11 +1,11 @@
 # Validation results
 
-Test results and validation status for Ganglion v0.6.0.
+Test results and validation status for Ganglion v1.0.0.
 
 ## Test environment
 
 - **Host:** macOS / Linux
-- **Ganglion version:** v0.6.0
+- **Ganglion version:** v1.0.0
 - **Rust:** 1.85+
 - **CI:** GitHub Actions (ubuntu-latest + macos-latest matrix)
 
@@ -175,7 +175,7 @@ Expected results per scenario:
 - **enterprise-dmz:** robot can reach firewall at 172.16.10.1, TCP 443 rule present
 - **mobile-cgnat:** robot can reach inner NAT at 10.64.0.1, netem qdisc active
 
-## Known limitations (v0.6)
+## Known limitations (v1.0)
 
 - WebTransport and WebRTC transports are not available on native targets — libp2p 0.54's `webtransport-websys` is browser/WASM-only and `webrtc` feature does not exist for native. Config flags and capability reporting are in place for when a future libp2p release adds native support. The v0.2 design spec success criterion ("HTTPS/443-only egress operator can reach a robot via WebTransport") is blocked by this upstream dependency.
 

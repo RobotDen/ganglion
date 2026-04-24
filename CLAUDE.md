@@ -12,7 +12,7 @@ Part of the Tafy Labs / RobotDen vault ecosystem. Ganglion is the open-source co
 cargo build                          # Debug build
 cargo build --release                # Release build
 cargo install --path crates/gang-cli # Install `gang` CLI to PATH
-cargo test                           # Run all 254 tests
+cargo test                           # Run all 254 tests (v1.0)
 cargo clippy --all-targets           # Lint (CI runs with -Dwarnings)
 cargo fmt --check                    # Check formatting
 cargo doc --no-deps                  # Build rustdoc
