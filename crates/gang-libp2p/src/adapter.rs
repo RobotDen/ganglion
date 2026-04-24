@@ -288,6 +288,7 @@ impl Libp2pTransportAdapter {
             GanglionBehaviourEvent::GanglionRpc(request_response::Event::Message {
                 peer,
                 message,
+                ..
             }) => {
                 self.handle_rpc_message(peer, message).await;
             }
@@ -662,7 +663,7 @@ impl TransportAdapter for Libp2pTransportAdapter {
             caps.transports.push("relay-server".into());
         }
 
-        // WebTransport: libp2p 0.54 only provides `webtransport-websys` (browser/WASM).
+        // WebTransport: libp2p 0.56 only provides `webtransport-websys` (browser/WASM).
         // Native server-side WebTransport is not available yet. Report the config
         // intent so operators can see what was requested vs what is active.
         if self.config.enable_webtransport {
@@ -670,10 +671,10 @@ impl TransportAdapter for Libp2pTransportAdapter {
                 .push("webtransport (unavailable: requires wasm target)".into());
         }
 
-        // WebRTC: libp2p 0.54 does not include a WebRTC transport crate at all.
+        // WebRTC: libp2p 0.56 does not include a WebRTC transport crate at all.
         if self.config.enable_webrtc {
             caps.transports
-                .push("webrtc (unavailable: not in libp2p 0.54)".into());
+                .push("webrtc (unavailable: not in libp2p 0.56)".into());
         }
 
         caps
@@ -1062,7 +1063,7 @@ mod tests {
             transports: vec!["tcp".into(), "quic".into()],
         };
         caps.transports
-            .push("webrtc (unavailable: not in libp2p 0.54)".into());
+            .push("webrtc (unavailable: not in libp2p 0.56)".into());
 
         assert!(caps.transports.iter().any(|t| t.contains("webrtc")));
         assert!(caps.transports.iter().any(|t| t.contains("unavailable")));

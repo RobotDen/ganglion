@@ -59,7 +59,7 @@ chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
 
 # libp2p
-libp2p = { version = "0.54", features = [
+libp2p = { version = "0.56", features = [
     "tokio",
     "tcp",
     "quic",

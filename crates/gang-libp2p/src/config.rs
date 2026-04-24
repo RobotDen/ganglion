@@ -41,7 +41,7 @@ pub struct Libp2pConfig {
 
     /// Enable WebTransport listener.
     ///
-    /// NOTE: libp2p 0.54 only provides `webtransport-websys`, which targets
+    /// NOTE: libp2p 0.56 only provides `webtransport-websys`, which targets
     /// browser/WASM environments. Native (server-side) WebTransport is not yet
     /// available in the libp2p Rust stack. This flag is reserved for future use
     /// when a native WebTransport transport ships. Setting it to `true` today
@@ -51,7 +51,7 @@ pub struct Libp2pConfig {
 
     /// Enable WebRTC listener for browser-based operator UIs.
     ///
-    /// NOTE: libp2p 0.54 does not ship a WebRTC transport crate. This flag is
+    /// NOTE: libp2p 0.56 does not ship a WebRTC transport crate. This flag is
     /// reserved for future use. Setting it to `true` today has no effect on
     /// the swarm but will be reported in capabilities.
     #[serde(default)]
