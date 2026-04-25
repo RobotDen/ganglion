@@ -8,9 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-gang-core = { path = "../gang-core" }
-gang-libp2p = { path = "../gang-libp2p" }
-gang-wasm-host = { path = "../gang-wasm-host" }
+gang-core = { path = "../gang-core", version = "1.0.0" }
+gang-libp2p = { path = "../gang-libp2p", version = "1.0.0" }
+gang-wasm-host = { path = "../gang-wasm-host", version = "1.0.0" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
