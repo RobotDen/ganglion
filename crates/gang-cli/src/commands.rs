@@ -931,6 +931,15 @@ pub async fn agent(
     use gang_ros::filesystem::FsRule;
     use std::sync::Arc;
 
+    // Loading an AgentConfig from a file is not yet supported here (gang-ros
+    // does not expose a deserializer). Be honest rather than silently ignoring.
+    if let Some(path) = config_path {
+        eprintln!(
+            "warning: --config {path} is not yet supported; agent config file loading is \
+             unavailable. Continuing with built-in dev defaults."
+        );
+    }
+
     let data_dir = PathBuf::from(data_dir);
     std::fs::create_dir_all(&data_dir)?;
 
