@@ -2,6 +2,117 @@
 
 All notable changes to Ganglion will be documented in this file.
 
+## [2.0.0] - YYYY-MM-DD
+
+A security- and quality-hardening release. Every change below reflects code that
+has landed. See [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) for upgrade steps.
+
+### ⚠️ Breaking changes
+
+- **Unified peer-id derivation (SEC-03).** The libp2p transport now derives a
+  remote peer's gang id from its raw Ed25519 public key (recovered from the
+  libp2p peer id) using the *same* scheme as `gang-core`. Previously the
+  transport used a libp2p-multihash-based id that never matched the core
+  derivation, so trust-store `peer_rules` were not actually enforceable. They
+  are now. A robot's own id (derived from its key) is unchanged, but any
+  tooling/config that recorded the old multihash-based remote id must be
+  regenerated.
+- **Fail-closed policy and trust store.** A malformed or unreadable policy or
+  trust-store file now aborts agent startup instead of silently falling back to
+  a permissive policy. Deployments that relied on the old permissive fallback
+  will now fail loudly until the file is fixed.
+- **Replay protection on control requests.** Control requests now carry a
+  per-request nonce and timestamp; the agent rejects stale or replayed
+  requests. This is an additive wire change, but a pre-2.0 operator that sends
+  requests without the nonce is rejected — **all agents and operators must be
+  upgraded together.**
+- **`registry publish` requires a signed manifest (SEC-15).** `Registry::publish`
+  now takes a `&SignedManifest` and authenticates every entry against it;
+  publishing without an adjacent signed manifest is no longer possible.
+- **Library API changes.** `Cid::parse` (fallible parse replacing loose string
+  handling), `Registry::publish(entry, &signed_manifest)`, and strict `PeerId`
+  validation (`PeerId::parse`/`from_str` reject malformed ids) change public
+  signatures. Public wire enums (`ControlMessage`, `InvokeStatus`,
+  `BrokerOperation`) are now `#[non_exhaustive]`, so downstream `match`
+  statements must add a wildcard arm.
+- **Reduced library tokio feature set (CODE-15).** Library crates
+  (`gang-core`, `gang-libp2p`, `gang-ros`) now depend on a minimal tokio
+  feature set; the `gang` binary widens it to `full`. Downstream consumers of
+  the library crates that relied on transitively-enabled tokio features must
+  enable them explicitly.
+
+### Security
+
+- **SEC-03** — Peer-id derivation unified across the libp2p transport and
+  `gang-core`, making trust-store `peer_rules` enforceable (see breaking notes).
+- **Fail-closed policy/trust loading** — malformed policy or trust store aborts
+  startup; no permissive fallback.
+- **Identity key permissions enforced** — identity key files with permissions
+  looser than `0600` are repaired to `0600` (with a warning) before use.
+- **Hardened WASM execution path** — the runtime enforces manifest-derived
+  memory and fuel limits, re-hashes component bytes and refuses to execute on a
+  Blake3 mismatch, and has no silent WASM→broker fallback (a WASM failure is
+  terminal).
+- **Tamper-evident audit log** — the audit log is now a Blake3 hash chain
+  (`blake3(prev_hash || seq || cbor(record))`) with a `verify_chain()`
+  integrity check and `0600` permissions; reordering or deletion is detectable.
+- **Replay protection (control plane)** — nonce + timestamp on control
+  requests; stale/replayed requests are rejected.
+- **Network-probe broker SSRF hardening** — blocks loopback, link-local, the
+  cloud-metadata address (169.254.169.254), and IPv6 ULA ranges
+  unconditionally, and enforces a host/CIDR allowlist.
+- **Process broker hardening** — requires absolute, allowlisted command paths
+  (matched after canonicalization) and scrubs the environment (`env_clear`)
+  before spawning.
+- **Filesystem broker TOCTOU closure (SEC-10)** — operates on canonicalized
+  paths, including canonicalizing the parent for writes to new files.
+- **SEC-15** — registry entries authenticated against signed manifests (see
+  breaking notes).
+
+### Changed
+
+- `gang sign` now takes an explicit `--capabilities` flag instead of
+  auto-extracting capabilities from the component; when omitted it falls back to
+  a permissive default set and prints a loud warning. `--component-version`
+  (alias `--version`) sets the component's semantic version, distinct from the
+  CLI's own `-V`.
+- `gang registry publish` requires a signed manifest and gains `--version` and
+  `--language` overrides.
+- `gang capability scaffold` now writes a real `wit/ganglion.wit` into the
+  generated project (embedded from the canonical in-repo WIT), rather than
+  telling the author to copy it by hand.
+- `gang logs`, `gang list`, `gang connect` are marked `[WIP]` and now exit
+  non-zero; `gang transport-stats` output is explicitly labeled simulated.
+- `RUST_LOG` is now honored; added a `-q`/`--quiet` global flag.
+- `gang relay` gains `--data-dir` for the persisted identity key.
+- `gang demo` keeps its data under `/tmp/gang-demo` and prints a cleanup hint.
+
+### Fixed / clarified WIP
+
+- **Operator remote dispatch is still WIP.** `gang deploy`/`run`/`caps` against a
+  remote robot resolve the target then exit with a clear "not yet implemented
+  (ADR-020 Phase 32)" message; the local fallback path works. Earlier changelog
+  entries that implied relay-mediated remote dispatch had shipped were
+  incorrect — see the corrected v0.6.0 entry below.
+- The `e2e-dispatch` harness is an honest connectivity smoke test, not a full
+  remote deploy/invoke round-trip.
+
+### Docs
+
+- Documentation truth pass: corrected test counts (now **317** across 13
+  crates), the crate dependency graph, the standard-library table (adds
+  rosbag-slice), the canonical repository URL (`TafyLabs/ganglion`), and CLI
+  reference transcripts/flags to match real output.
+- Added [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) and a
+  [docs/README.md](docs/README.md) documentation index.
+- Marked the four-repos layout and stale dependency table in IMPLEMENTATION.md,
+  and DesignSpec.md, as historical.
+- `LICENSE` and `NOTICE` (Apache-2.0) now exist at the repository root.
+
+### Tests
+
+- **317 total tests passing** across 13 crates (63 added by this audit).
+
 ## [1.0.0] — 2026-04-24
 
 ### Stability commitments
@@ -42,7 +153,7 @@ Ganglion v1.0 marks the first stability commitment. The following surfaces are n
 - **Robot agent serve loop** (`gang-ros`): `RobotAgent::serve()` registers a handler on `/ganglion/control/1.0` that deserializes incoming `ControlMessage` requests and dispatches to `deploy_capability()`, `invoke_capability()`, and `list_capabilities()` (ADR-020 Phase 32).
 - **Agent transport startup** (`gang-cli`): `gang agent -r <relay>` creates a libp2p transport, dials the relay, registers the control handler, and runs the event loop. Without `-r`, agent runs in local mode for backward compatibility (ADR-020 Phase 33).
 - **Peer registry CLI** (`gang-cli`): `gang peer add/remove/list/show/rename/trust-reset` subcommands for managing known peers stored in `~/.gang/peers.json` (ADR-020 Phase 34).
-- **Operator remote dispatch** (`gang-cli`): Unified target resolution chain for `gang deploy`, `gang run`, and `gang caps`: registered name → abbreviated peer ID prefix (Docker-style) → full peer ID → local fallback. `-p`/`--peer` and `-r`/`--relay` flags on all commands (ADR-020 Phase 35).
+- **Operator target resolution** (`gang-cli`): Unified target resolution chain for `gang deploy`, `gang run`, and `gang caps`: registered name → abbreviated peer ID prefix (Docker-style) → full peer ID → local fallback. `-p`/`--peer` and `-r`/`--relay` flags on all commands (ADR-020 Phase 35). NOTE: relay-mediated *remote* dispatch is not yet wired — a resolved remote target exits with a "not yet implemented (ADR-020 Phase 32)" message; only the local fallback executes.
 - **SSH-style identity verification** (`gang-cli`): `verify_host_key()` with three policies: `strict` (TOFU with interactive prompt, hard fail on mismatch), `tofu` (auto-accept, hard fail on mismatch), `none` (development only). SSH-style warning banner on key change (ADR-020 Phase 36).
 - **Operator config file** (`gang-cli`): `~/.gang/config.toml` with `default_relay` and `host_key_policy`. `gang config show/set/init/path` subcommands. Config integrates into target resolution relay fallback chain (ADR-020 Phase 37).
 - **Shell completions** (`gang-cli`): `gang completions <shell>` for bash, zsh, fish, elvish, and powershell via `clap_complete` (ADR-020 Phase 38).
@@ -52,25 +163,16 @@ Ganglion v1.0 marks the first stability commitment. The following surfaces are n
 - **`PeerRegistry::lookup_by_prefix()`** (`gang-core`): Find peers by abbreviated peer ID prefix.
 - **`gang status` enhancements** (`gang-cli`): Now shows peer count, config path, default relay, and lists all new commands.
 
-- **Standard library expansion**: Three new capability crates completing the v0.4 design spec standard library:
-  - `gang-capability-log-normalize` — converts varied log formats (journald, ROS 2, syslog, plaintext) into a unified structured schema for fleet-wide analysis. 11 tests.
-  - `gang-capability-topic-echo` — subscribes to ROS 2 topics and captures serialized messages with configurable decimation and per-topic statistics. 11 tests.
-  - `gang-capability-canary-probe` — fleet-scale health check with configurable thresholds for memory, disk, uptime, and reachability. Returns pass/degraded/unhealthy/unreachable status. 11 tests.
-- **Capability Author Guide** (`docs/CAPABILITY_AUTHOR_GUIDE.md`): Comprehensive guide for building capabilities in Rust, C++, Python, and Go with language-specific WIT binding instructions, build commands, and best practices.
-- **Decision flowchart** (`docs/decision-flowchart.svg`): One-page architectural selection flowchart mapping network archetype → transport strategy → relay requirements.
-- **Happy-eyeballs `dial_parallel()`** (`gang-core`): Real implementation replacing the stub — stagger delays between transport attempts, first successful connection wins, timeout enforcement, and transport filtering against capabilities. 7 tests with MockTransport.
-- **WebTransport/WebRTC preparation** (`gang-libp2p`): Config flags (`enable_webtransport`, `enable_webrtc`), capability reporting, and multiaddr transport detection. Native transport integration deferred — libp2p 0.54's `webtransport-websys` is browser-only and `webrtc` is not available for native targets. 6 tests.
-- **Rosbag slicing capability** (`gang-capability-rosbag-slice`): Time-bounded rosbag2 slice configuration with relative time parsing ("-60s", "-5m", "now"), topic filtering (exact match + glob), sqlite3/mcap format support, and `ros2 bag record` command building for content-addressed artifact distribution. 19 tests.
-- **Multi-language reference implementations** (`examples/`): Three complete examples proving the WASM Component Model authoring pathway works beyond Rust:
-  - `examples/python/` — Python log-normalize using componentize-py
-  - `examples/cpp/` — C++ topic-echo using wasi-sdk + wit-bindgen
-  - `examples/go/` — Go canary-probe using TinyGo
+> The standard library completion, Capability Author Guide, decision flowchart,
+> happy-eyeballs `dial_parallel()`, WebTransport/WebRTC preparation, rosbag
+> slicing capability, and multi-language reference implementations were
+> previously double-listed here; they are recorded once under **[1.0.0]** above.
 
 ### Changed
 
 - `gang deploy`, `gang run`, `gang caps` accept `-p`/`--peer` and `-r`/`--relay` flags.
 - `gang agent` accepts `-r`/`--relay` flag for remote mode.
-- **254 total tests passing** across 13 crates (66 new tests from standard library, rosbag slicing, and transport improvements).
+- **221 total tests passing** across 13 crates at the v0.6.0 milestone.
 
 ## [0.5.0] — 2026-04-23
 
@@ -111,7 +213,7 @@ Ganglion v1.0 marks the first stability commitment. The following surfaces are n
 - **Community pathway**: `docs/CAPABILITY_AUTHOR_GUIDE.md` with language-specific guides for Rust, C++, Python, and Go/TinyGo. `gang capability scaffold <name> --language <lang>` generates project skeletons with Makefile, source template, and WIT directory.
 - **Manifest schema v2.0**: Adds authoring language, description, tags, minimum Ganglion version, and schema version fields. v1.x manifests load via `#[serde(default)]` backward compatibility.
 - **WIT interface v0.4.0** with `process-spawn`, `network-probe`, and `metrics-emit` interfaces.
-- **36 new tests** across 6 crates. **126 total tests passing.**
+- **56 new tests** across 6 crates. **126 total tests passing.**
 
 ### Changed
 
