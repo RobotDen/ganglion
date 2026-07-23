@@ -377,10 +377,11 @@ impl ComponentRuntime {
 /// bounded (see the constant's doc comment); generic over the value type so
 /// the bound can be unit-tested without compiling real components.
 fn insert_bounded<V>(cache: &mut HashMap<String, V>, key: String, value: V) {
-    if cache.len() >= MAX_CACHED_COMPONENTS && !cache.contains_key(&key) {
-        if let Some(evict) = cache.keys().next().cloned() {
-            cache.remove(&evict);
-        }
+    if cache.len() >= MAX_CACHED_COMPONENTS
+        && !cache.contains_key(&key)
+        && let Some(evict) = cache.keys().next().cloned()
+    {
+        cache.remove(&evict);
     }
     cache.insert(key, value);
 }

@@ -73,14 +73,14 @@ impl FsBroker {
             // fs::write would follow it out of the jail. Reject any symlink
             // at the final component regardless of where (or whether) its
             // target resolves.
-            if let Ok(meta) = std::fs::symlink_metadata(&joined) {
-                if meta.file_type().is_symlink() {
-                    return Err(BrokerError::AccessDenied {
-                        broker: "fs".into(),
-                        resource: path.into(),
-                        reason: "final path component is a symlink".into(),
-                    });
-                }
+            if let Ok(meta) = std::fs::symlink_metadata(&joined)
+                && meta.file_type().is_symlink()
+            {
+                return Err(BrokerError::AccessDenied {
+                    broker: "fs".into(),
+                    resource: path.into(),
+                    reason: "final path component is a symlink".into(),
+                });
             }
 
             joined.to_string_lossy().to_string()
