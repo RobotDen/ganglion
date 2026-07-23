@@ -32,6 +32,12 @@ services:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
     entrypoint: ["/bin/bash", "/harness/agent-entrypoint.sh"]
+    # NET_ADMIN so the entrypoint can repoint the default route at the
+    # NAT gateway container (Docker's bridge gateway would bypass it).
+    cap_add:
+      - NET_ADMIN
+    environment:
+      GATEWAY_IP: 192.168.1.1
     volumes:
       - robot-data:/data
       - ../scripts:/harness:ro
@@ -49,6 +55,10 @@ services:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
     entrypoint: ["/bin/bash", "/harness/agent-entrypoint.sh"]
+    cap_add:
+      - NET_ADMIN
+    environment:
+      GATEWAY_IP: 192.168.2.1
     volumes:
       - operator-data:/data
       - ../scripts:/harness:ro
@@ -63,21 +73,29 @@ services:
 
   # NAT gateway for the robot LAN.
   # Uses iptables MASQUERADE to simulate a consumer router.
+  # Built from the harness base image so iptables/iproute2 are available
+  # without runtime apt (which would hang on internal-only networks).
   nat-gateway:
-    image: debian:bookworm-slim
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
     cap_add:
       - NET_ADMIN
-    command:
+    sysctls:
+      net.ipv4.ip_forward: 1
+    entrypoint:
       - /bin/sh
-      - -c
+      - -ec
       - |
-        apt-get update -qq && apt-get install -y -qq iptables iproute2 > /dev/null 2>&1
-        sysctl -w net.ipv4.ip_forward=1
-        iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-        iptables -A FORWARD -i eth1 -o eth0 -j ACCEPT
-        iptables -A FORWARD -i eth0 -o eth1 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        # Interface names depend on network attachment order, so resolve
+        # them from the statically assigned addresses.
+        WAN_IF=$$(ip -o -4 addr show | awk '$$4 == "10.0.0.20/24" {print $$2}')
+        LAN_IF=$$(ip -o -4 addr show | awk '$$4 == "192.168.1.1/24" {print $$2}')
+        iptables -t nat -A POSTROUTING -o "$$WAN_IF" -j MASQUERADE
+        iptables -A FORWARD -i "$$LAN_IF" -o "$$WAN_IF" -j ACCEPT
+        iptables -A FORWARD -i "$$WAN_IF" -o "$$LAN_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT
         # Block unsolicited inbound to robot LAN
-        iptables -A FORWARD -i eth0 -o eth1 -m state --state NEW -j DROP
+        iptables -A FORWARD -i "$$WAN_IF" -o "$$LAN_IF" -m state --state NEW -j DROP
         echo "NAT gateway (robot) ready"
         sleep infinity
     networks:
@@ -88,19 +106,23 @@ services:
 
   # NAT gateway for the operator LAN.
   nat-gateway-operator:
-    image: debian:bookworm-slim
+    build:
+      context: ../..
+      dockerfile: test-harness/Dockerfile.base
     cap_add:
       - NET_ADMIN
-    command:
+    sysctls:
+      net.ipv4.ip_forward: 1
+    entrypoint:
       - /bin/sh
-      - -c
+      - -ec
       - |
-        apt-get update -qq && apt-get install -y -qq iptables iproute2 > /dev/null 2>&1
-        sysctl -w net.ipv4.ip_forward=1
-        iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-        iptables -A FORWARD -i eth1 -o eth0 -j ACCEPT
-        iptables -A FORWARD -i eth0 -o eth1 -m state --state RELATED,ESTABLISHED -j ACCEPT
-        iptables -A FORWARD -i eth0 -o eth1 -m state --state NEW -j DROP
+        WAN_IF=$$(ip -o -4 addr show | awk '$$4 == "10.0.0.30/24" {print $$2}')
+        LAN_IF=$$(ip -o -4 addr show | awk '$$4 == "192.168.2.1/24" {print $$2}')
+        iptables -t nat -A POSTROUTING -o "$$WAN_IF" -j MASQUERADE
+        iptables -A FORWARD -i "$$LAN_IF" -o "$$WAN_IF" -j ACCEPT
+        iptables -A FORWARD -i "$$WAN_IF" -o "$$LAN_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -A FORWARD -i "$$WAN_IF" -o "$$LAN_IF" -m state --state NEW -j DROP
         echo "NAT gateway (operator) ready"
         sleep infinity
     networks:
@@ -115,18 +137,22 @@ networks:
     ipam:
       config:
         - subnet: 10.0.0.0/24
+  # Docker's bridge gateway is moved to .254 so the NAT gateway container
+  # can own the conventional router address .1.
   robot-lan:
     driver: bridge
     internal: true
     ipam:
       config:
         - subnet: 192.168.1.0/24
+          gateway: 192.168.1.254
   operator-lan:
     driver: bridge
     internal: true
     ipam:
       config:
         - subnet: 192.168.2.0/24
+          gateway: 192.168.2.254
 
 volumes:
   relay-data:

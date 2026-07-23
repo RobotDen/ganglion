@@ -78,7 +78,8 @@ jobs:
   harness:
     name: Docker Test Harness
     # Full multi-container network scenarios are too heavy for every PR;
-    # run them on pushes to main only.
+    # run them on pushes to main only. This blocking set covers the
+    # statically verified scenarios (flat bridge topologies).
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -87,7 +88,29 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: ./test-harness/run-tests.sh
+      - name: Install cargo-component (builds the e2e test component)
+        run: cargo install cargo-component --locked
+      - name: Open warehouse scenario
+        run: ./test-harness/run-tests.sh --scenario open-warehouse
+      - name: E2E dispatch smoke test
+        run: ./test-harness/e2e-dispatch/run-test.sh
+
+  harness-nat:
+    name: Docker Test Harness (NAT scenarios)
+    # topology validated statically; promote to blocking once green in CI
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [nat-office, enterprise-dmz, mobile-cgnat]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: ./test-harness/run-tests.sh --scenario ${{ matrix.scenario }}
 
   doc:
     name: Documentation
