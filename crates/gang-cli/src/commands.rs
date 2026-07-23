@@ -1262,7 +1262,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
     use gang_ros::filesystem::FsRule;
 
-    println!("=== Ganglion v0.1 Demo ===");
+    println!("=== Ganglion v{} Demo ===", env!("CARGO_PKG_VERSION"));
     println!();
 
     // 1. Generate identity if needed
@@ -1379,9 +1379,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
     println!();
     println!("=== Demo complete ===");
     println!("Data stored at: {}", data_dir.display());
-
-    // Cleanup
-    std::fs::remove_dir_all(&data_dir)?;
+    println!("Clean up when done: rm -rf {}", data_dir.display());
 
     Ok(())
 }
