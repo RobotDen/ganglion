@@ -95,8 +95,11 @@ pub struct TransportStats {
 
 /// A bidirectional async stream with protocol metadata.
 pub struct GanglionStream {
+    /// The protocol negotiated on this stream.
     pub protocol: ProtocolId,
+    /// The remote peer at the other end.
     pub remote_peer: PeerId,
+    /// The underlying async byte stream.
     pub inner: Box<dyn AsyncReadWrite + Send + Unpin>,
 }
 
@@ -120,24 +123,41 @@ pub type StreamHandler =
 /// Presence information announced by a robot agent.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PresenceInfo {
+    /// The announcing peer's ID.
     pub peer_id: PeerId,
+    /// The announcing peer's role.
     pub role: crate::identity::Role,
+    /// Names of installed capabilities.
     pub capabilities_installed: Vec<String>,
+    /// Agent uptime in seconds.
     pub uptime_secs: u64,
+    /// Ganglion version string.
     pub ganglion_version: String,
 }
 
 /// Events emitted by the transport layer to the application.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TransportEvent {
     /// A new peer connected.
-    PeerConnected { peer_id: PeerId, via_relay: bool },
+    PeerConnected {
+        /// The peer that connected.
+        peer_id: PeerId,
+        /// Whether the connection is relayed.
+        via_relay: bool,
+    },
     /// A peer disconnected.
-    PeerDisconnected { peer_id: PeerId },
+    PeerDisconnected {
+        /// The peer that disconnected.
+        peer_id: PeerId,
+    },
     /// Received a presence announcement.
     PresenceReceived(PresenceInfo),
     /// Connection upgraded from relay to direct.
-    DirectUpgrade { peer_id: PeerId },
+    DirectUpgrade {
+        /// The peer whose connection was upgraded.
+        peer_id: PeerId,
+    },
 }
 
 /// The core transport adapter trait. Protocol-agnostic core, opinionated defaults.

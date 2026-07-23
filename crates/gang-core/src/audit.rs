@@ -30,31 +30,94 @@ pub struct AuditRecord {
     pub io_stats: Vec<CapabilityIoStats>,
 }
 
+/// Terminal status of an audited capability invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExitStatus {
+    /// The invocation completed successfully.
     Success,
-    Failed { message: String },
+    /// The invocation failed with a message.
+    Failed {
+        /// Failure message.
+        message: String,
+    },
+    /// The invocation exceeded its deadline.
     Timeout,
-    Trapped { message: String },
-    PolicyDenied { reason: String },
+    /// The WASM guest trapped.
+    Trapped {
+        /// Trap message.
+        message: String,
+    },
+    /// The invocation was denied by policy.
+    PolicyDenied {
+        /// Reason for denial.
+        reason: String,
+    },
 }
 
+/// Per-capability byte counters recorded for an invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityIoStats {
+    /// The capability these counters apply to.
     pub capability: String,
+    /// Bytes read from the resource.
     pub bytes_in: u64,
+    /// Bytes written to the resource.
     pub bytes_out: u64,
 }
 
+/// On-disk representation of an audit record together with its hash-chain
+/// metadata. The chain fields default when absent, so pre-chain (legacy)
+/// records still deserialize.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChainedRecord {
+    #[serde(flatten)]
+    record: AuditRecord,
+    /// Monotonic position in the chain (0-based).
+    #[serde(default)]
+    seq: u64,
+    /// Hex hash of the previous record; empty for the genesis record.
+    #[serde(default)]
+    prev_hash: String,
+    /// Hex `blake3(prev_hash || seq_be || cbor(record))`. Empty for legacy
+    /// records written before the chain existed.
+    #[serde(default)]
+    record_hash: String,
+}
+
+impl ChainedRecord {
+    /// Compute the chain hash for a record given its predecessor hash and seq.
+    fn compute_hash(
+        record: &AuditRecord,
+        seq: u64,
+        prev_hash: &str,
+    ) -> Result<String, AuditError> {
+        let mut record_cbor = Vec::new();
+        ciborium::into_writer(record, &mut record_cbor)
+            .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(prev_hash.as_bytes());
+        hasher.update(&seq.to_be_bytes());
+        hasher.update(&record_cbor);
+        Ok(hasher.finalize().to_hex().to_string())
+    }
+}
+
 /// Append-only audit log stored on the robot.
-/// Format: newline-delimited CBOR records.
+///
+/// Format: a sequence of length-prefixed CBOR [`ChainedRecord`]s. Each record
+/// embeds a Blake3 hash chain (`blake3(prev_hash || seq || cbor(record))`) so
+/// tampering, reordering, and interior deletion are detectable via
+/// [`AuditLog::verify_chain`].
 pub struct AuditLog {
     path: PathBuf,
     max_size_bytes: u64,
 }
 
 impl AuditLog {
+    /// Create a log handle for `path`, rotating once it exceeds
+    /// `max_size_bytes` (0 disables rotation).
     pub fn new(path: PathBuf, max_size_bytes: u64) -> Self {
         Self {
             path,
@@ -84,15 +147,35 @@ impl AuditLog {
             }
         }
 
-        // Encode record as CBOR
+        // Determine the chain head (seq + prev_hash) from the existing log.
+        let (seq, prev_hash) = match self.read_chained()?.last() {
+            Some(last) => (last.seq + 1, last.record_hash.clone()),
+            None => (0, String::new()),
+        };
+
+        let record_hash = ChainedRecord::compute_hash(record, seq, &prev_hash)?;
+        let chained = ChainedRecord {
+            record: record.clone(),
+            seq,
+            prev_hash,
+            record_hash,
+        };
+
+        // Encode the chained record as CBOR
         let mut cbor_bytes = Vec::new();
-        ciborium::into_writer(record, &mut cbor_bytes)
+        ciborium::into_writer(&chained, &mut cbor_bytes)
             .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
 
-        // Write length-prefixed record
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
+        // Write length-prefixed record. On Unix the log is created 0600 so
+        // audit material is only readable by the owning user.
+        let mut open_opts = std::fs::OpenOptions::new();
+        open_opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open_opts.mode(0o600);
+        }
+        let mut file = open_opts
             .open(&self.path)
             .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
 
@@ -107,6 +190,15 @@ impl AuditLog {
 
     /// Read all records from the log.
     pub fn read_all(&self) -> Result<Vec<AuditRecord>, AuditError> {
+        Ok(self
+            .read_chained()?
+            .into_iter()
+            .map(|c| c.record)
+            .collect())
+    }
+
+    /// Read all records together with their hash-chain metadata.
+    fn read_chained(&self) -> Result<Vec<ChainedRecord>, AuditError> {
         if !self.path.exists() {
             return Ok(Vec::new());
         }
@@ -130,13 +222,67 @@ impl AuditLog {
                 break;
             }
 
-            let record: AuditRecord = ciborium::from_reader(&data[offset..offset + len])
+            let record: ChainedRecord = ciborium::from_reader(&data[offset..offset + len])
                 .map_err(|e| AuditError::Corrupted(e.to_string()))?;
             records.push(record);
             offset += len;
         }
 
         Ok(records)
+    }
+
+    /// Verify the integrity of the hash chain.
+    ///
+    /// Detects tampering (a record's content or metadata was altered),
+    /// reordering (records swapped), and interior deletion (a record removed
+    /// from the middle). Returns [`AuditError::IntegrityViolation`] describing
+    /// the first break found.
+    ///
+    /// Note: truncation of the *trailing* records cannot be detected from the
+    /// log alone (the remaining prefix stays internally consistent); any
+    /// mid-file truncation or partial final record is caught here or skipped
+    /// by the reader.
+    pub fn verify_chain(&self) -> Result<(), AuditError> {
+        let records = self.read_chained()?;
+
+        let mut expected_prev = String::new();
+        let mut expected_seq: u64 = 0;
+
+        for (i, cr) in records.iter().enumerate() {
+            if cr.record_hash.is_empty() {
+                return Err(AuditError::IntegrityViolation(format!(
+                    "record {i} is not part of the hash chain (legacy/unchained)"
+                )));
+            }
+
+            // Internal integrity: recompute the stored hash.
+            let computed = ChainedRecord::compute_hash(&cr.record, cr.seq, &cr.prev_hash)?;
+            if computed != cr.record_hash {
+                return Err(AuditError::IntegrityViolation(format!(
+                    "record {i} hash mismatch (tampered content)"
+                )));
+            }
+
+            // Linkage: prev_hash must point at the previous record's hash.
+            if cr.prev_hash != expected_prev {
+                return Err(AuditError::IntegrityViolation(format!(
+                    "record {i} prev_hash does not link to predecessor (reorder/deletion)"
+                )));
+            }
+
+            // Contiguity: sequence numbers must be dense and increasing.
+            if cr.seq != expected_seq {
+                return Err(AuditError::IntegrityViolation(format!(
+                    "record {i} has seq {} (expected {expected_seq})",
+                    cr.seq
+                )));
+            }
+
+            expected_prev = cr.record_hash.clone();
+            expected_seq += 1;
+        }
+
+        Ok(())
     }
 
     fn rotate(&self) -> Result<(), std::io::Error> {
@@ -194,6 +340,71 @@ mod tests {
         let log = AuditLog::new(dir.path().join("audit.log"), 10 * 1024 * 1024);
         let records = log.read_all().unwrap();
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn verify_chain_good() {
+        let dir = TempDir::new().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.log"), 10 * 1024 * 1024);
+
+        for _ in 0..5 {
+            log.append(&sample_record()).unwrap();
+        }
+
+        assert_eq!(log.read_all().unwrap().len(), 5);
+        log.verify_chain().expect("chain should verify");
+    }
+
+    #[test]
+    fn verify_chain_detects_tampering() {
+        let path;
+        {
+            let dir = TempDir::new().unwrap();
+            path = dir.path().join("audit.log");
+            let log = AuditLog::new(path.clone(), 10 * 1024 * 1024);
+            log.append(&sample_record()).unwrap();
+            log.append(&sample_record()).unwrap();
+            log.append(&sample_record()).unwrap();
+
+            // Tamper: flip a byte somewhere inside the file body.
+            let mut bytes = std::fs::read(&path).unwrap();
+            let mid = bytes.len() / 2;
+            bytes[mid] ^= 0xFF;
+            std::fs::write(&path, &bytes).unwrap();
+
+            let log2 = AuditLog::new(path.clone(), 10 * 1024 * 1024);
+            let result = log2.verify_chain();
+            assert!(
+                result.is_err(),
+                "tampered chain should fail verification: {result:?}"
+            );
+            assert!(matches!(
+                result,
+                Err(AuditError::IntegrityViolation(_)) | Err(AuditError::Corrupted(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn verify_chain_detects_reorder() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("audit.log");
+        let log = AuditLog::new(path.clone(), 10 * 1024 * 1024);
+        log.append(&sample_record()).unwrap();
+        log.append(&sample_record()).unwrap();
+
+        // Split the file into its two framed records and swap them.
+        let data = std::fs::read(&path).unwrap();
+        let len0 = u32::from_be_bytes(data[0..4].try_into().unwrap()) as usize;
+        let rec0 = &data[0..4 + len0];
+        let rec1 = &data[4 + len0..];
+        let mut swapped = Vec::new();
+        swapped.extend_from_slice(rec1);
+        swapped.extend_from_slice(rec0);
+        std::fs::write(&path, &swapped).unwrap();
+
+        let result = log.verify_chain();
+        assert!(result.is_err(), "reordered chain should fail: {result:?}");
     }
 
     #[test]
