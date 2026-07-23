@@ -918,14 +918,13 @@ impl TransportAdapter for Libp2pTransportAdapter {
     }
 
     async fn announce_presence(&self, info: PresenceInfo) -> Result<(), TransportError> {
-        info!(
-            peer_id = %info.peer_id,
-            capabilities = ?info.capabilities_installed,
-            "Announcing presence"
-        );
-        // In full implementation, this would broadcast a signed presence message
-        // to connected relay peers via the control protocol.
-        Ok(())
+        // Presence broadcast (a signed presence message to connected relay
+        // peers over the control protocol) is not implemented yet. Return a
+        // typed error so callers cannot mistake the no-op for success.
+        Err(TransportError::RelayUnavailable(format!(
+            "presence announcement for {} is not implemented in the libp2p adapter yet",
+            info.peer_id
+        )))
     }
 
     async fn transport_stats(&self, peer: &PeerId) -> Option<TransportStats> {
