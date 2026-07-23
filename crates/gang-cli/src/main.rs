@@ -7,7 +7,12 @@ use clap::{CommandFactory, Parser, Subcommand};
 /// Ganglion provides the connectivity and tool-execution substrate for fleet
 /// operators to reach robots deployed inside networks they don't own.
 #[derive(Parser)]
-#[command(name = "gang", version, about, long_about = None)]
+#[command(
+    name = "gang",
+    version,
+    about,
+    after_help = "Run 'gang demo' for a self-contained end-to-end demo. Docs: docs/QUICKSTART.md"
+)]
 struct Cli {
     /// Output format: "text" (default) or "json" for structured output.
     #[arg(long, default_value = "text", global = true)]
@@ -43,15 +48,20 @@ fn reject_json(format: &OutputFormat, command: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Subcommands are ordered into logical groups via `display_order` (clap 4 has
+// no help_heading for subcommands): Identity & Trust (10s), Capabilities
+// (20s), Network (30s), Registry & Artifacts (40s), Diagnostics (50s).
 #[derive(Subcommand)]
 enum Commands {
     /// Manage peer identity.
+    #[command(display_order = 10, visible_alias = "id")]
     Identity {
         #[command(subcommand)]
         action: IdentityAction,
     },
 
     /// Sign a WASM component with your identity key.
+    #[command(display_order = 11)]
     Sign {
         /// Path to the .wasm component to sign.
         wasm_path: String,
@@ -78,6 +88,7 @@ enum Commands {
 
     /// Run the robot agent (for development/testing).
     /// Starts a local Ganglion agent that listens for operator connections.
+    #[command(display_order = 30)]
     Agent {
         /// Path to the agent config file.
         #[arg(long)]
@@ -92,6 +103,7 @@ enum Commands {
     },
 
     /// Deploy a signed capability to a robot.
+    #[command(display_order = 21)]
     Deploy {
         /// Robot name, abbreviated peer ID, or full peer ID.
         robot: String,
@@ -109,6 +121,7 @@ enum Commands {
     },
 
     /// Invoke an installed capability on a robot.
+    #[command(display_order = 22)]
     Run {
         /// Robot name, abbreviated peer ID, or full peer ID.
         robot: String,
@@ -125,6 +138,7 @@ enum Commands {
     },
 
     /// List capabilities installed on a robot.
+    #[command(display_order = 23)]
     Caps {
         /// Robot name, abbreviated peer ID, or full peer ID.
         robot: String,
@@ -137,6 +151,7 @@ enum Commands {
     },
 
     /// Stream robot logs. [WIP: requires relay]
+    #[command(display_order = 34)]
     Logs {
         /// Robot name or peer ID.
         robot: String,
@@ -146,27 +161,32 @@ enum Commands {
     },
 
     /// Run a local end-to-end demo: start agent, deploy diagnostics, invoke.
+    #[command(display_order = 52)]
     Demo,
 
     /// Run a local test harness scenario (requires Docker).
+    #[command(display_order = 53)]
     TestArchetype {
         /// Archetype: open-warehouse, nat-office, enterprise-dmz, mobile-cgnat.
         archetype: String,
     },
 
     /// Diagnose network environment — detect archetype and recommend transport config.
+    #[command(display_order = 51, visible_alias = "dx")]
     Diagnose {
         /// Robot name or peer ID (optional — if omitted, probes local network).
         robot: Option<String>,
     },
 
     /// Show per-transport statistics for a connected peer. [WIP: simulated data until relay lands]
+    #[command(display_order = 35)]
     TransportStats {
         /// Robot name or peer ID.
         robot: String,
     },
 
     /// Retrieve an artifact by CID from any reachable peer.
+    #[command(display_order = 42)]
     Fetch {
         /// Content identifier of the artifact.
         cid: String,
@@ -176,6 +196,7 @@ enum Commands {
     },
 
     /// Publish a local file to the content store and announce its CID.
+    #[command(display_order = 41)]
     Push {
         /// Path to the file to publish.
         path: String,
@@ -185,39 +206,47 @@ enum Commands {
     },
 
     /// List locally-stored artifacts.
+    #[command(display_order = 43)]
     Artifacts,
 
     /// Scaffold, inspect, or manage capabilities.
+    #[command(display_order = 20, visible_alias = "cap")]
     Capability {
         #[command(subcommand)]
         action: CapabilityAction,
     },
 
     /// Manage the capability registry.
+    #[command(display_order = 40)]
     Registry {
         #[command(subcommand)]
         action: RegistryAction,
     },
 
     /// Manage known peers (robots, relays, operators).
+    #[command(display_order = 12)]
     Peer {
         #[command(subcommand)]
         action: PeerAction,
     },
 
     /// View or edit operator configuration (~/.gang/config.toml).
+    #[command(display_order = 13)]
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
 
     /// Show Ganglion status: version, identity, available and WIP capabilities.
+    #[command(display_order = 50)]
     Status,
 
     /// List reachable robots in the fleet. [WIP: requires relay]
+    #[command(display_order = 33)]
     List,
 
     /// Establish a session with a robot via relay. [WIP: requires relay]
+    #[command(display_order = 32)]
     Connect {
         /// Robot name or peer ID.
         robot: String,
@@ -227,6 +256,7 @@ enum Commands {
     },
 
     /// Generate shell completion scripts.
+    #[command(display_order = 54)]
     Completions {
         /// Shell to generate completions for.
         shell: clap_complete::Shell,
@@ -237,6 +267,7 @@ enum Commands {
     /// Starts a Ganglion node in relay-server mode, enabling robot agents
     /// behind NAT to accept inbound connections. This is the bootstrap relay
     /// described in the design spec (relay.gang.tafy.dev).
+    #[command(display_order = 31)]
     Relay {
         /// Multiaddr(s) to listen on. Can be specified multiple times.
         /// Default: /ip4/0.0.0.0/tcp/4001 and /ip4/0.0.0.0/udp/4001/quic-v1
