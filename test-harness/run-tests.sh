@@ -107,26 +107,33 @@ run_scenario() {
     # Tear down any leftover from previous runs
     teardown "$scenario"
 
-    # Start the scenario
-    echo "Starting containers..."
-    if ! docker compose -p "$project_name" -f "$compose_file" up -d --build 2>&1; then
-        log_fail "docker compose up failed"
+    # Start the scenario, bounded by the per-scenario timeout (OPS-12).
+    echo "Starting containers (timeout: ${TIMEOUT}s)..."
+    if ! timeout "$TIMEOUT" docker compose -p "$project_name" -f "$compose_file" up -d --build 2>&1; then
+        log_fail "docker compose up failed (or exceeded ${TIMEOUT}s timeout)"
         FAIL=$((FAIL + 1))
         RESULTS+=("$scenario: FAIL (compose up failed)")
         return 1
     fi
 
-    # Wait for services to stabilize
+    # Wait for services to stabilize: poll container state instead of a fixed
+    # sleep. Attempts are derived from the per-scenario timeout (2s interval).
     echo "Waiting for services to stabilize..."
-    sleep 5
+    local running=0 expected=0 attempt=0
+    local max_attempts=$(( TIMEOUT / 2 ))
+    [ "$max_attempts" -lt 1 ] && max_attempts=1
+    while [ "$attempt" -lt "$max_attempts" ]; do
+        running=$(docker compose -p "$project_name" -f "$compose_file" ps --format '{{.State}}' 2>/dev/null | grep -c "running" || true)
+        expected=$(docker compose -p "$project_name" -f "$compose_file" ps -a --format '{{.State}}' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$expected" -gt 0 ] && [ "$running" -eq "$expected" ]; then
+            break
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
 
     # --- Check 1: All containers running ---
     checks_total=$((checks_total + 1))
-    local running
-    running=$(docker compose -p "$project_name" -f "$compose_file" ps --format '{{.State}}' 2>/dev/null | grep -c "running" || true)
-    local expected
-    expected=$(docker compose -p "$project_name" -f "$compose_file" ps -a --format '{{.State}}' 2>/dev/null | wc -l | tr -d ' ')
-
     if [ "$running" -eq "$expected" ] && [ "$running" -gt 0 ]; then
         log_pass "all $running containers running"
         checks_passed=$((checks_passed + 1))
