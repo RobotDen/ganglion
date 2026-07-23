@@ -2513,33 +2513,86 @@ pub async fn registry_publish(
     wasm_path: &str,
     description: Option<&str>,
     tags: Option<&[String]>,
+    version_override: Option<&str>,
+    language_override: Option<&str>,
     _format: &OutputFormat,
 ) -> anyhow::Result<()> {
+    use gang_core::manifest::SignedManifest;
+    use gang_core::registry::CapabilityLanguage;
+
     let path = Path::new(wasm_path);
     if !path.exists() {
         anyhow::bail!("file not found: {wasm_path}");
     }
 
     // Read the component and compute CID
-    let data = std::fs::read(path)?;
+    let data = std::fs::read(path).with_context(|| format!("reading {wasm_path}"))?;
     let component_cid = gang_core::artifacts::Cid::from_bytes(&data);
 
-    // Read the manifest and compute its CID
+    // Read the adjacent signed manifest if present — its verified contents are
+    // the source of truth for name/version/language/capabilities/min-version.
     let manifest_path = path.with_extension("manifest.cbor");
-    let manifest_cid = if manifest_path.exists() {
-        let manifest_bytes = std::fs::read(&manifest_path)?;
-        gang_core::artifacts::Cid::from_bytes(&manifest_bytes)
+    let (manifest_cid, manifest) = if manifest_path.exists() {
+        let manifest_bytes = std::fs::read(&manifest_path)
+            .with_context(|| format!("reading {}", manifest_path.display()))?;
+        let cid = gang_core::artifacts::Cid::from_bytes(&manifest_bytes);
+        let decoded = SignedManifest::from_cbor(&manifest_bytes)
+            .and_then(|s| s.verify_and_decode())
+            .with_context(|| format!("decoding manifest {}", manifest_path.display()))?;
+        (cid, Some(decoded))
     } else {
         // No manifest found; compute CID from the component bytes as fallback
-        gang_core::artifacts::Cid::from_bytes(&data)
+        (gang_core::artifacts::Cid::from_bytes(&data), None)
     };
 
-    // Derive name from filename
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+    // Name: manifest > filename.
+    let name = manifest
+        .as_ref()
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
+
+    // Version: --version flag > manifest > default.
+    let version = version_override
+        .map(String::from)
+        .or_else(|| manifest.as_ref().map(|m| m.version.clone()))
+        .unwrap_or_else(|| "0.1.0".to_string());
+
+    // Language: --language flag > manifest > default (Rust).
+    let language = match language_override {
+        Some(lang) => parse_language(lang)?,
+        None => manifest
+            .as_ref()
+            .map(|m| m.language)
+            .unwrap_or(CapabilityLanguage::Rust),
+    };
+
+    let declared_capabilities = manifest
+        .as_ref()
+        .map(|m| {
+            m.declared_capabilities
+                .iter()
+                .map(|g| g.qualified_name())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let min_ganglion_version = manifest.as_ref().and_then(|m| m.min_ganglion_version.clone());
+
+    // Description: --description flag > manifest > default.
+    let description = description
+        .map(String::from)
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .map(|m| m.description.clone())
+                .filter(|d| !d.is_empty())
+        })
+        .unwrap_or_else(|| "A Ganglion capability".to_string());
 
     // Load identity for author
     let key_path = gang_core::identity::default_key_path();

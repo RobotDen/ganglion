@@ -293,6 +293,12 @@ enum RegistryAction {
         /// Tags (comma-separated).
         #[arg(long, value_delimiter = ',')]
         tags: Option<Vec<String>>,
+        /// Version to publish (overrides the adjacent signed manifest).
+        #[arg(long, value_name = "SEMVER")]
+        version: Option<String>,
+        /// Language (overrides the manifest): rust, cpp, python, go.
+        #[arg(long)]
+        language: Option<String>,
     },
     /// List all capabilities in the local registry.
     List,
@@ -491,24 +497,33 @@ async fn main() -> anyhow::Result<()> {
                 name,
                 language,
                 output_dir,
-            } => commands::capability_scaffold(&name, &language, output_dir.as_deref()).await?,
+            } => {
+                reject_json(&cli.format, "capability scaffold")?;
+                commands::capability_scaffold(&name, &language, output_dir.as_deref()).await?
+            }
         },
         Commands::Registry { action } => match action {
             RegistryAction::Search { query } => {
                 commands::registry_search(&query, &cli.format).await?
             }
             RegistryAction::Install { name, version } => {
+                reject_json(&cli.format, "registry install")?;
                 commands::registry_install(&name, version.as_deref(), &cli.format).await?
             }
             RegistryAction::Publish {
                 wasm_path,
                 description,
                 tags,
+                version,
+                language,
             } => {
+                reject_json(&cli.format, "registry publish")?;
                 commands::registry_publish(
                     &wasm_path,
                     description.as_deref(),
                     tags.as_deref(),
+                    version.as_deref(),
+                    language.as_deref(),
                     &cli.format,
                 )
                 .await?
