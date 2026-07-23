@@ -6,7 +6,7 @@ Contributions are welcome. This document covers the development workflow, code s
 
 ```bash
 # Clone the repository
-git clone https://github.com/tafy-labs/ganglion.git
+git clone https://github.com/TafyLabs/ganglion.git
 cd ganglion
 
 # Prerequisites: Rust 1.85+

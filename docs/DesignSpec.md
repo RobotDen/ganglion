@@ -1,6 +1,6 @@
 # Ganglion: architectural design specification
 
-**Status:** Draft for v0.1 release **Repository:** `tafylabs/ganglion` **License:** Apache-2.0 **Authors:** Tafy Labs **Last updated:** April 23, 2026
+**Status:** Draft for v0.1 release **Repository:** `TafyLabs/ganglion` **License:** Apache-2.0 **Authors:** Tafy Labs **Last updated:** April 23, 2026
 
 ---
 
@@ -434,7 +434,7 @@ v0.4 shifts Ganglion from "a platform with one example capability" to "a platfor
 
 - `docs/CAPABILITY_AUTHOR_GUIDE.md` — how to build, sign, and distribute a capability, with language-specific subsections for Rust, C++, Python, and Go/TinyGo
 - `gang capability scaffold <name> --language=<rust|cpp|python|go>` — CLI command to generate a capability project skeleton for the chosen language
-- Reference capability templates at `tafylabs/gang-capability-template-{rust,cpp,python,go}`
+- Reference capability templates at `TafyLabs/gang-capability-template-{rust,cpp,python,go}`
 
 **Capability registry:**
 

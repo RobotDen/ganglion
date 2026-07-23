@@ -10,7 +10,7 @@ Get from zero to running Ganglion in under 5 minutes.
 ## 1. Build and install
 
 ```bash
-git clone https://github.com/tafy-labs/ganglion.git
+git clone https://github.com/TafyLabs/ganglion.git
 cd ganglion
 
 # Set up git hooks (recommended for development)

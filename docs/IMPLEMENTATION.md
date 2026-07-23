@@ -110,10 +110,10 @@ Four independent repos, each a Cargo workspace (or single crate where appropriat
 
 | Repo | Contents | Primary crate(s) |
 |------|----------|-------------------|
-| `tafy-labs/ganglion` | Core library, spec, docs, test harness | `gang-core`, `gang-wasm-host` |
-| `tafy-labs/ganglion-libp2p` | libp2p transport adapter | `gang-libp2p` |
-| `tafy-labs/ganglion-ros` | ROS 2 integration broker | `gang-ros` |
-| `tafy-labs/gang` | CLI binary | `gang` |
+| `TafyLabs/ganglion` | Core library, spec, docs, test harness | `gang-core`, `gang-wasm-host` |
+| `TafyLabs/ganglion-libp2p` | libp2p transport adapter | `gang-libp2p` |
+| `TafyLabs/ganglion-ros` | ROS 2 integration broker | `gang-ros` |
+| `TafyLabs/gang` | CLI binary | `gang` |
 
 **Rationale for keeping `gang-wasm-host` in the core repo:** the WASM host is tightly coupled to `gang-core`'s policy engine and audit logger. Separate repo adds cross-repo version coordination pain with no independence benefit.
 
@@ -173,7 +173,7 @@ These are the recommended starting points. Pin exact versions in `Cargo.lock`; u
 
 Set up all four repos with CI, licensing, and the foundational type system.
 
-**1.1 — `tafy-labs/ganglion` repo init**
+**1.1 — `TafyLabs/ganglion` repo init**
 - [ ] Create repo with Apache-2.0 license, README, `.gitignore`
 - [ ] Cargo workspace with two members: `gang-core`, `gang-wasm-host`
 - [ ] Copy `docs/DesignSpec.md` into repo
@@ -202,19 +202,19 @@ Set up all four repos with CI, licensing, and the foundational type system.
 - [ ] Error types: `GanglionError`, `TransportError`, `PolicyError`, `AuditError`
 - [ ] Unit tests for all type construction and validation
 
-**1.3 — `tafy-labs/ganglion-libp2p` repo init**
+**1.3 — `TafyLabs/ganglion-libp2p` repo init**
 - [ ] Create repo with Apache-2.0 license
 - [ ] Single crate, depends on `gang-core` (git dependency initially)
 - [ ] GitHub Actions CI mirroring core repo
 - [ ] Stub `TransportAdapter` impl that compiles but panics
 
-**1.4 — `tafy-labs/ganglion-ros` repo init**
+**1.4 — `TafyLabs/ganglion-ros` repo init**
 - [ ] Create repo with Apache-2.0 license
 - [ ] Single crate, depends on `gang-core` and `gang-libp2p`
 - [ ] CI with ROS 2 Jazzy container for testing
 - [ ] Stub broker traits
 
-**1.5 — `tafy-labs/gang` repo init**
+**1.5 — `TafyLabs/gang` repo init**
 - [ ] Create repo with Apache-2.0 license
 - [ ] Binary crate with `clap` CLI skeleton
 - [ ] Subcommands stubbed: `connect`, `list`, `caps`, `deploy`, `run`, `logs`, `test-archetype`
@@ -461,7 +461,7 @@ Brokers that mediate between WASM capabilities and privileged resources.
 - [ ] `CHANGELOG.md` for each repo
 
 **8.2 — Release**
-- [ ] All four repos public on GitHub under `tafy-labs/`
+- [ ] All four repos public on GitHub under `TafyLabs/`
 - [ ] `cargo install gang` works from a clean environment
 - [ ] Git tags: `v0.1.0` on all repos
 - [ ] GitHub releases with changelogs
@@ -631,7 +631,7 @@ Brokers that mediate between WASM capabilities and privileged resources.
 **18.2 — Scaffolding CLI**
 - [ ] `gang capability scaffold <name> --language=<rust|cpp|python|go>` — generate project skeleton
 - [ ] Templates for each language with WIT bindings, build scripts, Makefile/justfile
-- [ ] Template repos: `tafylabs/gang-capability-template-{rust,cpp,python,go}`
+- [ ] Template repos: `TafyLabs/gang-capability-template-{rust,cpp,python,go}`
 
 ### Phase 19: v0.4 release
 
