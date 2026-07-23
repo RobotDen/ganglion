@@ -29,7 +29,7 @@ pub struct CapabilityHost {
 
 impl CapabilityHost {
     /// Create a new host with the given brokers and declared capabilities.
-    /// The store limits default to unlimited; use [`with_limits`] to install a
+    /// The store limits default to unlimited; use [`Self::with_limits`] to install a
     /// memory cap derived from the component manifest.
     pub fn new(
         brokers: HashMap<String, Arc<dyn CapabilityBroker>>,
