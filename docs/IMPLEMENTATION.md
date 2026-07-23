@@ -1,6 +1,6 @@
 # Ganglion: implementation plan and checklist
 
-**Status:** Complete — tracks implementation from v0.1 through v1.0
+**Status:** Tracks implementation from v0.1 through v1.0, plus the v2.0 security/quality audit.
 **Source of truth:** [DesignSpec.md](./DesignSpec.md)
 
 ### Progress
@@ -71,18 +71,27 @@
 
 | Phase | Status | Tests | Commit |
 |-------|--------|-------|--------|
-| 32. Robot agent serve loop (listen on /ganglion/control/1.0) | Done | 188 | b729630 |
-| 33. Agent CLI startup with transport (-r flag, dial relay) | Done | 188 | b729630 |
+| 32. Robot agent serve loop (listen on /ganglion/control/1.0) | WIP | 188 | b729630 |
+| 33. Agent CLI startup with transport (-r flag, dial relay) | Partial | 188 | b729630 |
 | 34. Peer registry CLI (gang peer add/remove/list/show/rename) | Done | 188 | 05810d7 |
-| 35. Operator remote dispatch (name/prefix/peer-id resolution) | Done | 188 | 05810d7 |
+| 35. Operator remote dispatch (name/prefix/peer-id resolution) | Partial | 188 | 05810d7 |
 | 36. SSH-style identity verification (TOFU, key-change warning) | Done | 188 | f00e329 |
 | 37. Operator config file (~/.gang/config.toml) | Done | 188 | 42a8f63 |
 | 38. Shell completions (bash, zsh, fish, elvish, powershell) | Done | 188 | 05810d7 |
 | 39. Reference WASM component build (diagnostics → .wasm) | Done | 188 | b1d6099 |
-| 40. E2E Docker test scenario (relay + robot + operator) | Done | 188 | b1d6099 |
+| 40. E2E Docker test scenario (relay + robot + operator) | Smoke test | 188 | b1d6099 |
 | 41. v0.6 release | Done | 221 | e89167a |
 
-**Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`, `PeerRegistry`, `TrustStore`) to the CLI and robot agent. Named peers, abbreviated peer ID matching (Docker-style), SSH-style host key verification, and a config file eliminate verbose flags. `gang deploy warehouse-bot diagnostics.wasm` sends a capability over a relay circuit to a named remote robot and returns the result. Validate with a Docker e2e scenario. See ADR-020 for detailed design.
+**Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`, `PeerRegistry`, `TrustStore`) to the CLI and robot agent. Named peers, abbreviated peer ID matching (Docker-style), SSH-style host key verification, and a config file eliminate verbose flags. See ADR-020 for detailed design.
+
+> **Status correction (v2.0 truth pass):** Operator *remote* dispatch is **not
+> yet implemented**. Target resolution (name → prefix → peer id → local
+> fallback), the peer registry CLI, TOFU verification, config file, and shell
+> completions all landed, but `gang deploy`/`run`/`caps` against a resolved
+> *remote* target exit with a "not yet implemented (ADR-020 Phase 32)" message;
+> only the local fallback executes. The robot agent serve loop (Phase 32) is
+> therefore still WIP, and the `e2e-dispatch` scenario (Phase 40) is a
+> connectivity smoke test, not a full deploy/invoke round-trip.
 
 **v1.0** (first stability commitment):
 
@@ -98,13 +107,25 @@
 | 49. libp2p 0.56 upgrade | Done | 254 | b567714 |
 | 50. v1.0 stability commitments and release | Done | 254 | — |
 
-**Total: 254 tests passing across 13 crates.**
+**Total at v1.0: 254 tests passing across 13 crates.**
 
 **Stability commitments:** Stream protocols (`/ganglion/control/1.0`, `/ganglion/tool/1.0`, `/ganglion/bulk/1.0`), WIT interfaces (`ganglion:capability@0.5.0`), CLI surface (all non-WIP commands), and manifest schema v2.0 are frozen for the v1.x series.
+
+**v2.0** (security/quality audit):
+
+A hardening release rather than a feature release — fail-closed policy/trust, unified peer-id derivation (SEC-03), replay protection on control requests, hardened WASM/process/network/filesystem brokers, a Blake3 hash-chain audit log, and signed-manifest-only registry publishing. See the [CHANGELOG](../CHANGELOG.md) and [MIGRATION-v2.md](./MIGRATION-v2.md) for the full list and upgrade steps.
+
+**Total at v2.0: 317 tests passing across 13 crates (63 added by the audit).**
 
 ---
 
 ## Repository layout
+
+> **Historical — superseded by [ADR-001](adr/ADR-001-monorepo-workspace.md).**
+> The four-repo split below was the original plan; Ganglion ships as a **single
+> monorepo Cargo workspace** with 13 crates under `crates/`. See
+> [ARCHITECTURE.md](ARCHITECTURE.md#crate-dependency-graph) for the current
+> crate dependency graph. This section is preserved for historical context.
 
 Four independent repos, each a Cargo workspace (or single crate where appropriate):
 
@@ -140,6 +161,11 @@ gang-core
 ---
 
 ## Dependency selections
+
+> **Historical.** This table records the *original* dependency-selection plan
+> and its version guidance (e.g. "libp2p 0.54.x+"). The shipping versions are
+> pinned in the workspace `Cargo.toml` and `Cargo.lock` (the project is on
+> libp2p 0.56). Treat the table below as planning history, not current state.
 
 These are the recommended starting points. Pin exact versions in `Cargo.lock`; update deliberately.
 
