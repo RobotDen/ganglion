@@ -616,6 +616,11 @@ pub async fn config_show(format: &OutputFormat) -> anyhow::Result<()> {
                 config.default_relay.as_deref().unwrap_or("(not set)")
             );
             println!("host_key_policy  = {}", config.host_key_policy);
+            println!();
+            println!(
+                "note: host_key_policy is stored but not yet enforced; it takes effect \
+                 once remote connections land."
+            );
         }
     }
     Ok(())
@@ -652,7 +657,15 @@ pub async fn config_set(key: &str, value: &str, format: &OutputFormat) -> anyhow
                 serde_json::json!({"status": "set", "key": key, "value": value})
             );
         }
-        OutputFormat::Text => println!("Set {key} = {value}"),
+        OutputFormat::Text => {
+            println!("Set {key} = {value}");
+            if key == "host_key_policy" {
+                println!(
+                    "note: host_key_policy is stored but not yet enforced; it takes effect \
+                     once remote connections land."
+                );
+            }
+        }
     }
     Ok(())
 }
