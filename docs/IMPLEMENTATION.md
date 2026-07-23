@@ -180,7 +180,7 @@ These are the recommended starting points. Pin exact versions in `Cargo.lock`; u
 | Dependency | Crate | Purpose | Notes |
 |------------|-------|---------|-------|
 | `rust-libp2p` | `gang-libp2p` | Peer identity, transports, relay, DCUtR | Use latest 0.54.x+. Needed behaviors: identify, ping, kademlia, relay-v2, dcutr, noise, yamux, tcp, quic |
-| `wasmtime` | `gang-wasm-host` | WASM component runtime | Use latest stable (v19+). Component model support required. |
+| `wasmtime` | `gang-wasm-host` | WASM component runtime | Use v36+ (LTS train). Component model support required. |
 | `wit-bindgen` | `gang-wasm-host` + capabilities | WIT binding generation | Match wasmtime version |
 | `wasm-tools` | build tooling | Component production from wasm32-wasip2 modules | CLI tool, not a library dep |
 | `ciborium` | `gang-core` | CBOR encoding/decoding | Lightweight, well-maintained |

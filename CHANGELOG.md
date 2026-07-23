@@ -87,6 +87,13 @@ has landed. See [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) for upgrade steps.
   The audit documentation now states the honest trust bounds: without an
   external anchor, a full rewrite of the log is undetectable, and trailing
   truncation is undetectable.
+- **Dependency advisories cleared** — wasmtime upgraded 29 → 36 (LTS),
+  clearing six RUSTSEC advisories against wasmtime/wasmtime-wasi 29.x
+  (RUSTSEC-2025-0046, 2025-0118, 2026-0006, 2026-0020, 2026-0021, 2026-0085);
+  the two hickory-proto advisories (RUSTSEC-2026-0118/0119, DoS-class,
+  transitive via libp2p-dns) are documented-ignored in `deny.toml` pending a
+  libp2p bump to hickory 0.26; the cargo-deny unmaintained policy is now
+  scoped to direct workspace dependencies (`unmaintained = "workspace"`).
 
 ### Changed
 
