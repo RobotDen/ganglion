@@ -191,7 +191,8 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 # System deps (Debian/Ubuntu): sudo apt-get install pkg-config libssl-dev
 cargo build --release
 
-# Run all tests (317 tests across 13 crates)
+# Run all tests (337 tests across 13 crates; 1 additional live-network
+# archetype test is ignored by default — run it with `cargo test -- --ignored`)
 cargo test
 
 # Run with warnings as errors (matches CI)

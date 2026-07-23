@@ -11,13 +11,14 @@ Test results and validation status for Ganglion v2.0.0.
 
 ## Unit test summary
 
-317 tests across 13 crates, all passing:
+337 tests across 13 crates, all passing, plus 1 ignored live-network archetype
+test (requires internet access; run with `cargo test -- --ignored`):
 
 | Crate | Tests | Coverage areas |
 |-------|-------|---------------|
-| gang-core | 74 | Identity (keypair gen, persist, sign/verify, registry), messages (CBOR framing, varint), manifests (sign, verify, tamper detection, hash verification, v2 fields, schema version), policy (default-deny, patterns, peer auth, TOML roundtrip, process/network/metrics groups, read-write required for param-set), audit (write/read, rotation), artifacts (CID determinism, dedup, chunking, LRU eviction, persist/reload), registry (publish, search, tags, versions, persist/reload, remove) |
-| gang-ros | 106 | Diagnostics broker (system info, network, processes), filesystem broker (read/write/list/stat, pattern gating, symlink jail, write-to-new-file traversal denial, symlink parent jail, nonexistent parent denial), log stream broker (source enumeration, pattern filtering), ROS broker (check_access exact/glob/wildcard/denied/read-only/read-write/empty patterns/first-match, RosList filtering by allowed patterns, topic subscribe with/without ros2, service call with/without ros2, param get/set with/without ros2, access denied propagation, unsupported ops, capability group, input validation, timeouts), robot agent (deploy, invoke, trust verification, capability loading with trust store check), archetype detection (classify all 5 archetypes, display, recommendations), process broker (allowlist exact/glob/wildcard, spawn echo, denied command, handle request, unsupported op), network probe broker (DNS lookup, port check, traceroute, handle request, unsupported op), metrics broker (emit, batch, ring buffer eviction, drain, unsupported op) |
-| gang-wasm-host | 27 | WIT interface parsing, component runtime setup, fuel metering, capability host (declared/undeclared/registered groups), WASM-to-broker import registration (all 8 interfaces), broker routing (declared/undeclared/missing), Val extraction (byte list, string list, option string) |
+| gang-core | 87 | Identity (keypair gen, persist, sign/verify, registry), messages (CBOR framing, varint), manifests (sign, verify, tamper detection, hash verification, v2 fields, schema version), policy (default-deny, patterns, peer auth, TOML roundtrip, process/network/metrics groups, read-write required for param-set), audit (write/read, rotation, hash-chain verification, rotation tip-hash linkage), replay guard (nonce/timestamp freshness, capacity bound), artifacts (CID determinism, dedup, chunking, LRU eviction, persist/reload), registry (publish, search, tags, versions, persist/reload, remove, entry-vs-manifest validation) |
+| gang-ros | 112 (+1 ignored) | Diagnostics broker (system info, network, processes), filesystem broker (read/write/list/stat, pattern gating, symlink jail, write-to-new-file traversal denial, symlink parent jail, final-component symlink rejection, nonexistent parent denial), log stream broker (source enumeration, pattern filtering), ROS broker (check_access exact/glob/wildcard/denied/read-only/read-write/empty patterns/first-match, RosList filtering by allowed patterns, topic subscribe with/without ros2, service call with/without ros2, param get/set with/without ros2, access denied propagation, unsupported ops, capability group, input validation, timeouts), robot agent (deploy, invoke, trust verification, capability loading with trust store check), archetype detection (classify all 5 archetypes, display, recommendations; 1 live-network test is `#[ignore]`d), process broker (allowlist exact/glob/wildcard, spawn echo, denied command, handle request, unsupported op), network probe broker (DNS lookup, port check, traceroute, address vetting, blocked-range rejection, handle request, unsupported op), metrics broker (emit, batch, ring buffer eviction, drain, unsupported op) |
+| gang-wasm-host | 28 | WIT interface parsing, component runtime setup, fuel metering, component cache, capability host (declared/undeclared/registered groups), WASM-to-broker import registration (all 8 interfaces), broker routing (declared/undeclared/missing), Val extraction (byte list, string list, option string) |
 | gang-libp2p | 27 | Swarm config defaults, swarm build, relay server config, capability tracking, peer connection tracking, transport stats, peer ID determinism, protocol codec, request-response setup, browser transport capability reporting (enabled/disabled), config defaults, multiaddr transport detection |
 | gang-cli | 0 | Integration-tested via `gang demo`, `gang status`, and manual CLI exercises |
 | gang-capability-diagnostics | 6 | Report construction, serialization roundtrip, format output sections, empty disk handling, optional fields |
@@ -31,18 +32,19 @@ Test results and validation status for Ganglion v2.0.0.
 
 ### Test breakdown by version
 
+Running totals are measured from the release tags (`cargo test` at each tag),
+correcting earlier over-counted figures:
+
 | Version | Tests added | Running total |
 |---------|------------|---------------|
 | v0.1.0 | 52 | 52 |
 | v0.2.0 | 8 | 60 |
 | v0.3.0 | 10 | 70 |
 | v0.4.0 | 56 | 126 |
-| v0.5.0 | 62 | 188 |
-| v0.6.0 | 33 | 221 |
-| v0.6.0 (std lib) | 19 | 240 |
-| v0.6.0 (transport) | 14 | 254 |
-| v1.0.0 | 0 | 254 |
-| v2.0.0 (security/quality audit) | 63 | 317 |
+| v0.5.0 | 49 | 175 |
+| v0.6.0 | 14 | 189 |
+| v1.0.0 | 66 | 255 |
+| v2.0.0 (security/quality audit + hardening) | 82 | 337 (+1 ignored) |
 
 ## CI pipeline
 
@@ -127,7 +129,7 @@ The following components have been validated:
 |-----------|--------|-------|
 | `.dockerignore` | Added | Excludes `target/` (15 GB), `.git/`, docs from build context |
 | `Dockerfile.base` | Fixed | Layer-cached manifest copy, strips `rust-toolchain.toml` (avoids wasm32-wasip2 target requirement in container), builds only `-p gang` |
-| `gang` binary | Compiles | `cargo check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` all pass (317/317 tests) |
+| `gang` binary | Compiles | `cargo check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` all pass (337 passed, 1 ignored) |
 | `gang relay` command | Validated | Starts libp2p relay server, generates identity, listens on TCP+QUIC, prints multiaddrs |
 | `gang agent` command | Validated | Creates data dir, generates identity, runs until Ctrl+C |
 | `gang test-archetype` CLI | Fixed | Checks for docker + docker compose, cleans up previous runs, runs connectivity checks, provides teardown instructions |

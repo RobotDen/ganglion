@@ -99,8 +99,8 @@ has landed. See [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) for upgrade steps.
 
 ### Docs
 
-- Documentation truth pass: corrected test counts (now **317** across 13
-  crates), the crate dependency graph, the standard-library table (adds
+- Documentation truth pass: corrected test counts (now **337** across 13
+  crates, plus 1 ignored live-network test), the crate dependency graph, the standard-library table (adds
   rosbag-slice), the canonical repository URL (`TafyLabs/ganglion`), and CLI
   reference transcripts/flags to match real output.
 - Added [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) and a
@@ -111,7 +111,8 @@ has landed. See [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) for upgrade steps.
 
 ### Tests
 
-- **317 total tests passing** across 13 crates (63 added by this audit).
+- **337 total tests passing** across 13 crates (82 added since v1.0.0), plus
+  **1 ignored** live-network archetype test (run with `cargo test -- --ignored`).
 
 ## [1.0.0] — 2026-04-24
 
@@ -135,7 +136,7 @@ Ganglion v1.0 marks the first stability commitment. The following surfaces are n
 - **Standard library completion**: log-normalize (11 tests), topic-echo (11 tests), canary-probe (11 tests).
 - **Capability Author Guide** (`docs/CAPABILITY_AUTHOR_GUIDE.md`): Comprehensive guide for Rust, C++, Python, and Go.
 - **Performance targets** in `docs/VALIDATION.md`: Expected RTT, throughput, and connection times per network archetype.
-- **254 total tests passing** across 13 crates.
+- **255 total tests passing** across 13 crates (measured from the v1.0.0 tag).
 
 ### Known limitations
 
@@ -172,7 +173,9 @@ Ganglion v1.0 marks the first stability commitment. The following surfaces are n
 
 - `gang deploy`, `gang run`, `gang caps` accept `-p`/`--peer` and `-r`/`--relay` flags.
 - `gang agent` accepts `-r`/`--relay` flag for remote mode.
-- **221 total tests passing** across 13 crates at the v0.6.0 milestone.
+- **189 total tests passing** across 13 crates at the v0.6.0 milestone. (An
+  earlier version of this entry claimed 221; 189 is the count measured from the
+  v0.6.0 tag.)
 
 ## [0.5.0] — 2026-04-23
 
@@ -192,7 +195,9 @@ Ganglion v1.0 marks the first stability commitment. The following surfaces are n
 - **`gang status` CLI command** (`gang-cli`): Reports version, identity, registry, available and WIP capabilities (ADR-018).
 - **Real CID in `gang deploy`** (`gang-cli`): Deploy now computes actual CID from manifest bytes instead of using a hardcoded placeholder.
 - **Capability loading on agent startup** (`gang-ros`): `load_installed_capabilities()` now scans the capabilities directory, deserializes manifests, verifies signatures and trust store, and logs warnings for failures.
-- **62 new tests** across 5 crates. **188 total tests passing.**
+- **49 new tests** across 5 crates. **175 total tests passing.** (An earlier
+  version of this entry claimed 188; 175 is the count measured from the v0.5.0
+  tag.)
 
 ### Changed
 

@@ -65,7 +65,7 @@
 | 30. ROS helper hardening (validation, timeouts) | Done | 16 | — |
 | 31. v0.5 release | Done | — | — |
 
-**Total: 188 tests passing across 9 crates (46 core + 84 ros + 18 wasm-host + 9 libp2p + 6 diagnostics + 8 param-inspect + 7 diag-bundle + 10 net-archetype).**
+**Total at v0.5: 175 tests passing across 9 crates (measured from the v0.5.0 tag; an earlier version of this document over-counted this as 188).**
 
 **v0.6** ([ADR-020](adr/ADR-020-remote-dispatch-and-e2e-test.md)):
 
@@ -80,7 +80,11 @@
 | 38. Shell completions (bash, zsh, fish, elvish, powershell) | Done | 188 | 05810d7 |
 | 39. Reference WASM component build (diagnostics → .wasm) | Done | 188 | b1d6099 |
 | 40. E2E Docker test scenario (relay + robot + operator) | Smoke test | 188 | b1d6099 |
-| 41. v0.6 release | Done | 221 | e89167a |
+| 41. v0.6 release | Done | 189 | e89167a |
+
+> Per-phase test counts in this table were recorded against the over-counted
+> v0.5 baseline; the release-row total (189) is the count measured from the
+> v0.6.0 tag.
 
 **Scope:** Connect the existing transport infrastructure (`ControlMessage`, `GanglionCodec`, `handle_rpc_message()`, `PeerRegistry`, `TrustStore`) to the CLI and robot agent. Named peers, abbreviated peer ID matching (Docker-style), SSH-style host key verification, and a config file eliminate verbose flags. See ADR-020 for detailed design.
 
@@ -105,9 +109,13 @@
 | 47. Happy-eyeballs dial_parallel | Done | 254 | 0342447 |
 | 48. WebTransport/WebRTC config preparation | Done | 254 | 0342447 |
 | 49. libp2p 0.56 upgrade | Done | 254 | b567714 |
-| 50. v1.0 stability commitments and release | Done | 254 | — |
+| 50. v1.0 stability commitments and release | Done | 255 | — |
 
-**Total at v1.0: 254 tests passing across 13 crates.**
+> Per-phase test counts in this table were recorded against the over-counted
+> earlier baseline; the release-row total (255) is the count measured from the
+> v1.0.0 tag.
+
+**Total at v1.0: 255 tests passing across 13 crates (measured from the v1.0.0 tag).**
 
 **Stability commitments:** Stream protocols (`/ganglion/control/1.0`, `/ganglion/tool/1.0`, `/ganglion/bulk/1.0`), WIT interfaces (`ganglion:capability@0.5.0`), CLI surface (all non-WIP commands), and manifest schema v2.0 are frozen for the v1.x series.
 
@@ -115,7 +123,7 @@
 
 A hardening release rather than a feature release — fail-closed policy/trust, unified peer-id derivation (SEC-03), replay protection on control requests, hardened WASM/process/network/filesystem brokers, a Blake3 hash-chain audit log, and signed-manifest-only registry publishing. See the [CHANGELOG](../CHANGELOG.md) and [MIGRATION-v2.md](./MIGRATION-v2.md) for the full list and upgrade steps.
 
-**Total at v2.0: 317 tests passing across 13 crates (63 added by the audit).**
+**Total at v2.0: 337 tests passing across 13 crates (82 added since v1.0), plus 1 ignored live-network archetype test.**
 
 ---
 
