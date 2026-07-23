@@ -21,7 +21,18 @@ pub struct PeerId(String);
 impl PeerId {
     /// Derive a peer ID from a public key (hex-encoded public key bytes).
     pub fn from_public_key(key: &VerifyingKey) -> Self {
-        let hash = blake3::hash(key.as_bytes());
+        Self::from_ed25519_bytes(key.as_bytes())
+    }
+
+    /// Derive a peer ID from the raw 32-byte Ed25519 public key.
+    ///
+    /// This is the single canonical derivation (SEC-03): every layer — the
+    /// core identity, the trust store, signed manifests, and the libp2p
+    /// transport adapter — must produce a peer ID from these same raw key
+    /// bytes so that policy `peer_rules` keyed on a real identity match the
+    /// identity observed on the wire.
+    pub fn from_ed25519_bytes(key_bytes: &[u8]) -> Self {
+        let hash = blake3::hash(key_bytes);
         Self(format!("12D3-{}", hex::encode(&hash.as_bytes()[..16])))
     }
 
@@ -428,7 +439,12 @@ mod tests {
         // Load should repair the mode.
         let _ = Keypair::load(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o077, 0, "expected group/other bits cleared, got {:o}", mode & 0o777);
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "expected group/other bits cleared, got {:o}",
+            mode & 0o777
+        );
     }
 
     #[test]

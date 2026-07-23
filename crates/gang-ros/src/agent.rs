@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -49,6 +50,11 @@ pub struct RobotAgent {
 
     /// Directory for storing installed capabilities.
     capabilities_dir: PathBuf,
+
+    /// Replay-protection guard for inbound control requests (SEC-14). Rejects
+    /// requests whose nonce has been seen or whose timestamp is outside the
+    /// freshness window.
+    replay_guard: Arc<Mutex<gang_core::message::ReplayGuard>>,
 }
 
 /// Configuration for the robot agent.
@@ -170,6 +176,10 @@ impl RobotAgent {
             trust_store,
             audit_log,
             capabilities_dir: config.capabilities_dir,
+            // SEC-14: 5-minute freshness window for inbound requests.
+            replay_guard: Arc::new(Mutex::new(gang_core::message::ReplayGuard::new(
+                Duration::from_secs(300),
+            ))),
         };
 
         // Load any previously installed capabilities (CODE-21: propagate errors).
@@ -201,17 +211,28 @@ impl RobotAgent {
             "Verifying capability for deployment"
         );
 
-        // 2. Check trust store (skip in permissive/dev mode if trust store is empty)
-        if !self.trust_store.trusted_peers.is_empty()
-            && !self.trust_store.is_trusted(&manifest.author_peer_id)
-        {
-            return Err(ManifestError::UntrustedSigner {
-                peer: manifest.author_peer_id.to_string(),
+        // 2. Check trust store (skip in permissive/dev mode if trust store is empty).
+        //    Both the manifest SIGNER and the connecting DEPLOYER must be trusted
+        //    (SEC-03): the signer proves the bundle is authentic, the deployer
+        //    proves the peer pushing it to this robot is authorized. Because the
+        //    deployer id is now derived from the same raw Ed25519 key on the wire
+        //    as in the trust store, this check is actually enforceable.
+        if !self.trust_store.trusted_peers.is_empty() {
+            if !self.trust_store.is_trusted(&manifest.author_peer_id) {
+                return Err(ManifestError::UntrustedSigner {
+                    peer: manifest.author_peer_id.to_string(),
+                }
+                .into());
             }
-            .into());
+            if !self.trust_store.is_trusted(deployer) {
+                return Err(ManifestError::UntrustedSigner {
+                    peer: format!("deployer {deployer}"),
+                }
+                .into());
+            }
         }
 
-        // 3. Evaluate policy
+        // 3. Evaluate policy against the authenticated deployer identity.
         self.policy
             .evaluate(&manifest.declared_capabilities, deployer)?;
 
@@ -546,6 +567,27 @@ impl RobotAgent {
                 let remote_peer = stream.remote_peer.clone();
                 info!(peer = %remote_peer, "Received control message");
 
+                // SEC-14: reject stale or replayed requests before dispatch.
+                if let Some((nonce, timestamp_ms)) = msg.request_meta() {
+                    let verdict = agent
+                        .replay_guard
+                        .lock()
+                        .expect("replay guard poisoned")
+                        .observe(nonce, timestamp_ms);
+                    if let Err(e) = verdict {
+                        warn!(peer = %remote_peer, "Rejecting request (replay/stale): {e}");
+                        let response = ControlMessage::Error {
+                            request_id: None,
+                            code: "replay_rejected".into(),
+                            message: e.to_string(),
+                        };
+                        if let Ok(bytes) = encode_message(&response) {
+                            let _ = stream.inner.write_all(&bytes).await;
+                        }
+                        return;
+                    }
+                }
+
                 // Dispatch and build response
                 let response: ControlMessage = match msg {
                     ControlMessage::DeployCapability {
@@ -573,6 +615,7 @@ impl RobotAgent {
                         name,
                         args,
                         request_id,
+                        ..
                     } => match agent.invoke_capability(&name, &args, &remote_peer).await {
                         Ok(output) => ControlMessage::InvokeResult {
                             request_id,

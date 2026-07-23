@@ -130,10 +130,7 @@ pub struct SearchResult {
 /// for malformed input.
 fn parse_semver(version: &str) -> (u64, u64, u64) {
     // Drop build/pre-release metadata; compare only the numeric core.
-    let core = version
-        .split(['-', '+'])
-        .next()
-        .unwrap_or("");
+    let core = version.split(['-', '+']).next().unwrap_or("");
     let mut parts = core.split('.');
     let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -295,7 +292,7 @@ mod tests {
     use super::*;
 
     use crate::identity::Keypair;
-    use crate::manifest::{ComponentManifest, ResourceLimits, MANIFEST_SCHEMA_VERSION};
+    use crate::manifest::{ComponentManifest, MANIFEST_SCHEMA_VERSION, ResourceLimits};
 
     fn sample_entry(name: &str, version: &str) -> RegistryEntry {
         RegistryEntry {

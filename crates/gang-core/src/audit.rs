@@ -87,11 +87,7 @@ struct ChainedRecord {
 
 impl ChainedRecord {
     /// Compute the chain hash for a record given its predecessor hash and seq.
-    fn compute_hash(
-        record: &AuditRecord,
-        seq: u64,
-        prev_hash: &str,
-    ) -> Result<String, AuditError> {
+    fn compute_hash(record: &AuditRecord, seq: u64, prev_hash: &str) -> Result<String, AuditError> {
         let mut record_cbor = Vec::new();
         ciborium::into_writer(record, &mut record_cbor)
             .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
@@ -190,11 +186,7 @@ impl AuditLog {
 
     /// Read all records from the log.
     pub fn read_all(&self) -> Result<Vec<AuditRecord>, AuditError> {
-        Ok(self
-            .read_chained()?
-            .into_iter()
-            .map(|c| c.record)
-            .collect())
+        Ok(self.read_chained()?.into_iter().map(|c| c.record).collect())
     }
 
     /// Read all records together with their hash-chain metadata.
@@ -246,9 +238,11 @@ impl AuditLog {
         let records = self.read_chained()?;
 
         let mut expected_prev = String::new();
-        let mut expected_seq: u64 = 0;
 
         for (i, cr) in records.iter().enumerate() {
+            // The chain is dense and zero-based, so the expected sequence
+            // number is the record's position.
+            let expected_seq = i as u64;
             if cr.record_hash.is_empty() {
                 return Err(AuditError::IntegrityViolation(format!(
                     "record {i} is not part of the hash chain (legacy/unchained)"
@@ -279,7 +273,6 @@ impl AuditLog {
             }
 
             expected_prev = cr.record_hash.clone();
-            expected_seq += 1;
         }
 
         Ok(())

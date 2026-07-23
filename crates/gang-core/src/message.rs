@@ -312,8 +312,7 @@ impl ReplayGuard {
 
     fn evict_expired(&mut self, now_ms: u64) {
         let window = self.window;
-        self.seen
-            .retain(|_, &mut ts| is_fresh(ts, now_ms, window));
+        self.seen.retain(|_, &mut ts| is_fresh(ts, now_ms, window));
     }
 }
 
@@ -459,7 +458,10 @@ mod tests {
         let now = 1_000_000u64;
 
         // Missing nonce.
-        assert_eq!(guard.observe_at("", now, now), Err(ReplayError::MissingNonce));
+        assert_eq!(
+            guard.observe_at("", now, now),
+            Err(ReplayError::MissingNonce)
+        );
 
         // Fresh, unseen nonce is accepted.
         assert_eq!(guard.observe_at("n1", now, now), Ok(()));

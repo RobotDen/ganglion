@@ -107,26 +107,9 @@ impl EventBus {
         // original into the last one to avoid one needless clone.
         let last = subs.len() - 1;
         for tx in subs.iter().take(last) {
-            let _ = tx.send(clone_event(&event));
+            let _ = tx.send(event.clone());
         }
         let _ = subs[last].send(event);
-    }
-}
-
-/// Reconstruct a `TransportEvent` (which does not implement `Clone`).
-fn clone_event(event: &TransportEvent) -> TransportEvent {
-    match event {
-        TransportEvent::PeerConnected { peer_id, via_relay } => TransportEvent::PeerConnected {
-            peer_id: peer_id.clone(),
-            via_relay: *via_relay,
-        },
-        TransportEvent::PeerDisconnected { peer_id } => TransportEvent::PeerDisconnected {
-            peer_id: peer_id.clone(),
-        },
-        TransportEvent::PresenceReceived(info) => TransportEvent::PresenceReceived(info.clone()),
-        TransportEvent::DirectUpgrade { peer_id } => TransportEvent::DirectUpgrade {
-            peer_id: peer_id.clone(),
-        },
     }
 }
 
@@ -397,12 +380,13 @@ impl SwarmWorker {
                             self.on_connection_established(peer_id, endpoint).await;
                         }
                         Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
-                            let gang_peer_id = libp2p_to_gang_peer_id(&peer_id);
                             info!(peer = %peer_id, "Connection closed");
-                            self.connected_peers.write().await.remove(gang_peer_id.as_str());
-                            self.events.publish(TransportEvent::PeerDisconnected {
-                                peer_id: gang_peer_id,
-                            });
+                            if let Some(gang_peer_id) = libp2p_to_gang_peer_id(&peer_id) {
+                                self.connected_peers.write().await.remove(gang_peer_id.as_str());
+                                self.events.publish(TransportEvent::PeerDisconnected {
+                                    peer_id: gang_peer_id,
+                                });
+                            }
                         }
                         Some(SwarmEvent::NewListenAddr { address, .. }) => {
                             info!("Listening on {address}");
@@ -517,10 +501,14 @@ impl SwarmWorker {
         peer_id: Libp2pPeerId,
         endpoint: libp2p::core::ConnectedPoint,
     ) {
-        let gang_peer_id = libp2p_to_gang_peer_id(&peer_id);
         let via_relay = endpoint.is_relayed();
-
         info!(peer = %peer_id, relay = via_relay, "Connection established");
+
+        let Some(gang_peer_id) = libp2p_to_gang_peer_id(&peer_id) else {
+            warn!(peer = %peer_id, "Rejecting peer: could not recover Ed25519 identity");
+            let _ = self.swarm.disconnect_peer_id(peer_id);
+            return;
+        };
 
         // Determine transport from endpoint multiaddr. Recognises current
         // (tcp, quic) and future (webtransport, webrtc) transports so the field
@@ -597,10 +585,11 @@ impl SwarmWorker {
                 ..
             }) => {
                 debug!(peer = %peer, rtt = ?rtt, "Ping");
-                let gang_peer_id = libp2p_to_gang_peer_id(&peer);
-                let mut peers = self.connected_peers.write().await;
-                if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
-                    conn.last_rtt = Some(rtt);
+                if let Some(gang_peer_id) = libp2p_to_gang_peer_id(&peer) {
+                    let mut peers = self.connected_peers.write().await;
+                    if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
+                        conn.last_rtt = Some(rtt);
+                    }
                 }
             }
             GanglionBehaviourEvent::Dcutr(libp2p::dcutr::Event {
@@ -608,22 +597,23 @@ impl SwarmWorker {
                 result: Ok(_),
                 ..
             }) => {
-                let gang_peer_id = libp2p_to_gang_peer_id(&remote_peer_id);
                 info!(peer = %remote_peer_id, "Direct connection upgraded via DCUtR");
 
-                {
-                    let mut peers = self.connected_peers.write().await;
-                    if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
-                        conn.dcutr_attempted = true;
-                        conn.dcutr_succeeded = true;
-                        conn.via_relay = false;
-                        conn.transport = "quic".into();
+                if let Some(gang_peer_id) = libp2p_to_gang_peer_id(&remote_peer_id) {
+                    {
+                        let mut peers = self.connected_peers.write().await;
+                        if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
+                            conn.dcutr_attempted = true;
+                            conn.dcutr_succeeded = true;
+                            conn.via_relay = false;
+                            conn.transport = "quic".into();
+                        }
                     }
-                }
 
-                self.events.publish(TransportEvent::DirectUpgrade {
-                    peer_id: gang_peer_id,
-                });
+                    self.events.publish(TransportEvent::DirectUpgrade {
+                        peer_id: gang_peer_id,
+                    });
+                }
             }
             GanglionBehaviourEvent::GanglionRpc(request_response::Event::Message {
                 peer,
@@ -670,7 +660,13 @@ impl SwarmWorker {
             request_response::Message::Request {
                 request, channel, ..
             } => {
-                let gang_peer_id = libp2p_to_gang_peer_id(&peer);
+                // SEC-03: the downstream handler and policy engine key on this
+                // identity, so a peer whose Ed25519 key cannot be recovered is
+                // unauthenticated — drop the request rather than dispatch it.
+                let Some(gang_peer_id) = libp2p_to_gang_peer_id(&peer) else {
+                    warn!(peer = %peer, "Dropping RPC from peer with unrecoverable identity");
+                    return;
+                };
                 let crate::swarm::GanglionRequest { protocol, payload } = request;
 
                 {
@@ -952,12 +948,35 @@ impl TransportAdapter for Libp2pTransportAdapter {
 
 /// Convert a libp2p PeerId to a Ganglion PeerId.
 /// Uses the libp2p peer ID string as a deterministic input.
-fn libp2p_to_gang_peer_id(peer_id: &Libp2pPeerId) -> PeerId {
-    let hash = blake3::hash(peer_id.to_bytes().as_slice());
-    // Re-derive using the same format as gang-core PeerId. Construct the
-    // PeerId directly instead of round-tripping through a JSON string literal.
-    let hex = hex::encode(&hash.as_bytes()[..16]);
-    PeerId::new(&format!("12D3-{hex}"))
+/// Map a libp2p peer ID to a gang-core [`PeerId`] (SEC-03).
+///
+/// Ganglion identities are Ed25519, and libp2p inlines Ed25519 public keys
+/// directly in the peer-id multihash (identity hash, code 0x00). We recover the
+/// raw 32-byte key and derive the gang peer ID via the SAME canonical scheme
+/// [`PeerId::from_ed25519_bytes`] used by the core identity, trust store, and
+/// manifests — so the identity observed on the wire matches the one policy
+/// `peer_rules` are keyed on. If the key cannot be recovered (a non-Ed25519 or
+/// non-inlined peer id, which Ganglion never issues), this returns `None` and
+/// the caller treats the peer as unauthenticated.
+fn libp2p_to_gang_peer_id(peer_id: &Libp2pPeerId) -> Option<PeerId> {
+    let key = ed25519_pubkey_from_libp2p(peer_id)?;
+    Some(PeerId::from_ed25519_bytes(&key))
+}
+
+/// Recover the raw 32-byte Ed25519 public key inlined in a libp2p peer id.
+fn ed25519_pubkey_from_libp2p(peer_id: &Libp2pPeerId) -> Option<[u8; 32]> {
+    use libp2p::identity::PublicKey;
+    use libp2p::multihash::Multihash;
+
+    // Ed25519 peer ids use the identity multihash (code 0x00) carrying the
+    // protobuf-encoded public key as the digest.
+    let mh = Multihash::<64>::from_bytes(&peer_id.to_bytes()).ok()?;
+    if mh.code() != 0x00 {
+        return None;
+    }
+    let pk = PublicKey::try_decode_protobuf(mh.digest()).ok()?;
+    let ed = pk.try_into_ed25519().ok()?;
+    Some(ed.to_bytes())
 }
 
 /// Parse a gang peer ID string back into a PeerId.
@@ -1136,7 +1155,7 @@ mod tests {
         let rx = serve_request(
             handler,
             ProtocolId::new(negotiated),
-            PeerId::new("12D3-peer"),
+            PeerId::new("12D3-000000000000000000000000000000aa"),
             b"request".to_vec(),
         );
         let response = rx.await.unwrap();
@@ -1152,7 +1171,7 @@ mod tests {
         // arrives, so await_reply must resolve with a Timeout error once the
         // (virtual) clock passes REQUEST_TIMEOUT.
         let (_tx, rx) = oneshot::channel::<Result<Vec<u8>, TransportError>>();
-        let peer = PeerId::new("12D3-timeout");
+        let peer = PeerId::new("12D3-000000000000000000000000000000bb");
         let result = await_reply(&peer, rx).await;
         assert!(
             matches!(result, Err(TransportError::Timeout(_))),
@@ -1166,7 +1185,7 @@ mod tests {
         let mut a = bus.subscribe();
         let mut b = bus.subscribe();
 
-        let peer = PeerId::new("12D3-abcdef");
+        let peer = PeerId::new("12D3-000000000000000000000000000000cc");
         bus.publish(TransportEvent::PeerConnected {
             peer_id: peer.clone(),
             via_relay: false,
@@ -1187,14 +1206,22 @@ mod tests {
         }
     }
 
+    /// Build a genuine Ed25519 libp2p peer id (its raw public key is recoverable
+    /// from the inlined multihash, matching how Ganglion issues identities).
+    fn real_ed25519_libp2p_peer() -> Libp2pPeerId {
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        kp.public().to_peer_id()
+    }
+
     #[tokio::test]
     async fn test_peer_connection_tracking() {
         let connected_peers: Arc<RwLock<HashMap<String, PeerConnection>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
         // Simulate a connection
-        let fake_libp2p_peer = Libp2pPeerId::random();
-        let gang_peer_id = libp2p_to_gang_peer_id(&fake_libp2p_peer);
+        let fake_libp2p_peer = real_ed25519_libp2p_peer();
+        let gang_peer_id =
+            libp2p_to_gang_peer_id(&fake_libp2p_peer).expect("ed25519 identity recoverable");
         let peer_key = gang_peer_id.as_str().to_string();
 
         {
@@ -1246,8 +1273,9 @@ mod tests {
         let connected_peers: Arc<RwLock<HashMap<String, PeerConnection>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
-        let fake_libp2p_peer = Libp2pPeerId::random();
-        let gang_peer_id = libp2p_to_gang_peer_id(&fake_libp2p_peer);
+        let fake_libp2p_peer = real_ed25519_libp2p_peer();
+        let gang_peer_id =
+            libp2p_to_gang_peer_id(&fake_libp2p_peer).expect("ed25519 identity recoverable");
         let peer_key = gang_peer_id.as_str().to_string();
 
         let rtt = std::time::Duration::from_millis(42);
@@ -1305,17 +1333,36 @@ mod tests {
 
     #[test]
     fn test_libp2p_to_gang_peer_id_deterministic() {
-        let libp2p_peer = Libp2pPeerId::random();
-        let gang_id_1 = libp2p_to_gang_peer_id(&libp2p_peer);
-        let gang_id_2 = libp2p_to_gang_peer_id(&libp2p_peer);
+        let libp2p_peer = real_ed25519_libp2p_peer();
+        let gang_id_1 = libp2p_to_gang_peer_id(&libp2p_peer).expect("recoverable");
+        let gang_id_2 = libp2p_to_gang_peer_id(&libp2p_peer).expect("recoverable");
         assert_eq!(gang_id_1, gang_id_2);
         assert!(gang_id_1.as_str().starts_with("12D3-"));
     }
 
     #[test]
+    fn test_libp2p_to_gang_peer_id_matches_core_derivation() {
+        // SEC-03: the id derived from a libp2p peer id must equal the id
+        // gang-core derives from the same raw Ed25519 public key, so trust
+        // rules keyed on a core-derived identity match the wire identity.
+        let kp = libp2p::identity::Keypair::generate_ed25519();
+        let raw = kp.public().try_into_ed25519().unwrap().to_bytes();
+        let from_wire = libp2p_to_gang_peer_id(&kp.public().to_peer_id()).expect("recoverable");
+        let from_core = PeerId::from_ed25519_bytes(&raw);
+        assert_eq!(from_wire, from_core);
+    }
+
+    #[test]
+    fn test_random_peer_id_is_unrecoverable() {
+        // A random (non-inlined) libp2p peer id has no embedded key, so it is
+        // treated as unauthenticated.
+        assert!(libp2p_to_gang_peer_id(&Libp2pPeerId::random()).is_none());
+    }
+
+    #[test]
     fn test_parse_gang_peer_id_roundtrip() {
-        let libp2p_peer = Libp2pPeerId::random();
-        let gang_id = libp2p_to_gang_peer_id(&libp2p_peer);
+        let libp2p_peer = real_ed25519_libp2p_peer();
+        let gang_id = libp2p_to_gang_peer_id(&libp2p_peer).expect("recoverable");
         let parsed = parse_gang_peer_id(gang_id.as_str());
         assert!(parsed.is_some());
         assert_eq!(parsed.unwrap(), gang_id);

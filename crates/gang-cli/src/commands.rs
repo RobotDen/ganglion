@@ -154,7 +154,12 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
     ];
 
     // WIP: require relay connectivity or produce only simulated output today.
-    let wip = ["logs", "list", "connect", "transport-stats (simulated data)"];
+    let wip = [
+        "logs",
+        "list",
+        "connect",
+        "transport-stats (simulated data)",
+    ];
 
     match format {
         OutputFormat::Json => {
@@ -872,9 +877,7 @@ pub fn verify_host_key(
 
 /// Parse a capability group short name (or fully-qualified name) into a
 /// `CapabilityGroup` with permissive defaults for any pattern/allowlist fields.
-fn parse_capability_group(
-    spec: &str,
-) -> anyhow::Result<gang_core::capability::CapabilityGroup> {
+fn parse_capability_group(spec: &str) -> anyhow::Result<gang_core::capability::CapabilityGroup> {
     use gang_core::capability::CapabilityGroup;
     let version = "1.0".to_string();
     let group = match spec.trim() {
@@ -893,9 +896,7 @@ fn parse_capability_group(
             version,
             paths: vec![],
         },
-        "artifacts" | "ganglion:artifacts/publish" => {
-            CapabilityGroup::ArtifactsPublish { version }
-        }
+        "artifacts" | "ganglion:artifacts/publish" => CapabilityGroup::ArtifactsPublish { version },
         "process" | "ganglion:process/spawn" => CapabilityGroup::ProcessSpawn {
             version,
             allowed_commands: vec![],
@@ -2003,7 +2004,7 @@ pub async fn fetch_artifact(
         ..Default::default()
     })?;
 
-    let cid = Cid::parse(cid_str);
+    let cid = Cid::parse(cid_str).with_context(|| format!("invalid CID '{cid_str}'"))?;
     if !store.contains(&cid) {
         anyhow::bail!(
             "Artifact {cid_str} not found in local store.\n\
@@ -2555,17 +2556,19 @@ pub async fn registry_publish(
     // Read the adjacent signed manifest if present — its verified contents are
     // the source of truth for name/version/language/capabilities/min-version.
     let manifest_path = path.with_extension("manifest.cbor");
-    let (manifest_cid, manifest) = if manifest_path.exists() {
+    let (manifest_cid, manifest, signed_manifest) = if manifest_path.exists() {
         let manifest_bytes = std::fs::read(&manifest_path)
             .with_context(|| format!("reading {}", manifest_path.display()))?;
         let cid = gang_core::artifacts::Cid::from_bytes(&manifest_bytes);
-        let decoded = SignedManifest::from_cbor(&manifest_bytes)
-            .and_then(|s| s.verify_and_decode())
+        let signed = SignedManifest::from_cbor(&manifest_bytes)
             .with_context(|| format!("decoding manifest {}", manifest_path.display()))?;
-        (cid, Some(decoded))
+        let decoded = signed
+            .verify_and_decode()
+            .with_context(|| format!("verifying manifest {}", manifest_path.display()))?;
+        (cid, Some(decoded), Some(signed))
     } else {
         // No manifest found; compute CID from the component bytes as fallback
-        (gang_core::artifacts::Cid::from_bytes(&data), None)
+        (gang_core::artifacts::Cid::from_bytes(&data), None, None)
     };
 
     // Name: manifest > filename.
@@ -2604,7 +2607,9 @@ pub async fn registry_publish(
         })
         .unwrap_or_default();
 
-    let min_ganglion_version = manifest.as_ref().and_then(|m| m.min_ganglion_version.clone());
+    let min_ganglion_version = manifest
+        .as_ref()
+        .and_then(|m| m.min_ganglion_version.clone());
 
     // Description: --description flag > manifest > default.
     let description = description
@@ -2640,16 +2645,21 @@ pub async fn registry_publish(
         min_ganglion_version,
     };
 
+    // SEC-15: the registry now authenticates every entry against a signed
+    // manifest. Publishing without one is no longer possible.
+    let signed_manifest = signed_manifest.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no signed manifest found next to the component ({}).\n\
+             Registry entries must be authenticated: sign the component first \
+             with `gang sign {wasm_path}`, then publish.",
+            manifest_path.display()
+        )
+    })?;
+
     let mut reg = gang_core::registry::Registry::open(&registry_dir())?;
-    reg.publish(entry)?;
+    reg.publish(entry, &signed_manifest)?;
 
     println!("Published {name} v{version} to local registry.");
-    if manifest.is_none() {
-        println!(
-            "  (no signed manifest found next to the component — used filename/defaults; \
-             sign it first for accurate metadata)"
-        );
-    }
     println!("  Component CID: {}", component_cid);
     println!("  Registry path: {}", registry_dir().display());
     Ok(())

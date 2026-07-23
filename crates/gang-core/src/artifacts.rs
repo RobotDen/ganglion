@@ -556,14 +556,14 @@ mod tests {
         .unwrap();
 
         // Fill the store with several small artifacts (no eviction yet).
-        store.store(&vec![1u8; 30], None, None, None).unwrap();
-        store.store(&vec![2u8; 30], None, None, None).unwrap();
-        store.store(&vec![3u8; 30], None, None, None).unwrap();
+        store.store(&[1u8; 30], None, None, None).unwrap();
+        store.store(&[2u8; 30], None, None, None).unwrap();
+        store.store(&[3u8; 30], None, None, None).unwrap();
         assert_eq!(store.count(), 3);
 
         // Now store a large artifact that forces evicting multiple entries.
         let before = store.persist_count();
-        store.store(&vec![9u8; 90], None, None, None).unwrap();
+        store.store(&[9u8; 90], None, None, None).unwrap();
         let after = store.persist_count();
 
         // The whole store() call (multiple evictions + insert) rewrites the
@@ -584,8 +584,8 @@ mod tests {
                 chunk_size: 1024,
             })
             .unwrap();
-            let a = store.store(&vec![1u8; 50], None, None, None).unwrap();
-            let b = store.store(&vec![2u8; 50], None, None, None).unwrap();
+            let a = store.store(&[1u8; 50], None, None, None).unwrap();
+            let b = store.store(&[2u8; 50], None, None, None).unwrap();
             // Access A so it becomes most-recently-used; this must persist.
             let _ = store.retrieve(&a).unwrap();
             (a, b)
@@ -602,9 +602,15 @@ mod tests {
         // Store an artifact forcing a single eviction; B (older access) should
         // go, A should survive — proving last_accessed was persisted before
         // restart.
-        store.store(&vec![3u8; 120], None, None, None).unwrap();
-        assert!(store.contains(&cid_a), "A was accessed last and should survive");
-        assert!(!store.contains(&cid_b), "B was least-recently-used and should be evicted");
+        store.store(&[3u8; 120], None, None, None).unwrap();
+        assert!(
+            store.contains(&cid_a),
+            "A was accessed last and should survive"
+        );
+        assert!(
+            !store.contains(&cid_b),
+            "B was least-recently-used and should be evicted"
+        );
     }
 
     #[test]

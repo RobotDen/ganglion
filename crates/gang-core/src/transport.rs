@@ -136,7 +136,7 @@ pub struct PresenceInfo {
 }
 
 /// Events emitted by the transport layer to the application.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum TransportEvent {
     /// A new peer connected.
