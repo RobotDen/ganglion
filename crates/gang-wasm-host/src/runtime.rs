@@ -209,6 +209,12 @@ impl ComponentRuntime {
         })
     }
 
+    /// Return the broker registered for a capability group, if any. Exposes the
+    /// runtime's actual (shared) broker instances for inspection and testing.
+    pub fn broker(&self, group: &str) -> Option<Arc<dyn CapabilityBroker>> {
+        self.brokers.get(group).cloned()
+    }
+
     /// Compile a component, using the cache keyed by `component_hash`. On a
     /// cache miss the module is compiled once and stored for reuse.
     async fn compile_cached(
@@ -531,8 +537,7 @@ mod tests {
     #[test]
     fn classify_out_of_fuel() {
         let err = anyhow::Error::from(wasmtime::Trap::OutOfFuel);
-        let classified =
-            classify_invocation_error(&err, Duration::from_secs(1), Some(42), 1000);
+        let classified = classify_invocation_error(&err, Duration::from_secs(1), Some(42), 1000);
         match classified {
             InvocationError::FuelExhausted { consumed } => assert_eq!(consumed, 42),
             other => panic!("expected FuelExhausted, got {other:?}"),
@@ -542,8 +547,7 @@ mod tests {
     #[test]
     fn classify_epoch_interrupt() {
         let err = anyhow::Error::from(wasmtime::Trap::Interrupt);
-        let classified =
-            classify_invocation_error(&err, Duration::from_secs(7), None, 1000);
+        let classified = classify_invocation_error(&err, Duration::from_secs(7), None, 1000);
         match classified {
             InvocationError::DeadlineExceeded { elapsed } => {
                 assert_eq!(elapsed, Duration::from_secs(7))
@@ -555,8 +559,7 @@ mod tests {
     #[test]
     fn classify_generic_trap() {
         let err = anyhow::Error::from(wasmtime::Trap::MemoryOutOfBounds);
-        let classified =
-            classify_invocation_error(&err, Duration::from_secs(1), None, 1000);
+        let classified = classify_invocation_error(&err, Duration::from_secs(1), None, 1000);
         assert!(matches!(classified, InvocationError::Trapped(_)));
     }
 
@@ -566,8 +569,7 @@ mod tests {
         // rather than being misclassified via text matching (e.g. a message that
         // happens to contain the word "fuel").
         let err = anyhow::anyhow!("some unrelated fuel-tank failure");
-        let classified =
-            classify_invocation_error(&err, Duration::from_secs(1), None, 1000);
+        let classified = classify_invocation_error(&err, Duration::from_secs(1), None, 1000);
         assert!(matches!(classified, InvocationError::Trapped(_)));
     }
 }
