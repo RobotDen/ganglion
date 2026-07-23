@@ -60,14 +60,26 @@ pub struct ProbeResult {
 /// Run all network probes and classify the archetype.
 ///
 /// The probes make blocking subprocess and socket calls. When this is invoked
-/// from within a Tokio runtime (e.g. the CLI's async `diagnose` command), the
-/// work is moved off the async worker via `block_in_place` so it does not
-/// stall the executor (CODE-11); in a plain synchronous context it runs
-/// directly. `block_in_place` requires a multi-threaded runtime, which the CLI
-/// uses (`#[tokio::main]`).
+/// from within a multi-threaded Tokio runtime (e.g. the CLI's async
+/// `diagnose` command), the work is moved off the async worker via
+/// `block_in_place` so it does not stall the executor (CODE-11).
+/// `block_in_place` panics on a current-thread runtime, so in that case the
+/// probes run on a scratch OS thread instead (the same pattern as the
+/// `RosInterfaceBroker` sync constructor). In a plain synchronous context the
+/// probes run directly.
 pub fn detect_archetype() -> ArchetypeDetectionResult {
-    match tokio::runtime::Handle::try_current() {
-        Ok(_) => tokio::task::block_in_place(detect_archetype_inner),
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(detect_archetype_inner)
+        }
+        Ok(_) => {
+            // Current-thread (or other non-multi-thread) flavor:
+            // block_in_place would panic — run on a throwaway thread.
+            std::thread::spawn(detect_archetype_inner)
+                .join()
+                .expect("archetype probe thread panicked")
+        }
         Err(_) => detect_archetype_inner(),
     }
 }
@@ -667,11 +679,30 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live network probes; run with --ignored"]
     fn detect_archetype_runs() {
         // This runs the actual probes — result depends on host network
         let result = detect_archetype();
         assert!(!result.probes.is_empty());
         assert!(result.confidence > 0.0);
+        assert!(!result.recommendations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn detect_archetype_no_panic_on_current_thread_runtime() {
+        // `#[tokio::test]` uses the current-thread flavor by default, where
+        // `block_in_place` panics — detect_archetype must route the probes to
+        // a scratch thread instead of panicking. The assertions are
+        // env-independent: probes tolerate offline/minimal hosts (they report
+        // failure rather than erroring), so this can run everywhere.
+        use tokio::runtime::{Handle, RuntimeFlavor};
+        assert_eq!(
+            Handle::current().runtime_flavor(),
+            RuntimeFlavor::CurrentThread
+        );
+
+        let result = detect_archetype();
+        assert!(!result.probes.is_empty());
         assert!(!result.recommendations.is_empty());
     }
 }
