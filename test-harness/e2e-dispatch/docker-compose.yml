@@ -1,5 +1,10 @@
-# E2E dispatch test: relay + robot + operator on a flat bridge network.
-# Validates the full deploy→invoke→result flow over libp2p.
+# E2E connectivity smoke test: relay + robot + operator on a flat bridge
+# network. Validates that the robot agent connects to the relay and that the
+# operator can register the robot's peer ID (published via /test-data).
+#
+# TODO(dispatch-workstream): upgrade to a real deploy→invoke→result round-trip
+# once ADR-020 Phase 32 lands — `gang deploy <remote>` currently bails because
+# operator remote dispatch is not implemented in the CLI.
 #
 # Usage:
 #   ./run-test.sh          # builds, runs, validates, tears down
@@ -27,7 +32,9 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["agent", "--data-dir", "/data", "-r", "/ip4/172.28.0.10/tcp/4001"]
+    # Wrapper starts `gang agent -r <relay>` and publishes the robot's peer ID
+    # and agent log to /test-data for the operator to assert against.
+    entrypoint: ["/bin/bash", "/test-data/run-robot.sh"]
     depends_on:
       relay:
         condition: service_healthy
@@ -36,6 +43,7 @@ services:
         ipv4_address: 172.28.0.20
     volumes:
       - robot-data:/data
+      - ./test-data:/test-data
 
   operator:
     build:
@@ -45,6 +53,8 @@ services:
     depends_on:
       relay:
         condition: service_healthy
+      robot:
+        condition: service_started
     networks:
       ganglion-e2e:
         ipv4_address: 172.28.0.30
