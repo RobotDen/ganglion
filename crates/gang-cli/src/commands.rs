@@ -126,6 +126,9 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
     let config = OperatorConfig::load();
     let config_path = gang_core::identity::default_config_dir().join("config.toml");
 
+    // Data directories (outside ~/.gang)
+    let artifact_dir = artifact_store_dir();
+
     let available = [
         "identity show",
         "identity generate",
@@ -168,6 +171,8 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
                 "identity": identity_status,
                 "key_path": key_path.display().to_string(),
                 "registry_capabilities": registry_count,
+                "registry_dir": reg_dir.display().to_string(),
+                "artifact_store_dir": artifact_dir.display().to_string(),
                 "registered_peers": peer_count,
                 "config_path": config_path.display().to_string(),
                 "default_relay": config.default_relay,
@@ -183,6 +188,8 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
             println!("Identity:   {identity_status}");
             println!("Key file:   {}", key_path.display());
             println!("Registry:   {} capability(ies) registered", registry_count);
+            println!("  dir:      {}", reg_dir.display());
+            println!("Artifacts:  {}", artifact_dir.display());
             println!("Peers:      {} registered", peer_count);
             println!(
                 "Config:     {}",
