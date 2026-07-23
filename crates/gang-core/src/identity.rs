@@ -277,7 +277,16 @@ pub fn default_config_dir() -> PathBuf {
 }
 
 /// Default path for the identity key file.
+///
+/// Honors the `GANG_KEY_PATH` environment variable when set (used for relay
+/// identity persistence and testing), falling back to
+/// `~/.gang/identity.key`.
 pub fn default_key_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("GANG_KEY_PATH") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
     default_config_dir().join("identity.key")
 }
 
@@ -403,6 +412,32 @@ mod tests {
         // Lookup by peer ID
         let (name, _) = loaded.lookup_by_peer_id(&kp.peer_id()).unwrap();
         assert_eq!(name, "robot-42");
+    }
+
+    #[test]
+    fn default_key_path_honors_env() {
+        // Save/restore to avoid cross-test contamination.
+        let prev = std::env::var_os("GANG_KEY_PATH");
+
+        unsafe {
+            std::env::set_var("GANG_KEY_PATH", "/custom/relay/identity.key");
+        }
+        assert_eq!(
+            default_key_path(),
+            PathBuf::from("/custom/relay/identity.key")
+        );
+
+        unsafe {
+            std::env::remove_var("GANG_KEY_PATH");
+        }
+        assert!(default_key_path().ends_with("identity.key"));
+
+        // Restore prior value if any.
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("GANG_KEY_PATH", v);
+            }
+        }
     }
 
     #[test]
