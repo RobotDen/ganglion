@@ -136,18 +136,33 @@ impl AuditLog {
             std::fs::create_dir_all(parent).map_err(|e| AuditError::WriteFailed(e.to_string()))?;
         }
 
-        // Check size and rotate if needed
+        // Check size and rotate if needed. The rotated file's tip hash is
+        // captured first and carried into the new file's first record, so the
+        // chains stay linked across a rotation (verifiable while the rotated
+        // file is still present).
+        let mut rotated_tip: Option<String> = None;
         if let Ok(metadata) = std::fs::metadata(&self.path) {
             if metadata.len() > self.max_size_bytes && self.max_size_bytes > 0 {
+                rotated_tip = Some(
+                    self.read_chained()?
+                        .last()
+                        .map(|last| last.record_hash.clone())
+                        .unwrap_or_default(),
+                );
                 self.rotate()
                     .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
             }
         }
 
-        // Determine the chain head (seq + prev_hash) from the existing log.
-        let (seq, prev_hash) = match self.read_chained()?.last() {
-            Some(last) => (last.seq + 1, last.record_hash.clone()),
-            None => (0, String::new()),
+        // Determine the chain head (seq + prev_hash): after rotation the new
+        // file restarts at seq 0 anchored to the rotated tip; otherwise it
+        // continues from the existing log.
+        let (seq, prev_hash) = match rotated_tip {
+            Some(tip) => (0, tip),
+            None => match self.read_chained()?.last() {
+                Some(last) => (last.seq + 1, last.record_hash.clone()),
+                None => (0, String::new()),
+            },
         };
 
         let record_hash = ChainedRecord::compute_hash(record, seq, &prev_hash)?;
@@ -231,10 +246,25 @@ impl AuditLog {
     /// from the middle). Returns [`AuditError::IntegrityViolation`] describing
     /// the first break found.
     ///
-    /// Note: truncation of the *trailing* records cannot be detected from the
-    /// log alone (the remaining prefix stays internally consistent); any
-    /// mid-file truncation or partial final record is caught here or skipped
-    /// by the reader.
+    /// # Limitations (read before trusting a "verified" log)
+    ///
+    /// - **No external anchor.** The chain is entirely self-contained: an
+    ///   attacker with write access to the log file can rewrite the whole
+    ///   history from genesis (recomputing every hash) and the result will
+    ///   verify cleanly. This method only proves the file is *internally*
+    ///   consistent, not that it is the history that was actually written.
+    ///   Detecting a full rewrite requires an out-of-band anchor (e.g.
+    ///   periodically recording the tip hash on another host); none is built
+    ///   in.
+    /// - **Trailing truncation is invisible.** Removing records from the end
+    ///   leaves a prefix that still verifies; only mid-file truncation or a
+    ///   partial final record is caught here or skipped by the reader.
+    /// - **Rotation bounds continuity.** The first record after a rotation
+    ///   carries the rotated file's tip hash in `prev_hash` (see
+    ///   [`AuditLog::verify_chain`]'s genesis handling and the rotation
+    ///   notes on `rotate`), but this method verifies one file at a time and
+    ///   does not follow that link; a genesis `prev_hash` is accepted
+    ///   without validation since its predecessor file may no longer exist.
     pub fn verify_chain(&self) -> Result<(), AuditError> {
         let records = self.read_chained()?;
 
@@ -259,7 +289,10 @@ impl AuditLog {
             }
 
             // Linkage: prev_hash must point at the previous record's hash.
-            if cr.prev_hash != expected_prev {
+            // The genesis record (i == 0) is exempt: its prev_hash is either
+            // empty (fresh log) or the tip hash of a rotated predecessor
+            // file, which cannot be validated from this file alone.
+            if i > 0 && cr.prev_hash != expected_prev {
                 return Err(AuditError::IntegrityViolation(format!(
                     "record {i} prev_hash does not link to predecessor (reorder/deletion)"
                 )));
@@ -279,6 +312,20 @@ impl AuditLog {
         Ok(())
     }
 
+    /// Rotate the current log out of the way (rename to `<name>.log.1`).
+    ///
+    /// # Limitations
+    ///
+    /// - **Only one generation is kept.** Rotation overwrites any previous
+    ///   `.log.1` file, so history older than one rotation is permanently
+    ///   lost. Archive rotated files externally if long-term retention is
+    ///   required.
+    /// - **The rotated file is orphaned from verification.** After rotation
+    ///   the active log restarts at seq 0. Its first record's `prev_hash`
+    ///   carries the rotated file's tip hash, linking the two chains, but
+    ///   [`AuditLog::verify_chain`] operates on the active file only and does
+    ///   not follow or verify that link — the rotated file must be checked
+    ///   (and the tip compared) out of band.
     fn rotate(&self) -> Result<(), std::io::Error> {
         let rotated = self.path.with_extension("log.1");
         // Simple rotation: move current to .1, overwriting any previous .1
@@ -413,5 +460,36 @@ mod tests {
 
         assert!(dir.path().join("audit.log").exists());
         assert!(dir.path().join("audit.log.1").exists());
+    }
+
+    #[test]
+    fn rotation_carries_tip_hash_and_chain_verifies() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("audit.log");
+        // Tiny max size: every append after the first triggers rotation.
+        let log = AuditLog::new(path.clone(), 1);
+
+        log.append(&sample_record()).unwrap();
+        log.verify_chain().unwrap();
+
+        // Capture the tip of the current file, then trigger rotation.
+        let rotated_tip = {
+            let recs = log.read_chained().unwrap();
+            recs.last().unwrap().record_hash.clone()
+        };
+        log.append(&sample_record()).unwrap();
+
+        // The new active file restarts at seq 0 with prev_hash anchored to
+        // the rotated file's tip, and still verifies.
+        let recs = log.read_chained().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].seq, 0);
+        assert_eq!(recs[0].prev_hash, rotated_tip);
+        assert!(!recs[0].prev_hash.is_empty());
+        log.verify_chain().expect("post-rotation chain should verify");
+
+        // The rotated file remains verifiable on its own.
+        let rotated = AuditLog::new(dir.path().join("audit.log.1"), 0);
+        rotated.verify_chain().expect("rotated file should verify");
     }
 }
