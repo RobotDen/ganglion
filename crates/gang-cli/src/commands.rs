@@ -2837,20 +2837,15 @@ pub async fn relay(
     use gang_libp2p::Libp2pConfig;
 
     // Resolve the identity key path. With --data-dir we persist the relay
-    // identity there and export GANG_KEY_PATH so gang-core's default_key_path
-    // (being taught to honor GANG_KEY_PATH) and any downstream lookups agree.
+    // identity there and plumb the path explicitly into the Libp2pConfig
+    // below — no environment mutation. (GANG_KEY_PATH remains supported for
+    // reads via gang-core's default_key_path, e.g. for `gang identity show`.)
     let key_path = match data_dir {
         Some(dir) => {
             let dir = PathBuf::from(dir);
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("creating data dir {}", dir.display()))?;
-            let kp = dir.join("identity.key");
-            // SAFETY: set before any threads rely on the env var; single-threaded
-            // startup path.
-            unsafe {
-                std::env::set_var("GANG_KEY_PATH", &kp);
-            }
-            kp
+            dir.join("identity.key")
         }
         None => gang_core::identity::default_key_path(),
     };

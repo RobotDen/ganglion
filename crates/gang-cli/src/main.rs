@@ -251,7 +251,8 @@ enum Commands {
         #[arg(long, default_value = "9090")]
         metrics_port: u16,
 
-        /// Directory for the relay's persisted identity key (sets GANG_KEY_PATH).
+        /// Directory for the relay's persisted identity key
+        /// (uses <DATA_DIR>/identity.key).
         /// Without this, the default ~/.gang/identity.key is used.
         #[arg(long, value_name = "PATH")]
         data_dir: Option<String>,
