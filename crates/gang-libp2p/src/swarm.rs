@@ -44,21 +44,40 @@ impl AsRef<str> for GanglionProtocol {
     }
 }
 
+/// An inbound Ganglion request, tagged with the protocol the connection
+/// actually negotiated.
+///
+/// Carrying the negotiated protocol id lets the adapter dispatch each request
+/// to the handler registered for that exact protocol, rather than guessing the
+/// first registered handler (which could feed a `/ganglion/bulk/1.0` payload
+/// to the control handler).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GanglionRequest {
+    /// The protocol id negotiated for this request (e.g. `/ganglion/bulk/1.0`).
+    pub protocol: String,
+    /// The raw request payload.
+    pub payload: Vec<u8>,
+}
+
 #[async_trait::async_trait]
 impl request_response::Codec for GanglionCodec {
     type Protocol = GanglionProtocol;
-    type Request = Vec<u8>;
+    type Request = GanglionRequest;
     type Response = Vec<u8>;
 
     async fn read_request<T>(
         &mut self,
-        _protocol: &Self::Protocol,
+        protocol: &Self::Protocol,
         io: &mut T,
     ) -> std::io::Result<Self::Request>
     where
         T: futures::AsyncRead + Unpin + Send,
     {
-        read_length_prefixed(io).await
+        let payload = read_length_prefixed(io).await?;
+        Ok(GanglionRequest {
+            protocol: protocol.as_ref().to_string(),
+            payload,
+        })
     }
 
     async fn read_response<T>(
@@ -81,7 +100,9 @@ impl request_response::Codec for GanglionCodec {
     where
         T: futures::AsyncWrite + Unpin + Send,
     {
-        write_length_prefixed(io, &req).await
+        // Only the payload goes on the wire; the protocol is negotiated by
+        // multistream-select, not carried in the message body.
+        write_length_prefixed(io, &req.payload).await
     }
 
     async fn write_response<T>(
@@ -372,6 +393,25 @@ mod tests {
         // connection-limits behaviour (the field is non-optional).
         let swarm = build_test_swarm(false, 8).await;
         let _limits = &swarm.behaviour().connection_limits;
+    }
+
+    #[tokio::test]
+    async fn test_codec_read_request_tags_negotiated_protocol() {
+        use request_response::Codec;
+
+        // Encode a payload on the wire (length-prefixed, no protocol on wire).
+        let payload = b"bulk payload".to_vec();
+        let mut wire = Vec::new();
+        write_length_prefixed(&mut wire, &payload).await.unwrap();
+
+        // Read it back as if negotiated on the bulk protocol.
+        let mut codec = GanglionCodec;
+        let proto = GanglionProtocol(gang_core::protocol::PROTOCOL_BULK.to_string());
+        let mut cursor = futures::io::Cursor::new(wire);
+        let req = codec.read_request(&proto, &mut cursor).await.unwrap();
+
+        assert_eq!(req.protocol, gang_core::protocol::PROTOCOL_BULK);
+        assert_eq!(req.payload, payload);
     }
 
     #[tokio::test]

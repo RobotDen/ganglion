@@ -471,11 +471,13 @@ impl SwarmWorker {
                     return;
                 }
 
-                let request_id = self
-                    .swarm
-                    .behaviour_mut()
-                    .ganglion_rpc
-                    .send_request(&libp2p_peer, request);
+                let request_id = self.swarm.behaviour_mut().ganglion_rpc.send_request(
+                    &libp2p_peer,
+                    crate::swarm::GanglionRequest {
+                        protocol: protocol.as_str().to_string(),
+                        payload: request,
+                    },
+                );
                 self.pending_requests.insert(
                     request_id,
                     PendingRequest {
@@ -655,36 +657,32 @@ impl SwarmWorker {
     async fn handle_rpc_message(
         &mut self,
         peer: Libp2pPeerId,
-        message: request_response::Message<Vec<u8>, Vec<u8>>,
+        message: request_response::Message<crate::swarm::GanglionRequest, Vec<u8>>,
     ) {
         match message {
             request_response::Message::Request {
                 request, channel, ..
             } => {
                 let gang_peer_id = libp2p_to_gang_peer_id(&peer);
+                let crate::swarm::GanglionRequest { protocol, payload } = request;
 
                 {
                     let mut peers = self.connected_peers.write().await;
                     if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
                         conn.messages_received += 1;
-                        conn.bytes_received += request.len() as u64;
+                        conn.bytes_received += payload.len() as u64;
                     }
                 }
 
-                // Find a registered handler for a Ganglion protocol. The
-                // request_response behaviour negotiates the protocol, so we
-                // check registered handlers in protocol priority order.
+                // Dispatch by the NEGOTIATED protocol, not the first registered
+                // handler. This ensures a `/ganglion/bulk/1.0` request is never
+                // handed to, say, the control handler.
                 let handlers = self.protocol_handlers.read().await;
-                let handler_protocol = protocol::ALL_PROTOCOLS
-                    .iter()
-                    .find(|p| handlers.contains_key(**p));
+                if let Some(handler) = handlers.get(&protocol) {
+                    debug!(peer = %peer, protocol = %protocol, len = payload.len(), "Incoming RPC request");
 
-                if let Some(&proto) = handler_protocol {
-                    debug!(peer = %peer, protocol = proto, len = request.len(), "Incoming RPC request");
-
-                    let handler = handlers.get(proto).expect("handler present");
                     let response_rx =
-                        serve_request(handler, ProtocolId::new(proto), gang_peer_id, request);
+                        serve_request(handler, ProtocolId::new(protocol), gang_peer_id, payload);
                     drop(handlers);
 
                     let command_tx = self.command_tx.clone();
@@ -698,7 +696,7 @@ impl SwarmWorker {
                             .await;
                     });
                 } else {
-                    debug!(peer = %peer, "No handler registered, sending empty response");
+                    debug!(peer = %peer, protocol = %protocol, "No handler registered for protocol, sending empty response");
                     drop(handlers);
                     let _ = self
                         .swarm
@@ -762,22 +760,24 @@ fn serve_request(
 ) -> oneshot::Receiver<Vec<u8>> {
     let (response_data_tx, response_data_rx) = oneshot::channel::<Vec<u8>>();
 
-    // Create a duplex stream for the handler.
-    let (client_read, server_write) = tokio::io::duplex(64 * 1024);
-    let (server_read, mut client_write) = tokio::io::duplex(64 * 1024);
+    // Two independent pipes: one carries the request to the handler, the other
+    // carries the handler's response back. The handler's stream reads the
+    // request pipe and writes the response pipe.
+    let (mut request_writer, request_reader) = tokio::io::duplex(64 * 1024);
+    let (response_reader, response_writer) = tokio::io::duplex(64 * 1024);
 
-    // Write the request data into the read side for the handler.
+    // Feed the request payload to the handler.
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
-        let _ = client_write.write_all(&payload).await;
-        let _ = client_write.shutdown().await;
+        let _ = request_writer.write_all(&payload).await;
+        let _ = request_writer.shutdown().await;
     });
 
     // Collect the handler's response.
     tokio::spawn(async move {
         use tokio::io::AsyncReadExt;
+        let mut reader = response_reader;
         let mut buf = Vec::new();
-        let mut reader = server_read;
         let _ = reader.read_to_end(&mut buf).await;
         let _ = response_data_tx.send(buf);
     });
@@ -785,7 +785,7 @@ fn serve_request(
     let stream = GanglionStream {
         protocol,
         remote_peer,
-        inner: Box::new(merge_rw(client_read, server_write)),
+        inner: Box::new(merge_rw(request_reader, response_writer)),
     };
 
     tokio::spawn(handler(stream));
@@ -1082,6 +1082,49 @@ mod tests {
         assert_eq!(caps.transports.len(), 2);
         assert!(caps.transports.contains(&"tcp".to_string()));
         assert!(caps.transports.contains(&"quic".to_string()));
+    }
+
+    /// A handler that drains the request and responds with a fixed tag, so a
+    /// test can tell which registered handler actually ran.
+    fn tag_handler(tag: &'static [u8]) -> StreamHandler {
+        Box::new(move |mut stream| {
+            Box::pin(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let _ = stream.inner.read_to_end(&mut buf).await;
+                let _ = stream.inner.write_all(tag).await;
+                let _ = stream.inner.shutdown().await;
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn test_inbound_dispatch_uses_negotiated_protocol() {
+        use gang_core::protocol::{ALL_PROTOCOLS, PROTOCOL_BULK, PROTOCOL_CONTROL};
+
+        // The control protocol is first in ALL_PROTOCOLS, so the previous
+        // "first registered handler" logic would always have picked it.
+        assert_eq!(ALL_PROTOCOLS[0], PROTOCOL_CONTROL);
+
+        let mut handlers: HashMap<String, StreamHandler> = HashMap::new();
+        handlers.insert(PROTOCOL_CONTROL.to_string(), tag_handler(b"control"));
+        handlers.insert(PROTOCOL_BULK.to_string(), tag_handler(b"bulk"));
+
+        // A request negotiated on the bulk protocol must be served by the bulk
+        // handler, not the control handler.
+        let negotiated = PROTOCOL_BULK.to_string();
+        let handler = handlers.get(&negotiated).expect("bulk handler present");
+        let rx = serve_request(
+            handler,
+            ProtocolId::new(negotiated),
+            PeerId::new("12D3-peer"),
+            b"request".to_vec(),
+        );
+        let response = rx.await.unwrap();
+        assert_eq!(
+            response, b"bulk",
+            "bulk request was dispatched to the wrong handler"
+        );
     }
 
     #[tokio::test(start_paused = true)]
