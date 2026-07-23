@@ -7,6 +7,12 @@ This demonstrates the Go capability authoring pathway for Ganglion,
 proving the platform supports a fourth language beyond Rust, C++,
 and Python.
 
+> **WIP:** The Go component build (`make component` via TinyGo) is
+> experimental. TinyGo's `wasip2` target and component tooling are still
+> maturing, and the WIT bindings/WASI-adapter step may need adjustment for your
+> TinyGo version (see the note in the authoring guide). The native `make test`
+> path works today and is the reliable way to exercise the logic.
+
 The canonical logic lives in the Rust crate at
 `crates/gang-capability-canary-probe/`.
 
@@ -56,4 +62,4 @@ The `main()` function runs with sample data for testing. In the
 WASM component, the `Run()` function registered via `init()` serves
 as the entry point.
 
-See `docs/CAPABILITY_AUTHOR_GUIDE.md` for the full authoring guide.
+See `../../docs/CAPABILITY_AUTHOR_GUIDE.md` for the full authoring guide.

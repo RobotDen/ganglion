@@ -43,4 +43,4 @@ The `GanglionCapability` class in `app.py` implements the
 `componentize-py`, it can import Ganglion host interfaces (e.g.,
 `logs-stream`) and is called by the robot agent's runtime.
 
-See `docs/CAPABILITY_AUTHOR_GUIDE.md` for the full authoring guide.
+See `../../docs/CAPABILITY_AUTHOR_GUIDE.md` for the full authoring guide.

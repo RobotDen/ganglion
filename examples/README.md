@@ -11,14 +11,14 @@ in `crates/`, but using the language-specific toolchain:
 |-----------|-----------|----------|-----------|
 | `python/` | log-normalize | Python | componentize-py |
 | `cpp/` | topic-echo | C++ | wasi-sdk + wit-bindgen |
-| `go/` | canary-probe | Go | TinyGo |
+| `go/` | canary-probe | Go | TinyGo (component build WIP — see `go/README.md`) |
 
 ## Prerequisites
 
 Each example has its own prerequisites. See the README in each directory.
 All examples require:
 
-1. The Ganglion WIT file — copy from `crates/gang-wasm-host/wit/ganglion.wit`
+1. The Ganglion WIT file — copy from `../crates/gang-wasm-host/wit/ganglion.wit`
    into each example's `wit/` directory.
 2. `gang` CLI — for signing and deploying the built components.
 3. `wasm-tools` — `cargo install wasm-tools` (except Python, which uses
@@ -43,4 +43,4 @@ and deployment. This requires the language-specific WASM toolchain:
 - **C++**: wasi-sdk v26+ (`export WASI_SDK_PATH=...`)
 - **Go**: TinyGo 0.34.0+
 
-See `docs/CAPABILITY_AUTHOR_GUIDE.md` for complete authoring instructions.
+See `../docs/CAPABILITY_AUTHOR_GUIDE.md` for complete authoring instructions.

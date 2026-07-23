@@ -56,4 +56,4 @@ captured messages as JSON.
 The `STANDALONE_TEST` build mode demonstrates the algorithm without
 WIT bindings by running sample data through the decimation logic.
 
-See `docs/CAPABILITY_AUTHOR_GUIDE.md` for the full authoring guide.
+See `../../docs/CAPABILITY_AUTHOR_GUIDE.md` for the full authoring guide.
