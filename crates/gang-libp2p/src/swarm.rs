@@ -1,8 +1,10 @@
 use std::time::Duration;
 
 use libp2p::{
-    Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder, dcutr, identify, kad, noise, ping,
-    relay, request_response, swarm::NetworkBehaviour, tcp, yamux,
+    Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder, connection_limits, dcutr, identify, kad,
+    noise, ping, relay, request_response,
+    swarm::{NetworkBehaviour, behaviour::toggle::Toggle},
+    tcp, yamux,
 };
 use tracing::{debug, info};
 
@@ -16,7 +18,11 @@ pub struct GanglionBehaviour {
     pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
     pub relay_client: relay::client::Behaviour,
     pub dcutr: dcutr::Behaviour,
-    pub relay_server: relay::Behaviour,
+    /// Circuit-relay v2 server. Disabled (no-op) unless `config.relay_server`
+    /// is set, so client robots never relay traffic for arbitrary peers.
+    pub relay_server: Toggle<relay::Behaviour>,
+    /// Enforces `config.max_inbound_connections` on established inbound links.
+    pub connection_limits: connection_limits::Behaviour,
     pub ganglion_rpc: request_response::Behaviour<GanglionCodec>,
 }
 
@@ -213,8 +219,23 @@ pub async fn build_swarm(
             // DCUtR: direct connection upgrade through relay
             let dcutr = dcutr::Behaviour::new(local_peer_id);
 
-            // Relay server: circuit relay v2 for other peers
-            let relay_server = relay::Behaviour::new(local_peer_id, relay::Config::default());
+            // Relay server: circuit relay v2 for other peers. Only enabled when
+            // this node is explicitly configured as a relay; otherwise a
+            // disabled Toggle is installed so we never relay for arbitrary peers.
+            let relay_server: Toggle<relay::Behaviour> = if config.relay_server {
+                Toggle::from(Some(relay::Behaviour::new(
+                    local_peer_id,
+                    relay::Config::default(),
+                )))
+            } else {
+                Toggle::from(None)
+            };
+
+            // Enforce the configured inbound connection ceiling.
+            let connection_limits = connection_limits::Behaviour::new(
+                connection_limits::ConnectionLimits::default()
+                    .with_max_established_incoming(Some(config.max_inbound_connections)),
+            );
 
             // Ganglion request/response protocols
             let ganglion_rpc = request_response::Behaviour::with_codec(
@@ -230,6 +251,7 @@ pub async fn build_swarm(
                 relay_client,
                 dcutr,
                 relay_server,
+                connection_limits,
                 ganglion_rpc,
             })
         })?
@@ -308,6 +330,49 @@ fn extract_peer_id(addr: &Multiaddr) -> Option<Libp2pPeerId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn build_test_swarm(relay_server: bool, max_inbound: u32) -> Swarm<GanglionBehaviour> {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let key_path = tmpdir.path().join("test.key");
+        gang_core::identity::Keypair::generate()
+            .save(&key_path)
+            .unwrap();
+        let config = Libp2pConfig {
+            key_path: key_path.clone(),
+            listen_addrs: vec![],
+            relay_server,
+            max_inbound_connections: max_inbound,
+            ..Default::default()
+        };
+        let secret = load_ed25519_secret(&key_path).unwrap();
+        build_swarm(&config, secret).await.unwrap().0
+    }
+
+    #[tokio::test]
+    async fn test_relay_server_disabled_by_default() {
+        let swarm = build_test_swarm(false, 64).await;
+        assert!(
+            !swarm.behaviour().relay_server.is_enabled(),
+            "relay server must be disabled unless config.relay_server is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_relay_server_enabled_when_configured() {
+        let swarm = build_test_swarm(true, 64).await;
+        assert!(
+            swarm.behaviour().relay_server.is_enabled(),
+            "relay server should be enabled when config.relay_server is true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connection_limits_present() {
+        // Building with a custom inbound ceiling must succeed and wire in the
+        // connection-limits behaviour (the field is non-optional).
+        let swarm = build_test_swarm(false, 8).await;
+        let _limits = &swarm.behaviour().connection_limits;
+    }
 
     #[tokio::test]
     async fn test_length_prefixed_roundtrip() {
