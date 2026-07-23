@@ -150,6 +150,8 @@ pub struct ArtifactStore {
     index: HashMap<Cid, ArtifactMeta>,
     /// Total bytes used.
     total_bytes: u64,
+    /// Number of times the index has been written to disk (observability/tests).
+    persist_count: std::cell::Cell<u64>,
 }
 
 impl ArtifactStore {
@@ -177,6 +179,7 @@ impl ArtifactStore {
             config,
             index,
             total_bytes,
+            persist_count: std::cell::Cell::new(0),
         })
     }
 
@@ -195,7 +198,9 @@ impl ArtifactStore {
             return Ok(cid);
         }
 
-        // Evict if necessary
+        // Evict if necessary. Each eviction deletes files but does not rewrite
+        // the index; the single persist_index() at the end of store() covers
+        // the whole batch (see CODE-18).
         while self.config.max_size_bytes > 0
             && self.total_bytes + data.len() as u64 > self.config.max_size_bytes
         {
@@ -285,10 +290,12 @@ impl ArtifactStore {
             data
         };
 
-        // Update last_accessed after reading
+        // Update last_accessed after reading and persist it so LRU ordering
+        // survives a restart (CODE-18).
         if let Some(meta) = self.index.get_mut(cid) {
             meta.last_accessed = SystemTime::now();
         }
+        self.persist_index()?;
 
         Ok(data)
     }
@@ -310,6 +317,18 @@ impl ArtifactStore {
 
     /// Remove an artifact by CID.
     pub fn remove(&mut self, cid: &Cid) -> Result<bool, std::io::Error> {
+        let removed = self.remove_without_persist(cid)?;
+        if removed {
+            self.persist_index()?;
+        }
+        Ok(removed)
+    }
+
+    /// Remove an artifact's data files and index entry without rewriting the
+    /// on-disk index. Callers are responsible for persisting afterwards; used
+    /// by the eviction loop so a batch of evictions produces a single index
+    /// write.
+    fn remove_without_persist(&mut self, cid: &Cid) -> Result<bool, std::io::Error> {
         if let Some(meta) = self.index.remove(cid) {
             self.total_bytes = self.total_bytes.saturating_sub(meta.size);
 
@@ -325,7 +344,6 @@ impl ArtifactStore {
                 }
             }
 
-            self.persist_index()?;
             Ok(true)
         } else {
             Ok(false)
@@ -343,6 +361,9 @@ impl ArtifactStore {
     }
 
     /// Evict the least recently accessed artifact.
+    ///
+    /// Does not persist the index; the caller (the store() eviction loop)
+    /// persists once after the whole batch (CODE-18).
     fn evict_lru(&mut self) -> Result<bool, std::io::Error> {
         let lru_cid = self
             .index
@@ -351,7 +372,7 @@ impl ArtifactStore {
             .map(|(cid, _)| cid.clone());
 
         if let Some(cid) = lru_cid {
-            self.remove(&cid)?;
+            self.remove_without_persist(&cid)?;
             Ok(true)
         } else {
             Ok(false)
@@ -373,7 +394,16 @@ impl ArtifactStore {
     fn persist_index(&self) -> Result<(), std::io::Error> {
         let entries: Vec<&ArtifactMeta> = self.index.values().collect();
         let json = serde_json::to_string_pretty(&entries).map_err(std::io::Error::other)?;
-        std::fs::write(self.config.store_dir.join("index.json"), json)
+        std::fs::write(self.config.store_dir.join("index.json"), json)?;
+        self.persist_count.set(self.persist_count.get() + 1);
+        Ok(())
+    }
+
+    /// Number of times the index has been written to disk since this store
+    /// handle was opened.
+    #[cfg(test)]
+    fn persist_count(&self) -> u64 {
+        self.persist_count.get()
     }
 }
 
@@ -513,6 +543,68 @@ mod tests {
         // cid1 should have been evicted
         assert!(!store.contains(&cid1));
         assert!(store.contains(&cid2));
+    }
+
+    #[test]
+    fn eviction_rewrites_index_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ArtifactStore::open(ArtifactStoreConfig {
+            store_dir: dir.path().to_path_buf(),
+            max_size_bytes: 100,
+            chunk_size: 1024,
+        })
+        .unwrap();
+
+        // Fill the store with several small artifacts (no eviction yet).
+        store.store(&vec![1u8; 30], None, None, None).unwrap();
+        store.store(&vec![2u8; 30], None, None, None).unwrap();
+        store.store(&vec![3u8; 30], None, None, None).unwrap();
+        assert_eq!(store.count(), 3);
+
+        // Now store a large artifact that forces evicting multiple entries.
+        let before = store.persist_count();
+        store.store(&vec![9u8; 90], None, None, None).unwrap();
+        let after = store.persist_count();
+
+        // The whole store() call (multiple evictions + insert) rewrites the
+        // index exactly once.
+        assert_eq!(after - before, 1, "expected a single index write");
+        // Some older entries were evicted to make room.
+        assert!(store.count() < 4);
+    }
+
+    #[test]
+    fn last_accessed_persists_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let (cid_a, cid_b) = {
+            let mut store = ArtifactStore::open(ArtifactStoreConfig {
+                store_dir: dir.path().to_path_buf(),
+                max_size_bytes: 200,
+                chunk_size: 1024,
+            })
+            .unwrap();
+            let a = store.store(&vec![1u8; 50], None, None, None).unwrap();
+            let b = store.store(&vec![2u8; 50], None, None, None).unwrap();
+            // Access A so it becomes most-recently-used; this must persist.
+            let _ = store.retrieve(&a).unwrap();
+            (a, b)
+        };
+
+        // Reopen (fresh handle, index loaded from disk).
+        let mut store = ArtifactStore::open(ArtifactStoreConfig {
+            store_dir: dir.path().to_path_buf(),
+            max_size_bytes: 200,
+            chunk_size: 1024,
+        })
+        .unwrap();
+
+        // Store an artifact forcing a single eviction; B (older access) should
+        // go, A should survive — proving last_accessed was persisted before
+        // restart.
+        store.store(&vec![3u8; 120], None, None, None).unwrap();
+        assert!(store.contains(&cid_a), "A was accessed last and should survive");
+        assert!(!store.contains(&cid_b), "B was least-recently-used and should be evicted");
     }
 
     #[test]
