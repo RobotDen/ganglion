@@ -1,3 +1,5 @@
+use std::io::{Seek, SeekFrom};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -64,7 +66,16 @@ impl CapabilityBroker for LogStreamBroker {
             } => {
                 self.check_source_allowed(source)?;
 
-                let lines = read_log_source(source, pattern);
+                // CODE-10: the journald subprocess and file tail-read are
+                // blocking — run them off the async executor.
+                let source = source.clone();
+                let pattern = pattern.clone();
+                let lines = tokio::task::spawn_blocking(move || read_log_source(&source, &pattern))
+                    .await
+                    .map_err(|e| BrokerError::Unavailable {
+                        broker: "logs".into(),
+                        reason: format!("log read task failed: {e}"),
+                    })?;
                 let data = serde_json::to_vec(&lines).map_err(|e| BrokerError::Unavailable {
                     broker: "logs".into(),
                     reason: e.to_string(),
@@ -168,6 +179,17 @@ fn read_log_source(source: &str, pattern: &str) -> Vec<LogLine> {
     }
 }
 
+/// Number of trailing lines returned by a log read.
+const TAIL_LINES: usize = 100;
+
+/// Maximum bytes read from the end of a log file. Bounds memory regardless of
+/// file size (CODE-10) — we never read the whole file.
+const MAX_TAIL_BYTES: u64 = 1024 * 1024;
+
+/// Read the tail of the journal.
+///
+/// Lines are returned in chronological order (oldest first), matching
+/// `journalctl`'s natural `-n` output and the file reader below.
 fn read_journald(pattern: &str) -> Vec<LogLine> {
     let output = std::process::Command::new("journalctl")
         .args(["--no-pager", "-n", "100", "--output=short-iso"])
@@ -190,25 +212,51 @@ fn read_journald(pattern: &str) -> Vec<LogLine> {
     }
 }
 
+/// Read the last [`TAIL_LINES`] lines of a log file without loading the whole
+/// file into memory (CODE-10): seek to at most [`MAX_TAIL_BYTES`] before the
+/// end and read forward from there.
+///
+/// Lines are returned in chronological order (oldest first), consistent with
+/// [`read_journald`].
 fn read_log_file(path: &str, pattern: &str) -> Vec<LogLine> {
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            // Read last 100 lines
-            content
-                .lines()
-                .rev()
-                .take(100)
-                .filter(|line| pattern.is_empty() || line.contains(pattern))
-                .map(|line| LogLine {
-                    timestamp: "".into(),
-                    source: path.into(),
-                    level: "info".into(),
-                    message: line.into(),
-                })
-                .collect()
-        }
-        Err(_) => Vec::new(),
+    use std::io::Read;
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(meta) = file.metadata() else {
+        return Vec::new();
+    };
+    let len = meta.len();
+    let read_len = len.min(MAX_TAIL_BYTES);
+    let start = len - read_len;
+
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
     }
+    let mut buf = Vec::with_capacity(read_len as usize);
+    if file.take(read_len).read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.lines().collect();
+    // If we started mid-file, the first line is likely a truncated fragment.
+    if start > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    // Keep the last TAIL_LINES, preserving chronological (oldest-first) order.
+    let tail_start = lines.len().saturating_sub(TAIL_LINES);
+    lines[tail_start..]
+        .iter()
+        .filter(|line| pattern.is_empty() || line.contains(pattern))
+        .map(|line| LogLine {
+            timestamp: "".into(),
+            source: path.into(),
+            level: "info".into(),
+            message: (*line).into(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -232,6 +280,41 @@ mod tests {
         };
         let resp = broker.handle_request(req).await.unwrap();
         assert!(resp.success);
+    }
+
+    #[test]
+    fn read_log_file_tails_in_chronological_order() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("big.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Write 500 numbered lines; only the last 100 should come back.
+        for i in 0..500 {
+            writeln!(f, "line {i}").unwrap();
+        }
+        f.flush().unwrap();
+
+        let lines = read_log_file(path.to_str().unwrap(), "");
+        assert_eq!(lines.len(), TAIL_LINES);
+        // Oldest-first: first returned line is 400, last is 499.
+        assert_eq!(lines.first().unwrap().message, "line 400");
+        assert_eq!(lines.last().unwrap().message, "line 499");
+    }
+
+    #[test]
+    fn read_log_file_filters_by_pattern() {
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("f.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "info: all good").unwrap();
+        writeln!(f, "ERROR: boom").unwrap();
+        writeln!(f, "info: fine").unwrap();
+        f.flush().unwrap();
+
+        let lines = read_log_file(path.to_str().unwrap(), "ERROR");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].message, "ERROR: boom");
     }
 
     #[tokio::test]
