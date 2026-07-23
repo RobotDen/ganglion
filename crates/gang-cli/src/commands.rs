@@ -1953,7 +1953,7 @@ pub async fn push_artifact(
         ..Default::default()
     })?;
 
-    let data = std::fs::read(path)?;
+    let data = std::fs::read(path).with_context(|| format!("reading {path}"))?;
     let filename = Path::new(path).file_name().and_then(|n| n.to_str());
 
     let cid = store.store(&data, filename, None, content_type)?;
