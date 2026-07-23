@@ -73,6 +73,9 @@ pub enum AuditError {
 
     #[error("audit log corrupted: {0}")]
     Corrupted(String),
+
+    #[error("audit chain integrity violation: {0}")]
+    IntegrityViolation(String),
 }
 
 #[derive(Debug, Error)]
