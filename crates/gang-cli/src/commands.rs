@@ -1884,10 +1884,10 @@ fn print_diagnostics(val: &serde_json::Value) {
         if let Some(cpus) = sys.get("cpu_count").and_then(|v| v.as_u64()) {
             println!("  CPUs:      {cpus}");
         }
-        if let Some(mem) = sys.get("memory_total_bytes").and_then(|v| v.as_u64()) {
-            if mem > 0 {
-                println!("  Memory:    {} GB", mem / (1024 * 1024 * 1024));
-            }
+        if let Some(mem) = sys.get("memory_total_bytes").and_then(|v| v.as_u64())
+            && mem > 0
+        {
+            println!("  Memory:    {} GB", mem / (1024 * 1024 * 1024));
         }
         if let Some(uptime) = sys.get("uptime_secs").and_then(|v| v.as_u64()) {
             let hours = uptime / 3600;
@@ -1900,30 +1900,30 @@ fn print_diagnostics(val: &serde_json::Value) {
         println!();
     }
 
-    if let Some(net) = val.get("network") {
-        if let Some(interfaces) = net.get("interfaces").and_then(|v| v.as_array()) {
-            println!("Network Interfaces:");
-            for iface in interfaces {
-                let name = iface.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                let up = iface
-                    .get("is_up")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let status = if up { "UP" } else { "DOWN" };
-                let addrs = iface
-                    .get("addresses")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                println!("  {name} ({status}): {addrs}");
-            }
-            println!();
+    if let Some(net) = val.get("network")
+        && let Some(interfaces) = net.get("interfaces").and_then(|v| v.as_array())
+    {
+        println!("Network Interfaces:");
+        for iface in interfaces {
+            let name = iface.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let up = iface
+                .get("is_up")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let status = if up { "UP" } else { "DOWN" };
+            let addrs = iface
+                .get("addresses")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            println!("  {name} ({status}): {addrs}");
         }
+        println!();
     }
 
     if let Some(procs) = val.get("processes").and_then(|v| v.as_array()) {
