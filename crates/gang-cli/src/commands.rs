@@ -29,14 +29,33 @@ impl OperatorConfig {
         Self::load_from(&path)
     }
 
-    /// Load config from a specific path. Returns defaults if file is missing.
+    /// Load config from a specific path. Returns defaults if the file is
+    /// missing (silent). A present-but-malformed config is surfaced as a
+    /// warning on stderr and then falls back to defaults, rather than being
+    /// silently discarded.
     pub fn load_from(path: &Path) -> Self {
         if !path.exists() {
             return Self::default();
         }
         match std::fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Ok(contents) => match toml::from_str(&contents) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!(
+                        "warning: ignoring malformed config at {} ({e}); using defaults. \
+                         Fix the file or run `gang config init --force`.",
+                        path.display()
+                    );
+                    Self::default()
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "warning: could not read config at {} ({e}); using defaults.",
+                    path.display()
+                );
+                Self::default()
+            }
         }
     }
 
