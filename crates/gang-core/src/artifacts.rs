@@ -102,6 +102,13 @@ pub struct ArtifactMeta {
     /// When this artifact was stored locally.
     pub stored_at: SystemTime,
     /// When this artifact was last accessed.
+    ///
+    /// Approximate-LRU tradeoff: this is updated in memory on every retrieve
+    /// but persisted lazily — at most once per [`FLUSH_EVERY`] retrieves, or
+    /// whenever a mutation (`store`/`evict`/`remove`) rewrites the index, or
+    /// on [`ArtifactStore::flush`]/drop. A crash can therefore lose the most
+    /// recent access-time updates, which only degrades LRU eviction ordering
+    /// after restart, never data integrity.
     pub last_accessed: SystemTime,
     /// MIME type (if known).
     pub content_type: Option<String>,
@@ -152,7 +159,21 @@ pub struct ArtifactStore {
     total_bytes: u64,
     /// Number of times the index has been written to disk (observability/tests).
     persist_count: std::cell::Cell<u64>,
+    /// Whether the in-memory index has changes not yet written to disk
+    /// (currently only `last_accessed` updates from retrieves; mutations
+    /// persist immediately).
+    index_dirty: std::cell::Cell<bool>,
+    /// Retrieves since the index was last persisted, for throttling.
+    retrieves_since_persist: std::cell::Cell<u32>,
 }
+
+/// Persist the index at most once per this many retrieves.
+///
+/// Retrieves only touch `last_accessed`, so rewriting the whole JSON index on
+/// every read is wasted I/O; batching up to this many access-time updates
+/// bounds the loss on crash to an LRU-ordering approximation (see
+/// [`ArtifactMeta::last_accessed`]).
+pub const FLUSH_EVERY: u32 = 64;
 
 impl ArtifactStore {
     /// Open or create an artifact store at the given directory.
@@ -180,6 +201,8 @@ impl ArtifactStore {
             index,
             total_bytes,
             persist_count: std::cell::Cell::new(0),
+            index_dirty: std::cell::Cell::new(false),
+            retrieves_since_persist: std::cell::Cell::new(0),
         })
     }
 
@@ -266,6 +289,11 @@ impl ArtifactStore {
     }
 
     /// Retrieve an artifact by CID.
+    ///
+    /// Updates the artifact's `last_accessed` time in memory on every call,
+    /// but persists the index at most once per [`FLUSH_EVERY`] retrieves (the
+    /// next mutation or [`ArtifactStore::flush`] also writes it). See
+    /// [`ArtifactMeta::last_accessed`] for the LRU-approximation tradeoff.
     pub fn retrieve(&mut self, cid: &Cid) -> Result<Vec<u8>, std::io::Error> {
         let meta = self.index.get(cid).ok_or_else(|| {
             std::io::Error::new(
@@ -290,14 +318,31 @@ impl ArtifactStore {
             data
         };
 
-        // Update last_accessed after reading and persist it so LRU ordering
-        // survives a restart (CODE-18).
+        // Update last_accessed in memory always; persist lazily (dirty flag +
+        // throttle) so a read does not rewrite the whole JSON index each time.
         if let Some(meta) = self.index.get_mut(cid) {
             meta.last_accessed = SystemTime::now();
         }
-        self.persist_index()?;
+        self.index_dirty.set(true);
+        self.retrieves_since_persist
+            .set(self.retrieves_since_persist.get() + 1);
+        if self.retrieves_since_persist.get() >= FLUSH_EVERY {
+            self.persist_index()?;
+        }
 
         Ok(data)
+    }
+
+    /// Write any pending in-memory index changes (e.g. batched
+    /// `last_accessed` updates from retrieves) to disk. No-op when clean.
+    ///
+    /// Also invoked best-effort on drop, so access times survive a normal
+    /// close; only a crash can lose the most recent access-time updates.
+    pub fn flush(&self) -> Result<(), std::io::Error> {
+        if self.index_dirty.get() {
+            self.persist_index()?;
+        }
+        Ok(())
     }
 
     /// Check if an artifact exists.
@@ -396,6 +441,8 @@ impl ArtifactStore {
         let json = serde_json::to_string_pretty(&entries).map_err(std::io::Error::other)?;
         std::fs::write(self.config.store_dir.join("index.json"), json)?;
         self.persist_count.set(self.persist_count.get() + 1);
+        self.index_dirty.set(false);
+        self.retrieves_since_persist.set(0);
         Ok(())
     }
 
@@ -404,6 +451,13 @@ impl ArtifactStore {
     #[cfg(test)]
     fn persist_count(&self) -> u64 {
         self.persist_count.get()
+    }
+}
+
+impl Drop for ArtifactStore {
+    /// Best-effort flush of batched access-time updates on close.
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 
@@ -586,8 +640,10 @@ mod tests {
             .unwrap();
             let a = store.store(&[1u8; 50], None, None, None).unwrap();
             let b = store.store(&[2u8; 50], None, None, None).unwrap();
-            // Access A so it becomes most-recently-used; this must persist.
+            // Access A so it becomes most-recently-used, then flush so the
+            // batched access-time update reaches disk before "restart".
             let _ = store.retrieve(&a).unwrap();
+            store.flush().unwrap();
             (a, b)
         };
 
@@ -610,6 +666,66 @@ mod tests {
         assert!(
             !store.contains(&cid_b),
             "B was least-recently-used and should be evicted"
+        );
+    }
+
+    #[test]
+    fn retrieve_does_not_rewrite_index_per_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = test_store(dir.path());
+        let cid = store.store(b"read me", None, None, None).unwrap();
+
+        let before = store.persist_count();
+        // A handful of reads: no index writes at all (dirty flag only).
+        for _ in 0..5 {
+            let _ = store.retrieve(&cid).unwrap();
+        }
+        assert_eq!(store.persist_count(), before, "reads must not persist");
+
+        // Explicit flush writes the batched update exactly once...
+        store.flush().unwrap();
+        assert_eq!(store.persist_count(), before + 1);
+        // ...and a flush with nothing pending is a no-op.
+        store.flush().unwrap();
+        assert_eq!(store.persist_count(), before + 1);
+    }
+
+    #[test]
+    fn retrieve_persists_after_flush_every_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = test_store(dir.path());
+        let cid = store.store(b"hot artifact", None, None, None).unwrap();
+
+        let before = store.persist_count();
+        for _ in 0..FLUSH_EVERY {
+            let _ = store.retrieve(&cid).unwrap();
+        }
+        assert_eq!(
+            store.persist_count(),
+            before + 1,
+            "throttled persistence: exactly one write per FLUSH_EVERY reads"
+        );
+    }
+
+    #[test]
+    fn drop_flushes_pending_access_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let cid = {
+            let mut store = test_store(dir.path());
+            let cid = store.store(b"dropped", None, None, None).unwrap();
+            let _ = store.retrieve(&cid).unwrap();
+            cid
+            // store dropped here with a dirty index -> best-effort flush
+        };
+
+        let index_json =
+            std::fs::read_to_string(dir.path().join("index.json")).expect("index exists");
+        let entries: Vec<ArtifactMeta> = serde_json::from_str(&index_json).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cid, cid);
+        assert!(
+            entries[0].last_accessed >= entries[0].stored_at,
+            "flushed last_accessed should reflect the retrieve"
         );
     }
 
