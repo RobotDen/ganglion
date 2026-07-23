@@ -166,10 +166,11 @@ impl CapabilityBroker for FsBroker {
             BrokerOperation::FsStat { ref path } => {
                 let canonical = self.check_access(path, false)?;
 
-                let metadata =
-                    std::fs::symlink_metadata(&canonical).map_err(|e| BrokerError::Unavailable {
-                    broker: "fs".into(),
-                    reason: e.to_string(),
+                let metadata = std::fs::symlink_metadata(&canonical).map_err(|e| {
+                    BrokerError::Unavailable {
+                        broker: "fs".into(),
+                        reason: e.to_string(),
+                    }
                 })?;
 
                 let stat = FileStat {

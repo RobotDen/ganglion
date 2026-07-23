@@ -77,12 +77,11 @@ impl ProcessBroker {
         // Canonicalize (resolve symlinks and `..`) so the allowlist is matched
         // against the real executable, not an alias or traversal that points
         // at a different binary.
-        let canonical =
-            std::fs::canonicalize(command).map_err(|e| BrokerError::AccessDenied {
-                broker: "process".into(),
-                resource: command.into(),
-                reason: format!("cannot resolve command path: {e}"),
-            })?;
+        let canonical = std::fs::canonicalize(command).map_err(|e| BrokerError::AccessDenied {
+            broker: "process".into(),
+            resource: command.into(),
+            reason: format!("cannot resolve command path: {e}"),
+        })?;
         let canonical_str = canonical.to_string_lossy().to_string();
 
         if !self.is_command_allowed(&canonical_str) {
@@ -306,13 +305,19 @@ mod tests {
             .await
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(!stdout.contains("LD_PRELOAD"), "LD_PRELOAD leaked: {stdout}");
+        assert!(
+            !stdout.contains("LD_PRELOAD"),
+            "LD_PRELOAD leaked: {stdout}"
+        );
         assert!(
             !stdout.contains("LD_LIBRARY_PATH"),
             "LD_LIBRARY_PATH leaked: {stdout}"
         );
         assert!(!stdout.contains("/tmp/attacker"), "PATH override leaked");
-        assert!(stdout.contains(&format!("PATH={SAFE_PATH}")), "safe PATH missing");
+        assert!(
+            stdout.contains(&format!("PATH={SAFE_PATH}")),
+            "safe PATH missing"
+        );
         assert!(stdout.contains("SAFE_VAR=kept"), "benign var dropped");
     }
 

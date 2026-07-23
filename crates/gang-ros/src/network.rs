@@ -472,8 +472,14 @@ mod tests {
     fn ip_in_cidr_matching() {
         assert!(ip_in_cidr(&"10.1.2.3".parse().unwrap(), "10.0.0.0/8"));
         assert!(!ip_in_cidr(&"11.1.2.3".parse().unwrap(), "10.0.0.0/8"));
-        assert!(ip_in_cidr(&"192.168.1.5".parse().unwrap(), "192.168.0.0/16"));
-        assert!(!ip_in_cidr(&"192.169.1.5".parse().unwrap(), "192.168.0.0/16"));
+        assert!(ip_in_cidr(
+            &"192.168.1.5".parse().unwrap(),
+            "192.168.0.0/16"
+        ));
+        assert!(!ip_in_cidr(
+            &"192.169.1.5".parse().unwrap(),
+            "192.168.0.0/16"
+        ));
         assert!(ip_in_cidr(&"fd00::5".parse().unwrap(), "fd00::/8"));
         // Family mismatch and malformed inputs.
         assert!(!ip_in_cidr(&"10.0.0.1".parse().unwrap(), "fd00::/8"));
