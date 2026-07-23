@@ -36,9 +36,16 @@ impl FsBroker {
     fn check_access(&self, path: &str, needs_write: bool) -> Result<String, BrokerError> {
         // Resolve to canonical path to prevent symlink jailbreak
         let canonical = if Path::new(path).exists() {
+            // An existing path must canonicalize cleanly; falling back to the
+            // raw caller string here would let an uncanonicalizable path be
+            // pattern-matched (and then operated on) unresolved (SEC-10).
             std::fs::canonicalize(path)
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.to_string())
+                .map_err(|_| BrokerError::AccessDenied {
+                    broker: "fs".into(),
+                    resource: path.into(),
+                    reason: "path could not be canonicalized".into(),
+                })?
         } else {
             // For writes to new files, canonicalize the parent directory
             // and rejoin with the filename to prevent traversal attacks.
@@ -59,10 +66,24 @@ impl FsBroker {
                     resource: path.into(),
                     reason: "parent directory does not exist".into(),
                 })?;
-            canonical_parent
-                .join(filename)
-                .to_string_lossy()
-                .to_string()
+            let joined = canonical_parent.join(filename);
+
+            // SEC-10: `exists()` follows symlinks, so a DANGLING symlink at
+            // the final component lands in this branch — and a subsequent
+            // fs::write would follow it out of the jail. Reject any symlink
+            // at the final component regardless of where (or whether) its
+            // target resolves.
+            if let Ok(meta) = std::fs::symlink_metadata(&joined) {
+                if meta.file_type().is_symlink() {
+                    return Err(BrokerError::AccessDenied {
+                        broker: "fs".into(),
+                        resource: path.into(),
+                        reason: "final path component is a symlink".into(),
+                    });
+                }
+            }
+
+            joined.to_string_lossy().to_string()
         };
 
         for rule in &self.allowed_patterns {
@@ -399,6 +420,47 @@ mod tests {
         assert!(
             result.is_err(),
             "symlink parent pointing outside jail must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_dangling_symlink_final_component_denied() {
+        // SEC-10: a DANGLING symlink at the final component passes exists()
+        // == false (exists() follows symlinks), so it used to be treated as a
+        // "new file" — but fs::write would follow the link out of the jail.
+        let dir = TempDir::new().unwrap();
+        let canonical_dir = canon(dir.path());
+        let link = PathBuf::from(&canonical_dir).join("dangler.txt");
+        // Points outside the jail, at a target that does not exist (yet).
+        std::os::unix::fs::symlink("/tmp/gang-sec10-escape-target.txt", &link).unwrap();
+
+        let broker = test_broker(dir.path());
+        let result = broker.check_access(&link.to_string_lossy(), true);
+        assert!(
+            result.is_err(),
+            "write through a dangling symlink final component must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_existing_symlink_final_component_outside_jail_denied() {
+        // An existing (non-dangling) symlink final component resolves via
+        // canonicalize; when the target is outside the jail it must be denied
+        // by the pattern check.
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("target.txt");
+        std::fs::write(&target, b"outside").unwrap();
+
+        let canonical_dir = canon(dir.path());
+        let link = PathBuf::from(&canonical_dir).join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let broker = test_broker(dir.path());
+        let result = broker.check_access(&link.to_string_lossy(), true);
+        assert!(
+            result.is_err(),
+            "existing symlink final component pointing outside the jail must be denied"
         );
     }
 
