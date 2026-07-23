@@ -1684,9 +1684,24 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
         anyhow::bail!("Failed to start scenario. Check output above.");
     }
 
-    // Wait for stabilization
+    // Wait for stabilization: poll container state (mirrors run-tests.sh)
+    // instead of a fixed sleep, bounded at ~30s.
     println!("Waiting for services to stabilize...");
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (running, total) = compose_service_states(&project_name, &compose_path);
+        if total > 0 && running == total {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "warning: only {running}/{total} services reached 'running' within 30s; \
+                 continuing with checks."
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 
     // Show service status
     println!();
@@ -1728,6 +1743,38 @@ pub async fn test_archetype(archetype: &str) -> anyhow::Result<()> {
     println!("  docker compose -p {project_name} -f {compose_path} down -v");
 
     Ok(())
+}
+
+/// Query `docker compose ps` for the scenario's container states, returning
+/// `(running, total)`. Errors (docker missing, compose not up yet) count as
+/// `(0, 0)` so the caller's poll loop just keeps waiting until its deadline.
+fn compose_service_states(project_name: &str, compose_path: &str) -> (usize, usize) {
+    let output = std::process::Command::new("docker")
+        .args([
+            "compose",
+            "-p",
+            project_name,
+            "-f",
+            compose_path,
+            "ps",
+            "-a",
+            "--format",
+            "{{.State}}",
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let states: Vec<&str> = stdout
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            let running = states.iter().filter(|s| **s == "running").count();
+            (running, states.len())
+        }
+        _ => (0, 0),
+    }
 }
 
 /// Run archetype-specific network connectivity checks.
