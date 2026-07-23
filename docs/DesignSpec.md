@@ -1,6 +1,12 @@
 # Ganglion: architectural design specification
 
-**Status:** Draft for v0.1 release **Repository:** `TafyLabs/ganglion` **License:** Apache-2.0 **Authors:** Tafy Labs **Last updated:** April 23, 2026
+> **Historical spec.** This is the original v0.1 design specification, preserved
+> for context and rationale. It does not track what actually shipped — see
+> [ARCHITECTURE.md](ARCHITECTURE.md) for the current architecture and
+> [IMPLEMENTATION.md](IMPLEMENTATION.md) for implementation status. Where this
+> document and the current docs disagree, the current docs win.
+
+**Status:** Draft for v0.1 release (historical) **Repository:** `TafyLabs/ganglion` **License:** Apache-2.0 **Authors:** Tafy Labs **Last updated:** April 23, 2026
 
 ---
 

@@ -110,8 +110,8 @@ All code must pass `cargo clippy --all-targets` with no warnings. CI runs with `
 
 1. Create the crate under `crates/gang-capability-<name>/`
 2. Add it to the workspace members in the root `Cargo.toml`
-3. Depend on `gang-core` for shared types
-4. Write the capability logic as a pure Rust library (no WASM-specific code)
+3. Keep it standalone — capability crates compile to `wasm32-wasip2` and do not depend on any other workspace crate (including `gang-core`)
+4. Write the capability logic as a pure Rust library (no WASM-specific code) so it is testable with `cargo test`
 5. Add tests
 6. Document it in `docs/CAPABILITY_AUTHOR_GUIDE.md`
 

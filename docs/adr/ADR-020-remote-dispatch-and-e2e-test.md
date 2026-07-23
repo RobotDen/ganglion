@@ -1,7 +1,18 @@
 # ADR-020: Remote dispatch via control protocol and end-to-end validation
 
-**Status:** Implemented
+**Status:** Accepted; partially implemented
 **Date:** 2026-04-24
+
+> **Implementation status (as of v2.0.0).** The operator-experience and
+> supporting pieces landed: peer registry CLI (§4), operator config file (§5),
+> SSH-style TOFU identity verification (§6), shell completions (§8), the
+> reference WASM component build (§9), and target resolution (name → prefix →
+> peer id → local fallback) in §3. **Not yet implemented:** the robot agent
+> serve loop (§1) and relay-mediated operator remote dispatch (§2–§3) — a
+> resolved *remote* target exits with a "not yet implemented (ADR-020 Phase 32)"
+> message and only the local fallback executes. The e2e scenario (§7) is
+> therefore a **connectivity smoke test**, not the full deploy/invoke round-trip
+> described below. The design below is retained as the target design.
 
 ## Context
 

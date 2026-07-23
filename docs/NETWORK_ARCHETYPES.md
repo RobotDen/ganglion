@@ -13,6 +13,9 @@ gang diagnose          # Probe local network
 gang diagnose robot-42 # Probe a remote robot's network
 ```
 
+For a one-page visual of the archetype → transport strategy → relay-requirement
+mapping, see the [decision flowchart](decision-flowchart.svg).
+
 ## The five archetypes
 
 ### 1. Open warehouse
