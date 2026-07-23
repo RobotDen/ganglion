@@ -46,7 +46,15 @@ impl CapabilityBroker for LogStreamBroker {
     ) -> Result<CapabilityResponse, BrokerError> {
         match req.operation {
             BrokerOperation::LogSourceList => {
-                let sources = enumerate_log_sources();
+                // Source enumeration execs `journalctl --version` and stats
+                // paths — blocking work that must not run inline on the
+                // async executor.
+                let sources = tokio::task::spawn_blocking(enumerate_log_sources)
+                    .await
+                    .map_err(|e| BrokerError::Unavailable {
+                        broker: "logs".into(),
+                        reason: format!("log source enumeration task failed: {e}"),
+                    })?;
                 let data = serde_json::to_vec(&sources).map_err(|e| BrokerError::Unavailable {
                     broker: "logs".into(),
                     reason: e.to_string(),
@@ -231,18 +239,25 @@ fn read_log_file(path: &str, pattern: &str) -> Vec<LogLine> {
     let read_len = len.min(MAX_TAIL_BYTES);
     let start = len - read_len;
 
-    if file.seek(SeekFrom::Start(start)).is_err() {
+    // When the window starts mid-file, also read the single byte before it:
+    // if that byte is '\n' the window begins exactly at a line boundary and
+    // its first line is complete; otherwise the first line is a truncated
+    // fragment that must be dropped. (Unconditionally dropping the first
+    // line discarded a complete line at exact boundaries — off-by-one.)
+    let peek = u64::from(start > 0);
+    if file.seek(SeekFrom::Start(start - peek)).is_err() {
         return Vec::new();
     }
-    let mut buf = Vec::with_capacity(read_len as usize);
-    if file.take(read_len).read_to_end(&mut buf).is_err() {
+    let mut buf = Vec::with_capacity((read_len + peek) as usize);
+    if file.take(read_len + peek).read_to_end(&mut buf).is_err() {
         return Vec::new();
     }
+    let first_is_fragment = peek == 1 && buf.first() != Some(&b'\n');
+    let window = &buf[peek as usize..];
 
-    let text = String::from_utf8_lossy(&buf);
+    let text = String::from_utf8_lossy(window);
     let mut lines: Vec<&str> = text.lines().collect();
-    // If we started mid-file, the first line is likely a truncated fragment.
-    if start > 0 && !lines.is_empty() {
+    if first_is_fragment && !lines.is_empty() {
         lines.remove(0);
     }
     // Keep the last TAIL_LINES, preserving chronological (oldest-first) order.
@@ -299,6 +314,65 @@ mod tests {
         // Oldest-first: first returned line is 400, last is 499.
         assert_eq!(lines.first().unwrap().message, "line 400");
         assert_eq!(lines.last().unwrap().message, "line 499");
+    }
+
+    #[test]
+    fn read_log_file_window_at_exact_line_boundary_keeps_first_line() {
+        // 16 KiB lines: the 1 MiB window holds exactly 64 of them. With 80
+        // lines in the file, the window starts exactly at the '\n' boundary
+        // before line 16 — the first windowed line is COMPLETE and must not
+        // be dropped (regression: it was discarded unconditionally).
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("boundary.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        let line_len = 16 * 1024; // including the trailing '\n'
+        for i in 0..80 {
+            let head = format!("line {i:05} ");
+            let pad = "x".repeat(line_len - 1 - head.len());
+            writeln!(f, "{head}{pad}").unwrap();
+        }
+        f.flush().unwrap();
+        // Sanity: window (1 MiB = 64 lines) starts exactly at a line boundary.
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            80 * line_len as u64
+        );
+        assert_eq!(MAX_TAIL_BYTES % line_len as u64, 0);
+
+        let lines = read_log_file(path.to_str().unwrap(), "");
+        assert_eq!(
+            lines.len(),
+            64,
+            "window holds 64 complete lines; none may be dropped"
+        );
+        assert!(lines.first().unwrap().message.starts_with("line 00016"));
+        assert!(lines.last().unwrap().message.starts_with("line 00079"));
+    }
+
+    #[test]
+    fn read_log_file_window_mid_line_drops_fragment() {
+        // An unterminated 7-byte prefix shifts the window so it starts
+        // mid-line; the leading fragment must still be dropped.
+        use std::io::Write;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("midline.log");
+        let mut f = std::fs::File::create(&path).unwrap();
+        write!(f, "prefix:").unwrap(); // no newline — merges with line 0
+        let line_len = 16 * 1024;
+        for i in 0..64 {
+            let head = format!("line {i:05} ");
+            let pad = "x".repeat(line_len - 1 - head.len());
+            writeln!(f, "{head}{pad}").unwrap();
+        }
+        f.flush().unwrap();
+
+        let lines = read_log_file(path.to_str().unwrap(), "");
+        // The fragment of the merged first line is dropped; 63 complete
+        // lines remain, starting at line 1.
+        assert_eq!(lines.len(), 63);
+        assert!(lines.first().unwrap().message.starts_with("line 00001"));
+        assert!(lines.last().unwrap().message.starts_with("line 00063"));
     }
 
     #[test]
