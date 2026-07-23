@@ -44,10 +44,40 @@ impl Cid {
         Self::from_bytes(data) == *self
     }
 
-    /// Create a CID from a raw string (e.g., from user input).
-    pub fn parse(s: &str) -> Self {
-        Self(s.to_string())
+    /// Create a CID from a raw string (e.g., from user input), validating its
+    /// shape.
+    ///
+    /// A well-formed CID is the literal prefix `bafy` followed by exactly 64
+    /// hex characters (the Blake3 digest). This validates only the string
+    /// shape, not that any content with this CID exists.
+    pub fn parse(s: &str) -> Result<Self, CidError> {
+        const PREFIX: &str = "bafy";
+        const HEX_LEN: usize = 64;
+
+        let hex = s
+            .strip_prefix(PREFIX)
+            .ok_or_else(|| CidError::InvalidFormat(format!("missing `{PREFIX}` prefix: {s}")))?;
+        if hex.len() != HEX_LEN {
+            return Err(CidError::InvalidFormat(format!(
+                "expected {HEX_LEN} hex chars after prefix, got {}",
+                hex.len()
+            )));
+        }
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CidError::InvalidFormat(format!(
+                "non-hex characters in cid: {s}"
+            )));
+        }
+        Ok(Self(s.to_string()))
     }
+}
+
+/// Errors produced when validating a [`Cid`] string.
+#[derive(Debug, thiserror::Error)]
+pub enum CidError {
+    /// The string does not have the expected CID shape.
+    #[error("invalid cid format: {0}")]
+    InvalidFormat(String),
 }
 
 impl std::fmt::Display for Cid {
@@ -374,6 +404,22 @@ mod tests {
         let cid1 = Cid::from_bytes(b"hello");
         let cid2 = Cid::from_bytes(b"world");
         assert_ne!(cid1, cid2);
+    }
+
+    #[test]
+    fn cid_parse_validates_shape() {
+        // A CID produced by from_bytes round-trips through parse.
+        let cid = Cid::from_bytes(b"some content");
+        assert!(Cid::parse(cid.as_str()).is_ok());
+
+        // Missing prefix.
+        assert!(Cid::parse(&"a".repeat(64)).is_err());
+        // Wrong length.
+        assert!(Cid::parse("bafyabc").is_err());
+        // Non-hex characters.
+        assert!(Cid::parse(&format!("bafy{}", "z".repeat(64))).is_err());
+        // Correct shape.
+        assert!(Cid::parse(&format!("bafy{}", "0".repeat(64))).is_ok());
     }
 
     #[test]

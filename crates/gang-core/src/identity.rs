@@ -5,6 +5,14 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
+/// Errors produced when validating identity material.
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    /// The supplied string is not a well-formed peer ID.
+    #[error("invalid peer id: {0}")]
+    InvalidPeerId(String),
+}
+
 /// A Ganglion peer identity derived from an Ed25519 keypair.
 /// The peer ID is the canonical identifier in logs, capability policies, and audit records.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -18,8 +26,39 @@ impl PeerId {
     }
 
     /// Construct a peer ID from a string (e.g., parsed from CLI input or config).
+    ///
+    /// This validates the string shape (`12D3-` prefix followed by 32 lowercase
+    /// hex characters) and panics on malformed input. Prefer [`PeerId::parse`]
+    /// when the input is untrusted and you want to handle errors gracefully.
     pub fn new(s: &str) -> Self {
-        Self(s.to_string())
+        Self::parse(s).expect("invalid peer id")
+    }
+
+    /// Validate and construct a peer ID from a string.
+    ///
+    /// A well-formed peer ID is the literal prefix `12D3-` followed by exactly
+    /// 32 hex characters (the truncated Blake3 digest of the public key). This
+    /// validates only the string *shape*; it does not attempt to re-derive the
+    /// ID from a key.
+    pub fn parse(s: &str) -> Result<Self, IdentityError> {
+        const PREFIX: &str = "12D3-";
+        const HEX_LEN: usize = 32;
+
+        let hex = s.strip_prefix(PREFIX).ok_or_else(|| {
+            IdentityError::InvalidPeerId(format!("missing `{PREFIX}` prefix: {s}"))
+        })?;
+        if hex.len() != HEX_LEN {
+            return Err(IdentityError::InvalidPeerId(format!(
+                "expected {HEX_LEN} hex chars after prefix, got {}",
+                hex.len()
+            )));
+        }
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(IdentityError::InvalidPeerId(format!(
+                "non-hex characters in peer id: {s}"
+            )));
+        }
+        Ok(Self(s.to_string()))
     }
 
     pub fn as_str(&self) -> &str {
@@ -412,6 +451,23 @@ mod tests {
         // Lookup by peer ID
         let (name, _) = loaded.lookup_by_peer_id(&kp.peer_id()).unwrap();
         assert_eq!(name, "robot-42");
+    }
+
+    #[test]
+    fn peer_id_parse_validates_shape() {
+        // A well-formed derived peer ID round-trips through parse.
+        let kp = Keypair::generate();
+        let good = kp.peer_id();
+        assert!(PeerId::parse(good.as_str()).is_ok());
+
+        // Missing prefix.
+        assert!(PeerId::parse("deadbeefdeadbeefdeadbeefdeadbeef").is_err());
+        // Wrong length.
+        assert!(PeerId::parse("12D3-abc").is_err());
+        // Non-hex characters.
+        assert!(PeerId::parse("12D3-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
+        // Correct shape.
+        assert!(PeerId::parse("12D3-0123456789abcdef0123456789abcdef").is_ok());
     }
 
     #[test]
