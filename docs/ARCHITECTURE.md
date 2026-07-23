@@ -27,6 +27,8 @@ Ganglion solves a specific problem: reaching robots deployed inside customer net
                     └────────────────────────────────────────┘
 ```
 
+For a one-page view of how a network archetype maps to a transport strategy and relay requirements, see the [decision flowchart](decision-flowchart.svg).
+
 ## Layer 1: Connectivity
 
 **Crate:** `gang-libp2p` (with traits defined in `gang-core::transport`)
@@ -96,8 +98,10 @@ Layer 2 runs signed WASM components in a sandboxed runtime. Components have no a
 ### Runtime
 
 - **Wasmtime** component model runtime
-- **Fuel metering** — each component gets a fuel budget; execution traps when fuel is exhausted
+- **Fuel metering** — each component gets a manifest-derived fuel budget (bounded by a hard cap); execution traps when fuel is exhausted
+- **Memory limits** — a manifest-derived linear-memory ceiling (bounded by a hard cap) is enforced by Wasmtime's `StoreLimits`
 - **Epoch-based wall-clock deadlines** — prevents components from hanging indefinitely
+- **Integrity re-check** — component bytes are re-hashed (Blake3) immediately before execution and refused on mismatch; there is no silent WASM→broker fallback, so a WASM failure is terminal
 - **Capability declaration enforcement** — the component's declared capabilities must pass policy evaluation before loading
 
 ### WIT interfaces
@@ -164,10 +168,13 @@ pub trait CapabilityBroker: Send + Sync {
 
 Each broker enforces its own access controls:
 
-- **FsBroker**: Symlink jail — all paths are resolved and checked against the jail root. Symlinks that escape the jail are rejected.
-- **ProcessBroker**: Command allowlist with glob pattern matching. Only explicitly permitted commands can execute.
+- **FsBroker**: Canonicalized symlink jail — every path (and, for writes to new files, the parent directory) is canonicalized and checked against the jail root before use, closing the TOCTOU window (SEC-10). Paths that resolve outside the jail are rejected.
+- **ProcessBroker**: Command allowlist. Commands must be absolute paths, are matched against the allowlist after canonicalization, and the environment is scrubbed (`env_clear`) before spawn.
 - **LogStreamBroker**: Source pattern filtering — only logs matching the declared patterns are returned.
 - **RosBroker**: Topic/service/parameter patterns with read-only vs read-write access control.
+- **NetworkProbeBroker**: Blocks loopback, link-local, the cloud-metadata address, and IPv6 ULA ranges unconditionally, and enforces a host/CIDR allowlist (SSRF hardening).
+
+See [SECURITY.md](SECURITY.md) for the full threat model, plus the fail-closed policy/trust loading, WASM re-hashing, replay protection, and audit hash chain that the agent enforces around these brokers.
 
 ## Robot Agent
 
@@ -223,7 +230,7 @@ Policy is evaluated at deploy time (before the component is stored) and at invok
 
 **Module:** `gang-core::audit`
 
-Every capability invocation produces an audit record written to a local append-only CBOR log:
+Every capability invocation produces an audit record written to a local append-only CBOR log that is a **Blake3 hash chain** (`blake3(prev_hash || seq || cbor(record))`), making reordering or deletion detectable via `verify_chain()`. The log is created with `0600` permissions. Each record carries:
 
 - Operator peer ID
 - Component name, version, hash
@@ -242,15 +249,22 @@ Ganglion includes automated network classification that runs six probes and maps
 ## Crate dependency graph
 
 ```
-gang-core (no dependencies on other gang crates)
-  ├── gang-libp2p (depends on gang-core)
-  ├── gang-wasm-host (depends on gang-core)
-  ├── gang-ros (depends on gang-core)
-  ├── gang-capability-diagnostics (depends on gang-core)
-  ├── gang-capability-param-inspect (depends on gang-core)
-  ├── gang-capability-diagnostic-bundle (depends on gang-core)
-  └── gang-capability-network-archetype (depends on gang-core)
-gang-cli (depends on gang-core, gang-libp2p, gang-wasm-host, gang-ros)
+gang-core        (no dependencies on other gang crates)
+gang-libp2p      → gang-core
+gang-wasm-host   → gang-core
+gang-ros         → gang-core, gang-libp2p, gang-wasm-host
+gang-cli         → gang-core, gang-libp2p, gang-ros   (NOT gang-wasm-host directly)
+
+# Standard-library capability crates — standalone, compiled to wasm32-wasip2,
+# no dependency on any workspace crate:
+gang-capability-diagnostics
+gang-capability-param-inspect
+gang-capability-diagnostic-bundle
+gang-capability-network-archetype
+gang-capability-log-normalize
+gang-capability-topic-echo
+gang-capability-canary-probe
+gang-capability-rosbag-slice
 ```
 
-`gang-core` has zero dependencies on other workspace crates. All other crates depend on `gang-core` for shared types. The CLI crate ties everything together.
+`gang-core` has zero dependencies on other workspace crates. `gang-libp2p` and `gang-wasm-host` depend only on `gang-core`. `gang-ros` composes all three lower crates; `gang-cli` depends on `gang-core`, `gang-libp2p`, and `gang-ros` (it reaches the WASM host transitively through `gang-ros`, not directly). The eight `gang-capability-*` crates are standalone — they compile to WASM components and pull in no other workspace crate.
