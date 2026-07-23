@@ -91,7 +91,18 @@ impl request_response::Codec for GanglionCodec {
     }
 }
 
+/// Initial read buffer capacity. The buffer grows as data actually arrives
+/// (bounded by the declared length), so a peer cannot cheaply pin large
+/// allocations by sending only a length prefix and then stalling.
+const INITIAL_READ_CAPACITY: usize = 8 * 1024;
+
 /// Read a length-prefixed message from a stream.
+///
+/// The declared length is validated against [`MAX_MESSAGE_SIZE`], but the
+/// buffer is NOT pre-allocated to that length. Instead we cap the reader at
+/// the declared length and read incrementally into a buffer that grows with
+/// received data. An idle stream that announces a huge length but never sends
+/// the body only ever holds the small initial allocation, not up to 16 MiB.
 async fn read_length_prefixed<T>(io: &mut T) -> std::io::Result<Vec<u8>>
 where
     T: futures::AsyncRead + Unpin + Send,
@@ -109,8 +120,15 @@ where
         ));
     }
 
-    let mut buf = vec![0u8; len];
-    io.read_exact(&mut buf).await?;
+    // Grow-on-demand buffer capped at the declared length.
+    let mut buf = Vec::with_capacity(len.min(INITIAL_READ_CAPACITY));
+    let read = io.take(len as u64).read_to_end(&mut buf).await?;
+    if read != len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("expected {len} bytes, got {read} before EOF"),
+        ));
+    }
     Ok(buf)
 }
 
@@ -285,4 +303,45 @@ fn extract_peer_id(addr: &Multiaddr) -> Option<Libp2pPeerId> {
         libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_length_prefixed_roundtrip() {
+        let payload = b"hello ganglion".to_vec();
+        let mut wire = Vec::new();
+        write_length_prefixed(&mut wire, &payload).await.unwrap();
+
+        let mut cursor = futures::io::Cursor::new(wire);
+        let read = read_length_prefixed(&mut cursor).await.unwrap();
+        assert_eq!(read, payload);
+    }
+
+    #[tokio::test]
+    async fn test_length_prefixed_rejects_oversized() {
+        // Length prefix declaring more than MAX_MESSAGE_SIZE, no body.
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&((MAX_MESSAGE_SIZE as u32) + 1).to_be_bytes());
+
+        let mut cursor = futures::io::Cursor::new(wire);
+        let err = read_length_prefixed(&mut cursor).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn test_length_prefixed_short_body_errors_without_preallocating() {
+        // Declares a large body but only sends the prefix then EOFs. The read
+        // must fail with UnexpectedEof rather than pinning a 4 MiB buffer.
+        let declared = 4 * 1024 * 1024u32;
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&declared.to_be_bytes());
+        wire.extend_from_slice(b"only a few bytes");
+
+        let mut cursor = futures::io::Cursor::new(wire);
+        let err = read_length_prefixed(&mut cursor).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
 }
