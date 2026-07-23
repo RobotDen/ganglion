@@ -270,10 +270,14 @@ impl Libp2pTransportAdapter {
             .await
             .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))?;
 
-        reply_rx.await.map_err(|_| TransportError::DialFailed {
-            peer: "unknown".into(),
-            reason: "swarm task dropped the reply channel".into(),
-        })?
+        match tokio::time::timeout(REQUEST_TIMEOUT, reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(TransportError::DialFailed {
+                peer: addr_str,
+                reason: "swarm task dropped the reply channel".into(),
+            }),
+            Err(_) => Err(TransportError::Timeout(REQUEST_TIMEOUT)),
+        }
     }
 
     /// Get the list of currently connected peers.
