@@ -84,7 +84,10 @@ impl Libp2pTransportAdapter {
         let keypair = Keypair::load_or_generate(&config.key_path)?;
         let local_peer_id = keypair.peer_id();
 
-        let (mut swarm, libp2p_peer_id) = swarm::build_swarm(&config).await?;
+        // Load the raw secret once (validated, non-panicking) and hand it to
+        // the swarm builder so the key file is not read a second time.
+        let secret_key = swarm::load_ed25519_secret(&config.key_path)?;
+        let (mut swarm, libp2p_peer_id) = swarm::build_swarm(&config, secret_key).await?;
 
         // Start listening
         swarm::start_listening(&mut swarm, &config)?;
@@ -826,12 +829,13 @@ mod tests {
             .unwrap();
 
         let config = Libp2pConfig {
-            key_path,
+            key_path: key_path.clone(),
             listen_addrs: vec![], // Don't bind ports in tests
             ..Default::default()
         };
 
-        let result = swarm::build_swarm(&config).await;
+        let secret = swarm::load_ed25519_secret(&key_path).unwrap();
+        let result = swarm::build_swarm(&config, secret).await;
         assert!(result.is_ok(), "swarm build failed: {:?}", result.err());
 
         let (_swarm, peer_id) = result.unwrap();
@@ -848,13 +852,14 @@ mod tests {
             .unwrap();
 
         let config = Libp2pConfig {
-            key_path,
+            key_path: key_path.clone(),
             listen_addrs: vec![],
             relay_server: true,
             ..Default::default()
         };
 
-        let result = swarm::build_swarm(&config).await;
+        let secret = swarm::load_ed25519_secret(&key_path).unwrap();
+        let result = swarm::build_swarm(&config, secret).await;
         assert!(
             result.is_ok(),
             "relay server swarm build failed: {:?}",

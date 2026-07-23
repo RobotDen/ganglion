@@ -128,19 +128,39 @@ where
     Ok(())
 }
 
+/// Load the raw 32-byte Ed25519 secret key from `path`.
+///
+/// Reads the file exactly once and validates the length before copying,
+/// so a truncated or oversized key file returns an error instead of
+/// panicking (the previous `copy_from_slice` on an unchecked slice could
+/// panic). Callers pass the returned bytes into [`build_swarm`], which
+/// avoids re-reading the file (removing a TOCTOU second read).
+pub(crate) fn load_ed25519_secret(path: &std::path::Path) -> anyhow::Result<[u8; 32]> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "expected 32-byte ed25519 key at {}, got {} bytes",
+            path.display(),
+            bytes.len()
+        );
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
 /// Build and configure the libp2p swarm from a Ganglion config.
+///
+/// `secret_key` is the already-loaded raw Ed25519 secret (see
+/// [`load_ed25519_secret`]); this function does not read the key file, so
+/// there is no second on-disk read that could race with the initial load.
 pub async fn build_swarm(
     config: &Libp2pConfig,
+    secret_key: [u8; 32],
 ) -> anyhow::Result<(Swarm<GanglionBehaviour>, Libp2pPeerId)> {
-    // Load or generate identity
-    let _gang_keypair = gang_core::identity::Keypair::load_or_generate(&config.key_path)?;
-
-    // Convert to libp2p keypair (both are Ed25519)
-    let key_bytes = std::fs::read(&config.key_path)?;
-    let mut ed25519_bytes = [0u8; 32];
-    ed25519_bytes.copy_from_slice(&key_bytes);
-
-    let libp2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(ed25519_bytes)?;
+    // Convert the raw secret into a libp2p keypair (both are Ed25519).
+    // `ed25519_from_bytes` takes the bytes by value and zeroizes them.
+    let libp2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(secret_key)?;
     let local_peer_id = libp2p_keypair.public().to_peer_id();
 
     info!(%local_peer_id, relay_server = config.relay_server, "Building Ganglion swarm");
