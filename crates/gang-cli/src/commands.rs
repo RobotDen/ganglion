@@ -1,8 +1,31 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::OutputFormat;
+
+/// Emit the standard notice for a command that is not yet available because it
+/// requires relay connectivity, honoring `--format`, then fail with a non-zero
+/// exit. Absent-relay stubs must not exit 0 (ADR-018).
+pub fn wip_stub(command: &str, format: &OutputFormat) -> anyhow::Result<()> {
+    if let OutputFormat::Json = format {
+        // Clean JSON on stdout for machine consumers; the error still exits 1.
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "unavailable",
+                "command": command,
+                "wip": true,
+                "reason": "requires relay connectivity",
+            })
+        );
+    }
+    anyhow::bail!(
+        "`gang {command}` requires relay connectivity [WIP]. \
+         Run `gang demo` to see current capabilities, or `gang status` for a summary."
+    );
+}
 
 // --- Operator config ---
 
@@ -29,14 +52,33 @@ impl OperatorConfig {
         Self::load_from(&path)
     }
 
-    /// Load config from a specific path. Returns defaults if file is missing.
+    /// Load config from a specific path. Returns defaults if the file is
+    /// missing (silent). A present-but-malformed config is surfaced as a
+    /// warning on stderr and then falls back to defaults, rather than being
+    /// silently discarded.
     pub fn load_from(path: &Path) -> Self {
         if !path.exists() {
             return Self::default();
         }
         match std::fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Ok(contents) => match toml::from_str(&contents) {
+                Ok(config) => config,
+                Err(e) => {
+                    eprintln!(
+                        "warning: ignoring malformed config at {} ({e}); using defaults. \
+                         Fix the file or run `gang config init --force`.",
+                        path.display()
+                    );
+                    Self::default()
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "warning: could not read config at {} ({e}); using defaults.",
+                    path.display()
+                );
+                Self::default()
+            }
         }
     }
 
@@ -94,7 +136,6 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         "caps",
         "demo",
         "diagnose",
-        "transport-stats",
         "test-archetype",
         "push",
         "fetch",
@@ -105,14 +146,15 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         "registry publish",
         "registry list",
         "registry info",
-        "peer add/remove/list/show/rename",
+        "peer add/remove/list/show/rename/trust-reset",
         "config show/set/init/path",
         "completions",
         "relay",
         "status",
     ];
 
-    let wip = ["logs", "list", "connect"];
+    // WIP: require relay connectivity or produce only simulated output today.
+    let wip = ["logs", "list", "connect", "transport-stats (simulated data)"];
 
     match format {
         OutputFormat::Json => {
@@ -168,9 +210,11 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
 pub async fn identity_show() -> anyhow::Result<()> {
     let key_path = gang_core::identity::default_key_path();
     if !key_path.exists() {
-        eprintln!("No identity found. Run `gang identity generate` first.");
-        eprintln!("Expected key at: {}", key_path.display());
-        std::process::exit(1);
+        anyhow::bail!(
+            "No identity found. Run `gang identity generate` first.\n\
+             Expected key at: {}",
+            key_path.display()
+        );
     }
 
     let keypair = gang_core::identity::Keypair::load(&key_path)?;
@@ -187,9 +231,10 @@ pub async fn identity_show() -> anyhow::Result<()> {
 pub async fn identity_generate(force: bool) -> anyhow::Result<()> {
     let key_path = gang_core::identity::default_key_path();
     if key_path.exists() && !force {
-        eprintln!("Identity already exists at {}.", key_path.display());
-        eprintln!("Use --force to overwrite.");
-        std::process::exit(1);
+        anyhow::bail!(
+            "Identity already exists at {}. Use --force to overwrite.",
+            key_path.display()
+        );
     }
 
     let keypair = gang_core::identity::Keypair::generate();
@@ -335,6 +380,14 @@ pub async fn peer_add(
     if !peer_id.as_str().starts_with("12D3-") || peer_id.as_str().len() != 37 {
         anyhow::bail!(
             "Invalid peer ID: '{}'. Expected format: 12D3-<32 hex chars>",
+            peer_id_str
+        );
+    }
+    // Validate the 32-char hex payload after the "12D3-" prefix.
+    let hex_payload = &peer_id.as_str()[5..];
+    if hex::decode(hex_payload).is_err() {
+        anyhow::bail!(
+            "Invalid peer ID: '{}'. The 32 characters after '12D3-' must be hex.",
             peer_id_str
         );
     }
@@ -586,6 +639,11 @@ pub async fn config_show(format: &OutputFormat) -> anyhow::Result<()> {
                 config.default_relay.as_deref().unwrap_or("(not set)")
             );
             println!("host_key_policy  = {}", config.host_key_policy);
+            println!();
+            println!(
+                "note: host_key_policy is stored but not yet enforced; it takes effect \
+                 once remote connections land."
+            );
         }
     }
     Ok(())
@@ -622,7 +680,15 @@ pub async fn config_set(key: &str, value: &str, format: &OutputFormat) -> anyhow
                 serde_json::json!({"status": "set", "key": key, "value": value})
             );
         }
-        OutputFormat::Text => println!("Set {key} = {value}"),
+        OutputFormat::Text => {
+            println!("Set {key} = {value}");
+            if key == "host_key_policy" {
+                println!(
+                    "note: host_key_policy is stored but not yet enforced; it takes effect \
+                     once remote connections land."
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -804,12 +870,53 @@ pub fn verify_host_key(
 
 // --- End identity verification ---
 
+/// Parse a capability group short name (or fully-qualified name) into a
+/// `CapabilityGroup` with permissive defaults for any pattern/allowlist fields.
+fn parse_capability_group(
+    spec: &str,
+) -> anyhow::Result<gang_core::capability::CapabilityGroup> {
+    use gang_core::capability::CapabilityGroup;
+    let version = "1.0".to_string();
+    let group = match spec.trim() {
+        "diagnostics" | "ganglion:diagnostics/collect" => {
+            CapabilityGroup::DiagnosticsCollect { version }
+        }
+        "logs" | "ganglion:logs/stream" => CapabilityGroup::LogStream {
+            version,
+            patterns: vec!["**".into()],
+        },
+        "ros" | "ganglion:ros/interface" => CapabilityGroup::RosInterface {
+            version,
+            patterns: vec![],
+        },
+        "fs" | "ganglion:fs/bounded" => CapabilityGroup::FsBounded {
+            version,
+            paths: vec![],
+        },
+        "artifacts" | "ganglion:artifacts/publish" => {
+            CapabilityGroup::ArtifactsPublish { version }
+        }
+        "process" | "ganglion:process/spawn" => CapabilityGroup::ProcessSpawn {
+            version,
+            allowed_commands: vec![],
+        },
+        "network" | "ganglion:network/probe" => CapabilityGroup::NetworkProbe { version },
+        "metrics" | "ganglion:metrics/emit" => CapabilityGroup::MetricsEmit { version },
+        other => anyhow::bail!(
+            "unknown capability group '{other}'. Valid: diagnostics, logs, ros, fs, \
+             artifacts, process, network, metrics"
+        ),
+    };
+    Ok(group)
+}
+
 /// `gang sign`
 pub async fn sign(
     wasm_path: &str,
     key_path: Option<&str>,
     name: Option<&str>,
     version: &str,
+    capabilities: Option<&[String]>,
 ) -> anyhow::Result<()> {
     use gang_core::capability::CapabilityGroup;
     use gang_core::manifest::{ComponentManifest, ResourceLimits, SignedManifest};
@@ -842,19 +949,38 @@ pub async fn sign(
             .to_string()
     });
 
+    // Declared capabilities: from --capabilities when provided, otherwise a
+    // permissive default set with a loud warning (real WIT-import extraction is
+    // not yet wired — see CLI-06).
+    let declared_capabilities = match capabilities {
+        Some(specs) if !specs.is_empty() => specs
+            .iter()
+            .map(|s| parse_capability_group(s))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        _ => {
+            eprintln!(
+                "WARNING: no --capabilities provided. Falling back to a permissive default \
+                 set (diagnostics + logs \"**\"). This is almost certainly NOT what the \
+                 component actually needs. Pass --capabilities to declare them explicitly, \
+                 e.g. --capabilities diagnostics,logs"
+            );
+            vec![
+                CapabilityGroup::DiagnosticsCollect {
+                    version: "1.0".into(),
+                },
+                CapabilityGroup::LogStream {
+                    version: "1.0".into(),
+                    patterns: vec!["**".into()],
+                },
+            ]
+        }
+    };
+
     let manifest = ComponentManifest {
         schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
         name: name.clone(),
         version: version.into(),
-        declared_capabilities: vec![
-            CapabilityGroup::DiagnosticsCollect {
-                version: "1.0".into(),
-            },
-            CapabilityGroup::LogStream {
-                version: "1.0".into(),
-                patterns: vec!["**".into()],
-            },
-        ],
+        declared_capabilities,
         author_peer_id: keypair.peer_id(),
         component_hash: component_hash.clone(),
         limits: ResourceLimits::default(),
@@ -875,18 +1001,31 @@ pub async fn sign(
     println!("  Manifest: {}", manifest_path.display());
     println!("  Author:   {}", keypair.peer_id());
     println!("  Hash:     {component_hash}");
+    println!("  Capabilities:");
+    for cap in &manifest.declared_capabilities {
+        println!("    - {}", cap.qualified_name());
+    }
     Ok(())
 }
 
 /// `gang agent` — run the robot agent.
 pub async fn agent(
-    _config: Option<&str>,
+    config_path: Option<&str>,
     data_dir: &str,
     relay: Option<&str>,
 ) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
     use gang_ros::filesystem::FsRule;
     use std::sync::Arc;
+
+    // Loading an AgentConfig from a file is not yet supported here (gang-ros
+    // does not expose a deserializer). Be honest rather than silently ignoring.
+    if let Some(path) = config_path {
+        eprintln!(
+            "warning: --config {path} is not yet supported; agent config file loading is \
+             unavailable. Continuing with built-in dev defaults."
+        );
+    }
 
     let data_dir = PathBuf::from(data_dir);
     std::fs::create_dir_all(&data_dir)?;
@@ -1219,7 +1358,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
     use gang_ros::filesystem::FsRule;
 
-    println!("=== Ganglion v0.1 Demo ===");
+    println!("=== Ganglion v{} Demo ===", env!("CARGO_PKG_VERSION"));
     println!();
 
     // 1. Generate identity if needed
@@ -1336,9 +1475,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
     println!();
     println!("=== Demo complete ===");
     println!("Data stored at: {}", data_dir.display());
-
-    // Cleanup
-    std::fs::remove_dir_all(&data_dir)?;
+    println!("Clean up when done: rm -rf {}", data_dir.display());
 
     Ok(())
 }
@@ -1782,10 +1919,6 @@ pub async fn transport_stats(robot: &str, format: &crate::OutputFormat) -> anyho
     // In full implementation, this queries the transport adapter for the
     // connected peer's stats.
 
-    println!("Transport statistics for: {robot}");
-    println!("(Requires active connection — showing example output)");
-    println!();
-
     let example_stats = gang_core::transport::TransportStats {
         transport: "quic".into(),
         via_relay: false,
@@ -1803,10 +1936,19 @@ pub async fn transport_stats(robot: &str, format: &crate::OutputFormat) -> anyho
 
     match format {
         crate::OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&example_stats)?;
-            println!("{json}");
+            // Mark the payload as simulated so machine consumers cannot mistake
+            // it for live data (CLI-03).
+            let mut json = serde_json::to_value(&example_stats)?;
+            if let Some(obj) = json.as_object_mut() {
+                obj.insert("simulated".into(), serde_json::json!(true));
+                obj.insert("peer".into(), serde_json::json!(robot));
+            }
+            println!("{}", serde_json::to_string_pretty(&json)?);
         }
         crate::OutputFormat::Text => {
+            println!("Transport statistics for: {robot}  [WIP]");
+            println!("(No live connection — showing SIMULATED example output.)");
+            println!();
             println!("  Transport:       {}", example_stats.transport);
             println!("  Via relay:       {}", example_stats.via_relay);
             println!("  Connect time:    {}ms", example_stats.connect_time_ms);
@@ -1851,7 +1993,7 @@ fn format_bytes(bytes: u64) -> String {
 pub async fn fetch_artifact(
     cid_str: &str,
     output: Option<&str>,
-    _format: &crate::OutputFormat,
+    format: &crate::OutputFormat,
 ) -> anyhow::Result<()> {
     use gang_core::artifacts::{ArtifactStore, ArtifactStoreConfig, Cid};
 
@@ -1872,17 +2014,28 @@ pub async fn fetch_artifact(
     let data = store.retrieve(&cid)?;
     let meta = store.meta(&cid);
 
-    match output {
-        Some(path) => {
-            std::fs::write(path, &data)?;
-            println!("Wrote {} bytes to {path}", data.len());
+    let dest = match output {
+        Some(path) => path.to_string(),
+        None => meta
+            .and_then(|m| m.filename.as_deref())
+            .unwrap_or("artifact.bin")
+            .to_string(),
+    };
+    std::fs::write(&dest, &data).with_context(|| format!("writing {dest}"))?;
+
+    match format {
+        crate::OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "cid": cid.as_str(),
+                    "path": dest,
+                    "bytes": data.len(),
+                }))?
+            );
         }
-        None => {
-            let filename = meta
-                .and_then(|m| m.filename.as_deref())
-                .unwrap_or("artifact.bin");
-            std::fs::write(filename, &data)?;
-            println!("Wrote {} bytes to {filename}", data.len());
+        crate::OutputFormat::Text => {
+            println!("Wrote {} bytes to {dest}", data.len());
         }
     }
 
@@ -1903,7 +2056,7 @@ pub async fn push_artifact(
         ..Default::default()
     })?;
 
-    let data = std::fs::read(path)?;
+    let data = std::fs::read(path).with_context(|| format!("reading {path}"))?;
     let filename = Path::new(path).file_name().and_then(|n| n.to_str());
 
     let cid = store.store(&data, filename, None, content_type)?;
@@ -2010,14 +2163,12 @@ pub async fn capability_scaffold(
         _ => anyhow::bail!("unsupported language: {language}. Supported: rust, cpp, python, go"),
     }
 
-    // Copy WIT interface to project
+    // Write the real WIT interface into the project. Embedded at build time
+    // from the in-repo canonical copy so scaffolds are usable out of the box.
+    const GANGLION_WIT: &str = include_str!("../../gang-wasm-host/wit/ganglion.wit");
     let wit_dir = project_dir.join("wit");
     std::fs::create_dir_all(&wit_dir)?;
-    std::fs::write(
-        wit_dir.join("README.md"),
-        "Copy ganglion.wit from the Ganglion repository into this directory.\n\
-         See: https://github.com/tafy-labs/ganglion/tree/main/crates/gang-wasm-host/wit\n",
-    )?;
+    std::fs::write(wit_dir.join("ganglion.wit"), GANGLION_WIT)?;
 
     println!(
         "Scaffolded {} capability at {}",
@@ -2025,10 +2176,9 @@ pub async fn capability_scaffold(
         project_dir.display()
     );
     println!("\nNext steps:");
-    println!("  1. Copy ganglion.wit into {}/wit/", name);
-    println!("  2. Implement your capability logic");
-    println!("  3. Build: see docs/CAPABILITY_AUTHOR_GUIDE.md");
-    println!("  4. Sign: gang sign {name}.component.wasm --name {name} --version 0.1.0");
+    println!("  1. Implement your capability logic (WIT is in {name}/wit/ganglion.wit)");
+    println!("  2. Build: see docs/CAPABILITY_AUTHOR_GUIDE.md");
+    println!("  3. Sign: gang sign {name}.component.wasm --name {name} --version 0.1.0");
     Ok(())
 }
 
@@ -2295,9 +2445,27 @@ fn registry_dir() -> PathBuf {
 }
 
 /// `gang registry search <query>`
-pub async fn registry_search(query: &str, _format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn registry_search(query: &str, format: &OutputFormat) -> anyhow::Result<()> {
     let reg = gang_core::registry::Registry::open(&registry_dir())?;
     let results = reg.search(query);
+
+    if let OutputFormat::Json = format {
+        let entries: Vec<_> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "version": r.latest_version,
+                    "description": r.description,
+                    "language": r.language.to_string(),
+                    "author": r.author,
+                    "tags": r.tags,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
 
     if results.is_empty() {
         println!("No capabilities found matching \"{query}\".");
@@ -2368,33 +2536,86 @@ pub async fn registry_publish(
     wasm_path: &str,
     description: Option<&str>,
     tags: Option<&[String]>,
+    version_override: Option<&str>,
+    language_override: Option<&str>,
     _format: &OutputFormat,
 ) -> anyhow::Result<()> {
+    use gang_core::manifest::SignedManifest;
+    use gang_core::registry::CapabilityLanguage;
+
     let path = Path::new(wasm_path);
     if !path.exists() {
         anyhow::bail!("file not found: {wasm_path}");
     }
 
     // Read the component and compute CID
-    let data = std::fs::read(path)?;
+    let data = std::fs::read(path).with_context(|| format!("reading {wasm_path}"))?;
     let component_cid = gang_core::artifacts::Cid::from_bytes(&data);
 
-    // Read the manifest and compute its CID
+    // Read the adjacent signed manifest if present — its verified contents are
+    // the source of truth for name/version/language/capabilities/min-version.
     let manifest_path = path.with_extension("manifest.cbor");
-    let manifest_cid = if manifest_path.exists() {
-        let manifest_bytes = std::fs::read(&manifest_path)?;
-        gang_core::artifacts::Cid::from_bytes(&manifest_bytes)
+    let (manifest_cid, manifest) = if manifest_path.exists() {
+        let manifest_bytes = std::fs::read(&manifest_path)
+            .with_context(|| format!("reading {}", manifest_path.display()))?;
+        let cid = gang_core::artifacts::Cid::from_bytes(&manifest_bytes);
+        let decoded = SignedManifest::from_cbor(&manifest_bytes)
+            .and_then(|s| s.verify_and_decode())
+            .with_context(|| format!("decoding manifest {}", manifest_path.display()))?;
+        (cid, Some(decoded))
     } else {
         // No manifest found; compute CID from the component bytes as fallback
-        gang_core::artifacts::Cid::from_bytes(&data)
+        (gang_core::artifacts::Cid::from_bytes(&data), None)
     };
 
-    // Derive name from filename
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
+    // Name: manifest > filename.
+    let name = manifest
+        .as_ref()
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
+
+    // Version: --version flag > manifest > default.
+    let version = version_override
+        .map(String::from)
+        .or_else(|| manifest.as_ref().map(|m| m.version.clone()))
+        .unwrap_or_else(|| "0.1.0".to_string());
+
+    // Language: --language flag > manifest > default (Rust).
+    let language = match language_override {
+        Some(lang) => parse_language(lang)?,
+        None => manifest
+            .as_ref()
+            .map(|m| m.language)
+            .unwrap_or(CapabilityLanguage::Rust),
+    };
+
+    let declared_capabilities = manifest
+        .as_ref()
+        .map(|m| {
+            m.declared_capabilities
+                .iter()
+                .map(|g| g.qualified_name())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let min_ganglion_version = manifest.as_ref().and_then(|m| m.min_ganglion_version.clone());
+
+    // Description: --description flag > manifest > default.
+    let description = description
+        .map(String::from)
+        .or_else(|| {
+            manifest
+                .as_ref()
+                .map(|m| m.description.clone())
+                .filter(|d| !d.is_empty())
+        })
+        .unwrap_or_else(|| "A Ganglion capability".to_string());
 
     // Load identity for author
     let key_path = gang_core::identity::default_key_path();
@@ -2407,31 +2628,67 @@ pub async fn registry_publish(
 
     let entry = gang_core::registry::RegistryEntry {
         name: name.clone(),
-        version: "0.1.0".into(),
-        description: description.unwrap_or("A Ganglion capability").into(),
+        version: version.clone(),
+        description,
         author_peer_id: author,
-        language: gang_core::registry::CapabilityLanguage::Rust,
+        language,
         component_cid: component_cid.clone(),
         manifest_cid,
-        declared_capabilities: vec![],
+        declared_capabilities,
         published_at: chrono::Utc::now().to_rfc3339(),
         tags: tags.map(|t| t.to_vec()).unwrap_or_default(),
-        min_ganglion_version: Some("0.4.0".into()),
+        min_ganglion_version,
     };
 
     let mut reg = gang_core::registry::Registry::open(&registry_dir())?;
     reg.publish(entry)?;
 
-    println!("Published {} to local registry.", name);
+    println!("Published {name} v{version} to local registry.");
+    if manifest.is_none() {
+        println!(
+            "  (no signed manifest found next to the component — used filename/defaults; \
+             sign it first for accurate metadata)"
+        );
+    }
     println!("  Component CID: {}", component_cid);
     println!("  Registry path: {}", registry_dir().display());
     Ok(())
 }
 
+/// Parse a language string into a `CapabilityLanguage`.
+fn parse_language(lang: &str) -> anyhow::Result<gang_core::registry::CapabilityLanguage> {
+    use gang_core::registry::CapabilityLanguage;
+    match lang.to_lowercase().as_str() {
+        "rust" | "rs" => Ok(CapabilityLanguage::Rust),
+        "cpp" | "c++" => Ok(CapabilityLanguage::Cpp),
+        "python" | "py" => Ok(CapabilityLanguage::Python),
+        "go" | "golang" => Ok(CapabilityLanguage::Go),
+        other => anyhow::bail!("unknown language '{other}'. Valid: rust, cpp, python, go"),
+    }
+}
+
 /// `gang registry list`
-pub async fn registry_list(_format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn registry_list(format: &OutputFormat) -> anyhow::Result<()> {
     let reg = gang_core::registry::Registry::open(&registry_dir())?;
     let list = reg.list();
+
+    if let OutputFormat::Json = format {
+        let entries: Vec<_> = list
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "version": r.latest_version,
+                    "description": r.description,
+                    "language": r.language.to_string(),
+                    "author": r.author,
+                    "tags": r.tags,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
 
     if list.is_empty() {
         println!("No capabilities in local registry.");
@@ -2448,8 +2705,42 @@ pub async fn registry_list(_format: &OutputFormat) -> anyhow::Result<()> {
 }
 
 /// `gang registry info <name>`
-pub async fn registry_info(name: &str, _format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn registry_info(name: &str, format: &OutputFormat) -> anyhow::Result<()> {
     let reg = gang_core::registry::Registry::open(&registry_dir())?;
+
+    if let OutputFormat::Json = format {
+        let versions = reg.get(name);
+        let entries: Vec<_> = versions
+            .map(|vs| {
+                vs.iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "name": e.name,
+                            "version": e.version,
+                            "description": e.description,
+                            "author": e.author_peer_id,
+                            "language": e.language.to_string(),
+                            "published_at": e.published_at,
+                            "component_cid": e.component_cid.as_str(),
+                            "manifest_cid": e.manifest_cid.as_str(),
+                            "declared_capabilities": e.declared_capabilities,
+                            "tags": e.tags,
+                            "min_ganglion_version": e.min_ganglion_version,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": name,
+                "found": !entries.is_empty(),
+                "versions": entries,
+            }))?
+        );
+        return Ok(());
+    }
 
     match reg.get(name) {
         Some(versions) => {
@@ -2488,11 +2779,28 @@ pub async fn relay(
     listen_addrs: Option<Vec<String>>,
     port: u16,
     metrics_port: u16,
+    data_dir: Option<&str>,
 ) -> anyhow::Result<()> {
     use gang_libp2p::Libp2pConfig;
 
-    // Load or generate identity
-    let key_path = gang_core::identity::default_key_path();
+    // Resolve the identity key path. With --data-dir we persist the relay
+    // identity there and export GANG_KEY_PATH so gang-core's default_key_path
+    // (being taught to honor GANG_KEY_PATH) and any downstream lookups agree.
+    let key_path = match data_dir {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("creating data dir {}", dir.display()))?;
+            let kp = dir.join("identity.key");
+            // SAFETY: set before any threads rely on the env var; single-threaded
+            // startup path.
+            unsafe {
+                std::env::set_var("GANG_KEY_PATH", &kp);
+            }
+            kp
+        }
+        None => gang_core::identity::default_key_path(),
+    };
     let keypair = gang_core::identity::Keypair::load_or_generate(&key_path)?;
     let peer_id = keypair.peer_id();
 

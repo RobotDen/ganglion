@@ -13,9 +13,14 @@ struct Cli {
     #[arg(long, default_value = "text", global = true)]
     format: OutputFormat,
 
-    /// Verbosity level (-v, -vv, -vvv).
+    /// Increase log verbosity: -v = debug, -vv = trace (gang crates),
+    /// -vvv = trace (all crates). Ignored when RUST_LOG is set.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
+
+    /// Suppress info/warn logs (errors only). Ignored when RUST_LOG is set.
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -25,6 +30,17 @@ struct Cli {
 pub enum OutputFormat {
     Text,
     Json,
+}
+
+/// Reject `--format json` on subcommands that only produce human-readable
+/// output, rather than silently emitting text when JSON was requested.
+fn reject_json(format: &OutputFormat, command: &str) -> anyhow::Result<()> {
+    if matches!(format, OutputFormat::Json) {
+        anyhow::bail!(
+            "`gang {command}` does not support `--format json`; omit it for text output."
+        );
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -45,9 +61,19 @@ enum Commands {
         /// Component name (default: derived from filename).
         #[arg(long)]
         name: Option<String>,
-        /// Component version.
-        #[arg(long, default_value = "0.1.0")]
+        /// Component version (semver). Distinct from the CLI's own -V/--version.
+        #[arg(
+            long = "component-version",
+            visible_alias = "version",
+            value_name = "SEMVER",
+            default_value = "0.1.0"
+        )]
         version: String,
+        /// Declared capability groups, comma-separated (e.g.
+        /// "diagnostics,logs,ros,fs,artifacts,process,network,metrics").
+        /// If omitted, a permissive default set is used with a warning.
+        #[arg(long, value_delimiter = ',')]
+        capabilities: Option<Vec<String>>,
     },
 
     /// Run the robot agent (for development/testing).
@@ -110,7 +136,7 @@ enum Commands {
         relay: Option<String>,
     },
 
-    /// Stream robot logs.
+    /// Stream robot logs. [WIP: requires relay]
     Logs {
         /// Robot name or peer ID.
         robot: String,
@@ -134,7 +160,7 @@ enum Commands {
         robot: Option<String>,
     },
 
-    /// Show per-transport statistics for a connected peer.
+    /// Show per-transport statistics for a connected peer. [WIP: simulated data until relay lands]
     TransportStats {
         /// Robot name or peer ID.
         robot: String,
@@ -188,10 +214,10 @@ enum Commands {
     /// Show Ganglion status: version, identity, available and WIP capabilities.
     Status,
 
-    /// List reachable robots in the fleet.
+    /// List reachable robots in the fleet. [WIP: requires relay]
     List,
 
-    /// Establish a session with a robot via relay.
+    /// Establish a session with a robot via relay. [WIP: requires relay]
     Connect {
         /// Robot name or peer ID.
         robot: String,
@@ -224,6 +250,11 @@ enum Commands {
         /// Metrics HTTP port (placeholder for future Prometheus endpoint).
         #[arg(long, default_value = "9090")]
         metrics_port: u16,
+
+        /// Directory for the relay's persisted identity key (sets GANG_KEY_PATH).
+        /// Without this, the default ~/.gang/identity.key is used.
+        #[arg(long, value_name = "PATH")]
+        data_dir: Option<String>,
     },
 }
 
@@ -267,6 +298,12 @@ enum RegistryAction {
         /// Tags (comma-separated).
         #[arg(long, value_delimiter = ',')]
         tags: Option<Vec<String>>,
+        /// Version to publish (overrides the adjacent signed manifest).
+        #[arg(long, value_name = "SEMVER")]
+        version: Option<String>,
+        /// Language (overrides the manifest): rust, cpp, python, go.
+        #[arg(long)]
+        language: Option<String>,
     },
     /// List all capabilities in the local registry.
     List,
@@ -355,25 +392,47 @@ enum IdentityAction {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing
-    let filter = match cli.verbose {
-        0 => "gang=info",
-        1 => "gang=debug",
-        _ => "gang=trace,gang_core=trace,gang_ros=trace",
+    // Initialize tracing. RUST_LOG wins when set; otherwise derive from
+    // the -q / -v flags. Each verbosity level is genuinely distinct.
+    let derived = if cli.quiet {
+        "gang=error".to_string()
+    } else {
+        match cli.verbose {
+            0 => "gang=info".to_string(),
+            1 => "gang=debug".to_string(),
+            2 => "gang=trace,gang_core=trace,gang_ros=trace,gang_libp2p=trace".to_string(),
+            _ => "trace".to_string(),
+        }
     };
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(derived));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     match cli.command {
-        Commands::Identity { action } => match action {
-            IdentityAction::Show => commands::identity_show().await?,
-            IdentityAction::Generate { force } => commands::identity_generate(force).await?,
-        },
+        Commands::Identity { action } => {
+            reject_json(&cli.format, "identity")?;
+            match action {
+                IdentityAction::Show => commands::identity_show().await?,
+                IdentityAction::Generate { force } => commands::identity_generate(force).await?,
+            }
+        }
         Commands::Sign {
             wasm_path,
             key,
             name,
             version,
-        } => commands::sign(&wasm_path, key.as_deref(), name.as_deref(), &version).await?,
+            capabilities,
+        } => {
+            reject_json(&cli.format, "sign")?;
+            commands::sign(
+                &wasm_path,
+                key.as_deref(),
+                name.as_deref(),
+                &version,
+                capabilities.as_deref(),
+            )
+            .await?
+        }
         Commands::Agent {
             config,
             data_dir,
@@ -420,12 +479,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Logs {
             robot: _,
             follow: _,
-        } => {
-            eprintln!("This command requires relay connectivity (not yet available in v0.6).");
-            eprintln!(
-                "Run `gang demo` to see current capabilities, or `gang status` for a summary."
-            );
-        }
+        } => commands::wip_stub("logs", &cli.format)?,
         Commands::TestArchetype { archetype } => commands::test_archetype(&archetype).await?,
         Commands::Diagnose { robot } => commands::diagnose(robot.as_deref(), &cli.format).await?,
         Commands::TransportStats { robot } => {
@@ -443,24 +497,33 @@ async fn main() -> anyhow::Result<()> {
                 name,
                 language,
                 output_dir,
-            } => commands::capability_scaffold(&name, &language, output_dir.as_deref()).await?,
+            } => {
+                reject_json(&cli.format, "capability scaffold")?;
+                commands::capability_scaffold(&name, &language, output_dir.as_deref()).await?
+            }
         },
         Commands::Registry { action } => match action {
             RegistryAction::Search { query } => {
                 commands::registry_search(&query, &cli.format).await?
             }
             RegistryAction::Install { name, version } => {
+                reject_json(&cli.format, "registry install")?;
                 commands::registry_install(&name, version.as_deref(), &cli.format).await?
             }
             RegistryAction::Publish {
                 wasm_path,
                 description,
                 tags,
+                version,
+                language,
             } => {
+                reject_json(&cli.format, "registry publish")?;
                 commands::registry_publish(
                     &wasm_path,
                     description.as_deref(),
                     tags.as_deref(),
+                    version.as_deref(),
+                    language.as_deref(),
                     &cli.format,
                 )
                 .await?
@@ -497,26 +560,17 @@ async fn main() -> anyhow::Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "gang", &mut std::io::stdout());
         }
         Commands::Status => commands::status(&cli.format).await?,
-        Commands::List => {
-            eprintln!("This command requires relay connectivity (not yet available in v0.6).");
-            eprintln!(
-                "Run `gang demo` to see current capabilities, or `gang status` for a summary."
-            );
-        }
+        Commands::List => commands::wip_stub("list", &cli.format)?,
         Commands::Connect {
             robot: _,
             prefer_transport: _,
-        } => {
-            eprintln!("This command requires relay connectivity (not yet available in v0.6).");
-            eprintln!(
-                "Run `gang demo` to see current capabilities, or `gang status` for a summary."
-            );
-        }
+        } => commands::wip_stub("connect", &cli.format)?,
         Commands::Relay {
             listen_addr,
             port,
             metrics_port,
-        } => commands::relay(listen_addr, port, metrics_port).await?,
+            data_dir,
+        } => commands::relay(listen_addr, port, metrics_port, data_dir.as_deref()).await?,
     }
 
     Ok(())
