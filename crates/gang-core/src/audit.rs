@@ -102,7 +102,8 @@ impl ChainedRecord {
 
 /// Append-only audit log stored on the robot.
 ///
-/// Format: a sequence of length-prefixed CBOR [`ChainedRecord`]s. Each record
+/// Format: a sequence of length-prefixed CBOR `ChainedRecord`s (an internal
+/// envelope pairing each [`AuditRecord`] with its chain metadata). Each record
 /// embeds a Blake3 hash chain (`blake3(prev_hash || seq || cbor(record))`) so
 /// tampering, reordering, and interior deletion are detectable via
 /// [`AuditLog::verify_chain`].
