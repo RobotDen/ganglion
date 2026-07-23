@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use libp2p::{
-    Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder, connection_limits, dcutr, identify, kad,
-    noise, ping, relay, request_response,
+    Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder, connection_limits, dcutr, identify,
+    kad, noise, ping, relay, request_response,
     swarm::{NetworkBehaviour, behaviour::toggle::Toggle},
     tcp, yamux,
 };
