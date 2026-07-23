@@ -206,10 +206,10 @@ mod tests {
     fn locate(bin: &str) -> Option<String> {
         for dir in ["/usr/bin", "/bin", "/usr/local/bin"] {
             let p = std::path::Path::new(dir).join(bin);
-            if p.exists() {
-                if let Ok(c) = std::fs::canonicalize(&p) {
-                    return Some(c.to_string_lossy().to_string());
-                }
+            if p.exists()
+                && let Ok(c) = std::fs::canonicalize(&p)
+            {
+                return Some(c.to_string_lossy().to_string());
             }
         }
         None

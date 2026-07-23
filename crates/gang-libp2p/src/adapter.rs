@@ -249,8 +249,8 @@ impl Libp2pTransportAdapter {
 
     /// Dial a peer by their libp2p multiaddr.
     ///
-    /// The wait for the swarm worker's reply is bounded by [`REQUEST_TIMEOUT`]
-    /// (the same bound `send_rpc` uses), so a caller can never hang forever —
+    /// The wait for the swarm worker's reply is bounded by the same 30-second
+    /// request timeout `send_rpc` uses, so a caller can never hang forever —
     /// e.g. when the event loop has not been started yet.
     pub async fn dial_multiaddr(&self, addr: &str) -> Result<(), TransportError> {
         let addr_str = addr.to_string();
