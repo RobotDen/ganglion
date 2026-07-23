@@ -6,8 +6,19 @@ services:
     ports:
       - "4001:4001/tcp"
       - "4001:4001/udp"
+    environment:
+      # Relay identity lives in the relay-data volume so the peer ID
+      # survives container recreation.
+      GANG_KEY_PATH: /data/identity.key
     volumes:
       - relay-data:/data
+    healthcheck:
+      # TCP check on the libp2p listen port (nc is installed in the image).
+      test: ["CMD", "nc", "-z", "127.0.0.1", "4001"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
 volumes:
