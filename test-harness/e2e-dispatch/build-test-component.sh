@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
 # Build the test diagnostics WASM component for e2e testing.
-# Requires: cargo-component, wasm32-wasip1 target
+# Requires: cargo-component
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPONENT_DIR="$SCRIPT_DIR/test-component"
 OUT_DIR="$SCRIPT_DIR/test-data"
+
+# The workspace rust-toolchain.toml only installs the wasm32-wasip2 target,
+# but cargo-component builds a wasm32-wasip1 core module and adapts it into
+# a component (wasip2 support in cargo-component is not something we can
+# count on). Install the wasip1 target here so this script works regardless
+# of what the toolchain file provisions.
+echo "Ensuring wasm32-wasip1 target is installed..."
+rustup target add wasm32-wasip1
 
 echo "Building test diagnostics WASM component..."
 cd "$COMPONENT_DIR"
