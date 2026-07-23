@@ -11,7 +11,9 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["gang", "relay", "--port", "4001"]
+    # Dockerfile.base sets ENTRYPOINT ["gang"], so the command must NOT
+    # repeat the binary name.
+    command: ["relay", "--port", "4001"]
     networks:
       ganglion-e2e:
         ipv4_address: 172.28.0.10
@@ -25,10 +27,7 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: >
-      gang agent
-        --data-dir /data
-        -r /ip4/172.28.0.10/tcp/4001
+    command: ["agent", "--data-dir", "/data", "-r", "/ip4/172.28.0.10/tcp/4001"]
     depends_on:
       relay:
         condition: service_healthy
