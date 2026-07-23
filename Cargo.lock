@@ -1555,6 +1555,7 @@ dependencies = [
  "hex",
  "libp2p-identity",
  "rand 0.8.7",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

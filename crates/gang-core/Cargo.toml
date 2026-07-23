@@ -25,6 +25,7 @@ libp2p-identity = { version = "0.2", features = ["ed25519", "serde"] }
 bytes = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 glob-match = { workspace = true }
+semver = { workspace = true }
 async-trait = { workspace = true }
 hex = { workspace = true }
 dirs = "6"

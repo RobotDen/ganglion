@@ -132,21 +132,12 @@ pub struct SearchResult {
     pub tags: Vec<String>,
 }
 
-/// Parse a version string into a comparable `(major, minor, patch)` tuple.
-///
-/// `semver` is not available in the workspace dependency table, so this does a
-/// lightweight parse of the `major.minor.patch` core, ignoring any
-/// pre-release/build suffix (after `-` or `+`). Missing or non-numeric
-/// components are treated as `0`, which keeps ordering total and predictable
-/// for malformed input.
-fn parse_semver(version: &str) -> (u64, u64, u64) {
-    // Drop build/pre-release metadata; compare only the numeric core.
-    let core = version.split(['-', '+']).next().unwrap_or("");
-    let mut parts = core.split('.');
-    let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let patch = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (major, minor, patch)
+/// Parse a version string with full semver semantics (including pre-release
+/// precedence, e.g. `2.0.0-rc.1 < 2.0.0`). Malformed versions yield `None`,
+/// which sorts below every valid version (`None < Some(_)`), keeping the
+/// ordering total and deterministic for bad input.
+fn parse_semver(version: &str) -> Option<semver::Version> {
+    semver::Version::parse(version).ok()
 }
 
 /// Select the entry with the highest semantic version, breaking ties by the
@@ -692,9 +683,41 @@ mod tests {
     fn semver_parse_orders_numerically() {
         // 0.10.0 must sort above 0.9.0 (numeric, not lexicographic).
         assert!(parse_semver("0.10.0") > parse_semver("0.9.0"));
+        assert!(parse_semver("1.10.0") > parse_semver("1.9.0"));
         assert!(parse_semver("2.0.0") > parse_semver("1.99.99"));
-        // Pre-release suffix is ignored for the numeric core.
-        assert_eq!(parse_semver("1.2.3-rc1"), (1, 2, 3));
+        // Pre-releases sort below the corresponding release.
+        assert!(parse_semver("2.0.0-rc.1") < parse_semver("2.0.0"));
+        // Malformed versions sort below every valid version.
+        assert!(parse_semver("not-a-version") < parse_semver("0.0.1"));
+        assert!(parse_semver("not-a-version").is_none());
+    }
+
+    #[test]
+    fn prerelease_sorts_below_release_regardless_of_publish_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
+
+        // Release first, then a pre-release published later.
+        publish_ok(&mut reg, &kp, "cap", "2.0.0");
+        publish_ok(&mut reg, &kp, "cap", "2.0.0-rc.1");
+        assert_eq!(reg.get_latest("cap").unwrap().version, "2.0.0");
+
+        // Opposite publish order on a fresh name.
+        publish_ok(&mut reg, &kp, "cap2", "2.0.0-rc.1");
+        publish_ok(&mut reg, &kp, "cap2", "2.0.0");
+        assert_eq!(reg.get_latest("cap2").unwrap().version, "2.0.0");
+    }
+
+    #[test]
+    fn one_ten_sorts_above_one_nine() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
+
+        publish_ok(&mut reg, &kp, "cap", "1.10.0");
+        publish_ok(&mut reg, &kp, "cap", "1.9.0");
+        assert_eq!(reg.get_latest("cap").unwrap().version, "1.10.0");
     }
 
     #[test]
