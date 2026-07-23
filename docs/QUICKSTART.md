@@ -5,9 +5,20 @@ Get from zero to running Ganglion in under 5 minutes.
 ## Prerequisites
 
 - Rust 1.85+ (`rustup update stable`)
+- System libraries (Debian/Ubuntu): `sudo apt-get install pkg-config libssl-dev`
 - Docker (only for test-archetype scenarios)
 
-## 1. Build and install
+## 1. Install
+
+Install the CLI from crates.io:
+
+```bash
+cargo install gang
+```
+
+This puts `gang` on your PATH.
+
+### From source (contributors)
 
 ```bash
 git clone https://github.com/TafyLabs/ganglion.git
@@ -16,11 +27,9 @@ cd ganglion
 # Set up git hooks (recommended for development)
 ./scripts/setup-hooks.sh
 
-# Install the CLI
+# Install the CLI from the checkout
 cargo install --path crates/gang-cli
 ```
-
-This puts `gang` on your PATH.
 
 ## 2. Run the demo
 
@@ -62,8 +71,9 @@ This runs six network probes and classifies your environment into one of five ar
 ## 5. Sign and deploy a capability
 
 ```bash
-# Sign a WASM component
-gang sign my-diagnostics.wasm --name my-diagnostics --version 0.1.0
+# Sign a WASM component (declare its capabilities explicitly)
+gang sign my-diagnostics.wasm --name my-diagnostics \
+    --component-version 0.1.0 --capabilities diagnostics,logs
 
 # Start a local robot agent
 gang agent --data-dir /tmp/my-robot
