@@ -99,7 +99,7 @@ my-capability/
 ├── Cargo.toml
 ├── src/lib.rs
 ├── wit/
-│   └── ganglion.wit      # Copy from crates/gang-wasm-host/wit/
+│   └── ganglion.wit      # Written by scaffold (embedded from the canonical WIT)
 └── Makefile
 ```
 
@@ -401,13 +401,18 @@ Every capability must be signed before deployment. The manifest includes:
 - Component name and version
 - Author peer ID (from your `~/.gang/identity.key`)
 - Blake3 hash of the `.wasm` binary
-- Declared capability groups (extracted from the component)
+- Declared capability groups (from `--capabilities` — see below)
 - Ed25519 signature
+
+Declare capabilities explicitly with `--capabilities`. If omitted, `gang sign`
+falls back to a permissive default set and prints a warning (WIT-import
+auto-extraction is not yet wired).
 
 ```bash
 # Sign
 gang sign my-capability.component.wasm \
-    --name my-capability --version 0.1.0
+    --name my-capability --component-version 0.1.0 \
+    --capabilities diagnostics,logs
 # Output: my-capability.manifest.cbor
 
 # Deploy to a robot
@@ -453,9 +458,12 @@ gang deploy local my-capability.component.wasm
 gang run local my-capability -- --verbose
 ```
 
-### Docker e2e tests
+### Docker e2e connectivity smoke test
 
-Full relay + robot + operator scenarios:
+A relay + robot + operator scenario that verifies connectivity and CLI target
+resolution. Note this is a **connectivity smoke test**, not a full remote
+deploy/invoke round-trip — relay-mediated remote dispatch is still WIP
+(ADR-020 Phase 32), so deploy/invoke are exercised on the local fallback path.
 
 ```bash
 cd test-harness/e2e-dispatch
@@ -475,6 +483,7 @@ These ship with Ganglion as reference implementations:
 | `gang-capability-log-normalize` | Log format normalization (journald, ROS 2, syslog) | `logs-stream` |
 | `gang-capability-topic-echo` | ROS 2 topic capture with decimation | `ros-interface` |
 | `gang-capability-canary-probe` | Fleet-scale health polling | `diagnostics-collect`, `network-probe`, `metrics-emit` |
+| `gang-capability-rosbag-slice` | Time-bounded rosbag2 slicing | `ros-interface`, `artifacts-publish` |
 
 ## Best practices
 
