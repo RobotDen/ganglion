@@ -12,7 +12,7 @@ Part of the Tafy Labs / RobotDen vault ecosystem. Ganglion is the open-source co
 cargo build                          # Debug build
 cargo build --release                # Release build
 cargo install --path crates/gang-cli # Install `gang` CLI to PATH
-cargo test                           # Run all 254 tests (v1.0)
+cargo test                           # Run all 317 tests
 cargo clippy --all-targets           # Lint (CI runs with -Dwarnings)
 cargo fmt --check                    # Check formatting
 cargo doc --no-deps                  # Build rustdoc
@@ -71,7 +71,7 @@ crates/
 
 ### Dependency rule
 
-`gang-core` has zero dependencies on other workspace crates. All other crates depend on `gang-core`. The CLI crate depends on everything.
+`gang-core` has zero dependencies on other workspace crates. `gang-libp2p` and `gang-wasm-host` depend on `gang-core`; `gang-ros` depends on `gang-core`, `gang-libp2p`, and `gang-wasm-host`; `gang-cli` depends on `gang-core`, `gang-libp2p`, and `gang-ros` (not `gang-wasm-host` directly). The eight `gang-capability-*` crates are standalone WASM component crates and depend on no other workspace crate.
 
 ## Architecture
 
