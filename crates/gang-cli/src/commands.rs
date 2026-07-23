@@ -1070,31 +1070,74 @@ pub async fn agent(
             ..Default::default()
         };
 
-        let transport = gang_libp2p::Libp2pTransportAdapter::new(transport_config).await?;
+        let transport = Arc::new(gang_libp2p::Libp2pTransportAdapter::new(transport_config).await?);
 
         // Register the control protocol handler
-        agent.serve(&transport).await?;
+        agent.serve(transport.as_ref()).await?;
 
-        // Dial the relay to establish a circuit reservation
-        transport
-            .dial_multiaddr(relay_addr)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to relay {relay_addr}: {e}"))?;
+        // Start the swarm event loop FIRST: dialing goes through the swarm
+        // worker's command channel, so a dial issued before the loop runs
+        // would queue (and previously deadlock) forever.
+        let loop_transport = Arc::clone(&transport);
+        let mut event_loop = tokio::spawn(async move { loop_transport.run_event_loop().await });
 
-        println!("Connected to relay. Waiting for operator connections...");
+        // Dial the relay and confirm the connection in the background,
+        // retrying with a warning on failure so an unreachable relay neither
+        // hangs nor kills the agent — it keeps serving and keeps retrying.
+        let dial_transport = Arc::clone(&transport);
+        let relay_addr_owned = relay_addr.to_string();
+        tokio::spawn(async move {
+            let mut attempt: u32 = 0;
+            loop {
+                attempt += 1;
+                match dial_transport.dial_multiaddr(&relay_addr_owned).await {
+                    Ok(()) => {
+                        // The dial is queued by the swarm; confirm an actual
+                        // connection was established before claiming success.
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(8);
+                        loop {
+                            if !dial_transport.connected_peers().await.is_empty() {
+                                println!("Connected to relay. Waiting for operator connections...");
+                                return;
+                            }
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        eprintln!(
+                            "warning: no connection to relay {relay_addr_owned} yet \
+                             (attempt {attempt}); retrying in 5s..."
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to dial relay {relay_addr_owned}: {e} \
+                             (attempt {attempt}); retrying in 5s..."
+                        );
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+
         println!("Press Ctrl+C to stop.");
 
-        // Run the event loop alongside Ctrl+C
+        // Run until the event loop ends or Ctrl+C arrives.
         tokio::select! {
-            result = transport.run_event_loop() => {
-                if let Err(e) = result {
-                    eprintln!("Transport event loop error: {e}");
+            result = &mut event_loop => {
+                match result {
+                    Ok(Err(e)) => eprintln!("Transport event loop error: {e}"),
+                    Err(e) => eprintln!("Transport event loop task failed: {e}"),
+                    Ok(Ok(())) => {}
                 }
             }
             _ = tokio::signal::ctrl_c() => {
                 println!("\nAgent stopped.");
             }
         }
+        event_loop.abort();
     } else {
         println!("  Mode:     local (no relay, use `gang deploy` for local testing)");
         println!();
