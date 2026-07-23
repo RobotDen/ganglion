@@ -11,6 +11,28 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::artifacts::Cid;
+use crate::error::ManifestError;
+use crate::manifest::SignedManifest;
+
+/// Errors returned when publishing to the registry.
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryError {
+    /// The accompanying signed manifest failed verification.
+    #[error("manifest verification failed: {0}")]
+    Manifest(#[from] ManifestError),
+
+    /// The entry's declared author does not match the signed manifest author.
+    #[error("author mismatch: entry claims {entry}, signed manifest is authored by {manifest}")]
+    AuthorMismatch { entry: String, manifest: String },
+
+    /// A capability with this name and version is already published.
+    #[error("{0} already published")]
+    DuplicateVersion(String),
+
+    /// Underlying I/O failure while persisting the registry.
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 /// A published capability in the registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,19 +125,41 @@ impl Registry {
     }
 
     /// Publish a capability to the registry.
-    pub fn publish(&mut self, entry: RegistryEntry) -> Result<(), std::io::Error> {
+    ///
+    /// The caller must supply the [`SignedManifest`] that backs the entry. The
+    /// manifest signature is verified (reusing [`SignedManifest::verify_and_decode`],
+    /// which also confirms the manifest's author peer ID matches the signing
+    /// key) and the entry's declared `author_peer_id` must match the verified
+    /// manifest author. Publishing is rejected on any mismatch, preventing an
+    /// entry from being attributed to a peer that did not sign the manifest.
+    pub fn publish(
+        &mut self,
+        entry: RegistryEntry,
+        signed_manifest: &SignedManifest,
+    ) -> Result<(), RegistryError> {
+        // Verify the signed manifest and recover the authenticated author.
+        let manifest = signed_manifest.verify_and_decode()?;
+
+        if entry.author_peer_id != manifest.author_peer_id.as_str() {
+            return Err(RegistryError::AuthorMismatch {
+                entry: entry.author_peer_id.clone(),
+                manifest: manifest.author_peer_id.to_string(),
+            });
+        }
+
         let versions = self.entries.entry(entry.name.clone()).or_default();
 
         // Check for duplicate version
         if versions.iter().any(|e| e.version == entry.version) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!("{}@{} already published", entry.name, entry.version),
-            ));
+            return Err(RegistryError::DuplicateVersion(format!(
+                "{}@{}",
+                entry.name, entry.version
+            )));
         }
 
         versions.push(entry);
-        self.persist()
+        self.persist()?;
+        Ok(())
     }
 
     /// Search for capabilities by query string.
@@ -203,6 +247,9 @@ impl Registry {
 mod tests {
     use super::*;
 
+    use crate::identity::Keypair;
+    use crate::manifest::{ComponentManifest, ResourceLimits, MANIFEST_SCHEMA_VERSION};
+
     fn sample_entry(name: &str, version: &str) -> RegistryEntry {
         RegistryEntry {
             name: name.into(),
@@ -219,15 +266,44 @@ mod tests {
         }
     }
 
+    /// Build an entry plus a matching signed manifest authored by `kp`.
+    fn signed_entry(kp: &Keypair, name: &str, version: &str) -> (RegistryEntry, SignedManifest) {
+        let manifest = ComponentManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION.into(),
+            name: name.into(),
+            version: version.into(),
+            declared_capabilities: vec![],
+            author_peer_id: kp.peer_id(),
+            component_hash: blake3::hash(format!("{name}-{version}").as_bytes())
+                .to_hex()
+                .to_string(),
+            limits: ResourceLimits::default(),
+            language: CapabilityLanguage::Rust,
+            description: String::new(),
+            tags: vec![],
+            min_ganglion_version: None,
+        };
+        let signed = SignedManifest::sign(&manifest, kp).unwrap();
+
+        let mut entry = sample_entry(name, version);
+        entry.author_peer_id = kp.peer_id().to_string();
+        (entry, signed)
+    }
+
+    /// Publish a signed sample entry, asserting success.
+    fn publish_ok(reg: &mut Registry, kp: &Keypair, name: &str, version: &str) {
+        let (entry, signed) = signed_entry(kp, name, version);
+        reg.publish(entry, &signed).unwrap();
+    }
+
     #[test]
     fn publish_and_search() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
 
-        reg.publish(sample_entry("gang-capability-diagnostics", "1.0.0"))
-            .unwrap();
-        reg.publish(sample_entry("gang-capability-param-inspect", "1.0.0"))
-            .unwrap();
+        publish_ok(&mut reg, &kp, "gang-capability-diagnostics", "1.0.0");
+        publish_ok(&mut reg, &kp, "gang-capability-param-inspect", "1.0.0");
 
         let results = reg.search("diagnostics");
         assert_eq!(results.len(), 1);
@@ -235,14 +311,44 @@ mod tests {
     }
 
     #[test]
-    fn search_by_tag() {
+    fn publish_rejects_author_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = Registry::open(dir.path()).unwrap();
 
-        reg.publish(sample_entry("gang-capability-diagnostics", "1.0.0"))
-            .unwrap();
-        reg.publish(sample_entry("gang-capability-param-inspect", "1.0.0"))
-            .unwrap();
+        let signer = Keypair::generate();
+        let (mut entry, signed) = signed_entry(&signer, "spoofed-cap", "1.0.0");
+        // Claim a different author than the one who actually signed.
+        entry.author_peer_id = Keypair::generate().peer_id().to_string();
+
+        let result = reg.publish(entry, &signed);
+        assert!(matches!(result, Err(RegistryError::AuthorMismatch { .. })));
+        assert_eq!(reg.count(), 0);
+    }
+
+    #[test]
+    fn publish_rejects_tampered_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+
+        let signer = Keypair::generate();
+        let (entry, mut signed) = signed_entry(&signer, "tampered-cap", "1.0.0");
+        // Corrupt the signed manifest bytes so verification fails.
+        if let Some(b) = signed.manifest_cbor.last_mut() {
+            *b ^= 0xFF;
+        }
+
+        let result = reg.publish(entry, &signed);
+        assert!(matches!(result, Err(RegistryError::Manifest(_))));
+    }
+
+    #[test]
+    fn search_by_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
+
+        publish_ok(&mut reg, &kp, "gang-capability-diagnostics", "1.0.0");
+        publish_ok(&mut reg, &kp, "gang-capability-param-inspect", "1.0.0");
 
         // "system" tag is on all entries
         let results = reg.search("system");
@@ -258,19 +364,22 @@ mod tests {
     fn duplicate_version_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
 
-        reg.publish(sample_entry("test-cap", "1.0.0")).unwrap();
-        let result = reg.publish(sample_entry("test-cap", "1.0.0"));
-        assert!(result.is_err());
+        publish_ok(&mut reg, &kp, "test-cap", "1.0.0");
+        let (entry, signed) = signed_entry(&kp, "test-cap", "1.0.0");
+        let result = reg.publish(entry, &signed);
+        assert!(matches!(result, Err(RegistryError::DuplicateVersion(_))));
     }
 
     #[test]
     fn multiple_versions() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
 
-        reg.publish(sample_entry("test-cap", "1.0.0")).unwrap();
-        reg.publish(sample_entry("test-cap", "1.1.0")).unwrap();
+        publish_ok(&mut reg, &kp, "test-cap", "1.0.0");
+        publish_ok(&mut reg, &kp, "test-cap", "1.1.0");
 
         let versions = reg.get("test-cap").unwrap();
         assert_eq!(versions.len(), 2);
@@ -283,10 +392,11 @@ mod tests {
     fn list_all() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
 
-        reg.publish(sample_entry("cap-a", "1.0.0")).unwrap();
-        reg.publish(sample_entry("cap-b", "1.0.0")).unwrap();
-        reg.publish(sample_entry("cap-c", "1.0.0")).unwrap();
+        publish_ok(&mut reg, &kp, "cap-a", "1.0.0");
+        publish_ok(&mut reg, &kp, "cap-b", "1.0.0");
+        publish_ok(&mut reg, &kp, "cap-c", "1.0.0");
 
         let list = reg.list();
         assert_eq!(list.len(), 3);
@@ -299,8 +409,9 @@ mod tests {
     fn remove_capability() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
 
-        reg.publish(sample_entry("to-remove", "1.0.0")).unwrap();
+        publish_ok(&mut reg, &kp, "to-remove", "1.0.0");
         assert_eq!(reg.count(), 1);
 
         let removed = reg.remove("to-remove").unwrap();
@@ -314,11 +425,11 @@ mod tests {
     #[test]
     fn persist_and_reload() {
         let dir = tempfile::tempdir().unwrap();
+        let kp = Keypair::generate();
 
         {
             let mut reg = Registry::open(dir.path()).unwrap();
-            reg.publish(sample_entry("persistent-cap", "1.0.0"))
-                .unwrap();
+            publish_ok(&mut reg, &kp, "persistent-cap", "1.0.0");
         }
 
         let reg = Registry::open(dir.path()).unwrap();
