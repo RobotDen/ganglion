@@ -50,9 +50,19 @@ enum Commands {
         /// Component name (default: derived from filename).
         #[arg(long)]
         name: Option<String>,
-        /// Component version.
-        #[arg(long, default_value = "0.1.0")]
+        /// Component version (semver). Distinct from the CLI's own -V/--version.
+        #[arg(
+            long = "component-version",
+            visible_alias = "version",
+            value_name = "SEMVER",
+            default_value = "0.1.0"
+        )]
         version: String,
+        /// Declared capability groups, comma-separated (e.g.
+        /// "diagnostics,logs,ros,fs,artifacts,process,network,metrics").
+        /// If omitted, a permissive default set is used with a warning.
+        #[arg(long, value_delimiter = ',')]
+        capabilities: Option<Vec<String>>,
     },
 
     /// Run the robot agent (for development/testing).

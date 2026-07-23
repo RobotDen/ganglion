@@ -847,12 +847,53 @@ pub fn verify_host_key(
 
 // --- End identity verification ---
 
+/// Parse a capability group short name (or fully-qualified name) into a
+/// `CapabilityGroup` with permissive defaults for any pattern/allowlist fields.
+fn parse_capability_group(
+    spec: &str,
+) -> anyhow::Result<gang_core::capability::CapabilityGroup> {
+    use gang_core::capability::CapabilityGroup;
+    let version = "1.0".to_string();
+    let group = match spec.trim() {
+        "diagnostics" | "ganglion:diagnostics/collect" => {
+            CapabilityGroup::DiagnosticsCollect { version }
+        }
+        "logs" | "ganglion:logs/stream" => CapabilityGroup::LogStream {
+            version,
+            patterns: vec!["**".into()],
+        },
+        "ros" | "ganglion:ros/interface" => CapabilityGroup::RosInterface {
+            version,
+            patterns: vec![],
+        },
+        "fs" | "ganglion:fs/bounded" => CapabilityGroup::FsBounded {
+            version,
+            paths: vec![],
+        },
+        "artifacts" | "ganglion:artifacts/publish" => {
+            CapabilityGroup::ArtifactsPublish { version }
+        }
+        "process" | "ganglion:process/spawn" => CapabilityGroup::ProcessSpawn {
+            version,
+            allowed_commands: vec![],
+        },
+        "network" | "ganglion:network/probe" => CapabilityGroup::NetworkProbe { version },
+        "metrics" | "ganglion:metrics/emit" => CapabilityGroup::MetricsEmit { version },
+        other => anyhow::bail!(
+            "unknown capability group '{other}'. Valid: diagnostics, logs, ros, fs, \
+             artifacts, process, network, metrics"
+        ),
+    };
+    Ok(group)
+}
+
 /// `gang sign`
 pub async fn sign(
     wasm_path: &str,
     key_path: Option<&str>,
     name: Option<&str>,
     version: &str,
+    capabilities: Option<&[String]>,
 ) -> anyhow::Result<()> {
     use gang_core::capability::CapabilityGroup;
     use gang_core::manifest::{ComponentManifest, ResourceLimits, SignedManifest};
@@ -885,19 +926,38 @@ pub async fn sign(
             .to_string()
     });
 
+    // Declared capabilities: from --capabilities when provided, otherwise a
+    // permissive default set with a loud warning (real WIT-import extraction is
+    // not yet wired — see CLI-06).
+    let declared_capabilities = match capabilities {
+        Some(specs) if !specs.is_empty() => specs
+            .iter()
+            .map(|s| parse_capability_group(s))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        _ => {
+            eprintln!(
+                "WARNING: no --capabilities provided. Falling back to a permissive default \
+                 set (diagnostics + logs \"**\"). This is almost certainly NOT what the \
+                 component actually needs. Pass --capabilities to declare them explicitly, \
+                 e.g. --capabilities diagnostics,logs"
+            );
+            vec![
+                CapabilityGroup::DiagnosticsCollect {
+                    version: "1.0".into(),
+                },
+                CapabilityGroup::LogStream {
+                    version: "1.0".into(),
+                    patterns: vec!["**".into()],
+                },
+            ]
+        }
+    };
+
     let manifest = ComponentManifest {
         schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
         name: name.clone(),
         version: version.into(),
-        declared_capabilities: vec![
-            CapabilityGroup::DiagnosticsCollect {
-                version: "1.0".into(),
-            },
-            CapabilityGroup::LogStream {
-                version: "1.0".into(),
-                patterns: vec!["**".into()],
-            },
-        ],
+        declared_capabilities,
         author_peer_id: keypair.peer_id(),
         component_hash: component_hash.clone(),
         limits: ResourceLimits::default(),
@@ -918,12 +978,16 @@ pub async fn sign(
     println!("  Manifest: {}", manifest_path.display());
     println!("  Author:   {}", keypair.peer_id());
     println!("  Hash:     {component_hash}");
+    println!("  Capabilities:");
+    for cap in &manifest.declared_capabilities {
+        println!("    - {}", cap.qualified_name());
+    }
     Ok(())
 }
 
 /// `gang agent` — run the robot agent.
 pub async fn agent(
-    _config: Option<&str>,
+    config_path: Option<&str>,
     data_dir: &str,
     relay: Option<&str>,
 ) -> anyhow::Result<()> {
