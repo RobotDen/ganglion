@@ -18,22 +18,27 @@ pub const ALL_PROTOCOLS: &[&str] = &[PROTOCOL_CONTROL, PROTOCOL_TOOL, PROTOCOL_B
 pub struct ProtocolId(String);
 
 impl ProtocolId {
+    /// Construct a protocol identifier from any string-like value.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// The protocol identifier as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// The control protocol identifier (`/ganglion/control/1.0`).
     pub fn control() -> Self {
         Self(PROTOCOL_CONTROL.into())
     }
 
+    /// The tool protocol identifier (`/ganglion/tool/1.0`).
     pub fn tool() -> Self {
         Self(PROTOCOL_TOOL.into())
     }
 
+    /// The bulk-transfer protocol identifier (`/ganglion/bulk/1.0`).
     pub fn bulk() -> Self {
         Self(PROTOCOL_BULK.into())
     }

@@ -8,6 +8,7 @@ pub enum CapabilityGroup {
     /// Read-only and read-write access to ROS 2 topics, services, and parameters.
     #[serde(rename = "ganglion:ros/interface")]
     RosInterface {
+        /// Interface version requested.
         version: String,
         /// Topic/service/parameter patterns this capability requests access to.
         patterns: Vec<AccessPattern>,
@@ -16,6 +17,7 @@ pub enum CapabilityGroup {
     /// Read access to system logs, journald, and ROS log files.
     #[serde(rename = "ganglion:logs/stream")]
     LogStream {
+        /// Interface version requested.
         version: String,
         /// Log source patterns.
         patterns: Vec<String>,
@@ -24,6 +26,7 @@ pub enum CapabilityGroup {
     /// Bounded filesystem access.
     #[serde(rename = "ganglion:fs/bounded")]
     FsBounded {
+        /// Interface version requested.
         version: String,
         /// Path patterns with explicit read/write/execute flags.
         paths: Vec<FsAccessPattern>,
@@ -31,15 +34,22 @@ pub enum CapabilityGroup {
 
     /// Structured diagnostic collection primitives.
     #[serde(rename = "ganglion:diagnostics/collect")]
-    DiagnosticsCollect { version: String },
+    DiagnosticsCollect {
+        /// Interface version requested.
+        version: String,
+    },
 
     /// Content-addressed artifact publishing (v0.3).
     #[serde(rename = "ganglion:artifacts/publish")]
-    ArtifactsPublish { version: String },
+    ArtifactsPublish {
+        /// Interface version requested.
+        version: String,
+    },
 
     /// Bounded subprocess invocation (v0.4).
     #[serde(rename = "ganglion:process/spawn")]
     ProcessSpawn {
+        /// Interface version requested.
         version: String,
         /// Allowlisted command patterns.
         allowed_commands: Vec<String>,
@@ -47,14 +57,21 @@ pub enum CapabilityGroup {
 
     /// Structured network probing primitives (v0.4).
     #[serde(rename = "ganglion:network/probe")]
-    NetworkProbe { version: String },
+    NetworkProbe {
+        /// Interface version requested.
+        version: String,
+    },
 
     /// Structured metric emission from capabilities (v0.4).
     #[serde(rename = "ganglion:metrics/emit")]
-    MetricsEmit { version: String },
+    MetricsEmit {
+        /// Interface version requested.
+        version: String,
+    },
 }
 
 impl CapabilityGroup {
+    /// The capability group's qualified interface name (without version).
     pub fn name(&self) -> &str {
         match self {
             Self::RosInterface { .. } => "ganglion:ros/interface",
@@ -68,6 +85,7 @@ impl CapabilityGroup {
         }
     }
 
+    /// The requested interface version for this capability group.
     pub fn version(&self) -> &str {
         match self {
             Self::RosInterface { version, .. }
@@ -96,10 +114,13 @@ pub struct AccessPattern {
     pub access: RosAccess,
 }
 
+/// Access mode for a ROS interface pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RosAccess {
+    /// Read-only access (subscribe / get).
     ReadOnly,
+    /// Read-write access (publish / set / call).
     ReadWrite,
 }
 
@@ -108,19 +129,28 @@ pub enum RosAccess {
 pub struct FsAccessPattern {
     /// Glob pattern for file paths.
     pub pattern: String,
+    /// Whether reads are permitted.
     pub read: bool,
+    /// Whether writes are permitted.
     pub write: bool,
+    /// Whether execution is permitted.
     pub execute: bool,
 }
 
 /// Describes a capability installed on a robot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledCapability {
+    /// Capability name.
     pub name: String,
+    /// Installed version.
     pub version: String,
+    /// Peer ID of the capability author.
     pub author_peer_id: crate::identity::PeerId,
+    /// Capability groups the component declared.
     pub declared_capabilities: Vec<CapabilityGroup>,
+    /// Blake3 hash of the installed component.
     pub component_hash: String,
+    /// When the capability was installed.
     pub installed_at: chrono::DateTime<chrono::Utc>,
     /// Path to the .wasm component on disk.
     pub component_path: std::path::PathBuf,

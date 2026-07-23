@@ -17,18 +17,40 @@ pub struct CapabilityRequest {
 /// Operations that brokers handle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BrokerOperation {
     // --- ROS Interface ---
     /// Subscribe to a topic (read).
-    TopicSubscribe { topic: String },
+    TopicSubscribe {
+        /// Topic name.
+        topic: String,
+    },
     /// Publish to a topic (write).
-    TopicPublish { topic: String, data: Vec<u8> },
+    TopicPublish {
+        /// Topic name.
+        topic: String,
+        /// Serialized message payload.
+        data: Vec<u8>,
+    },
     /// Call a service.
-    ServiceCall { service: String, request: Vec<u8> },
+    ServiceCall {
+        /// Service name.
+        service: String,
+        /// Serialized request payload.
+        request: Vec<u8>,
+    },
     /// Get a parameter.
-    ParamGet { name: String },
+    ParamGet {
+        /// Parameter name.
+        name: String,
+    },
     /// Set a parameter.
-    ParamSet { name: String, value: Vec<u8> },
+    ParamSet {
+        /// Parameter name.
+        name: String,
+        /// Serialized parameter value.
+        value: Vec<u8>,
+    },
     /// List all topics/services/parameters.
     RosList,
 
@@ -36,17 +58,36 @@ pub enum BrokerOperation {
     /// List available log sources.
     LogSourceList,
     /// Stream log lines matching a pattern.
-    LogStream { source: String, pattern: String },
+    LogStream {
+        /// Log source identifier.
+        source: String,
+        /// Filter pattern.
+        pattern: String,
+    },
 
     // --- Filesystem ---
     /// Read a file.
-    FsRead { path: String },
+    FsRead {
+        /// Path to read.
+        path: String,
+    },
     /// Write a file.
-    FsWrite { path: String, data: Vec<u8> },
+    FsWrite {
+        /// Path to write.
+        path: String,
+        /// Bytes to write.
+        data: Vec<u8>,
+    },
     /// List a directory.
-    FsList { path: String },
+    FsList {
+        /// Directory path.
+        path: String,
+    },
     /// Stat a file.
-    FsStat { path: String },
+    FsStat {
+        /// Path to stat.
+        path: String,
+    },
 
     // --- Diagnostics ---
     /// Collect system information.
@@ -59,17 +100,25 @@ pub enum BrokerOperation {
     // --- Artifacts (v0.3) ---
     /// Publish a byte stream as a content-addressed artifact.
     ArtifactPublish {
+        /// Artifact bytes.
         data: Vec<u8>,
+        /// Optional original filename.
         filename: Option<String>,
+        /// Optional MIME content type.
         content_type: Option<String>,
     },
     /// Check if an artifact exists by CID.
-    ArtifactExists { cid: String },
+    ArtifactExists {
+        /// The content identifier to check.
+        cid: String,
+    },
 
     // --- Process (v0.4) ---
     /// Spawn a bounded subprocess.
     ProcessSpawn {
+        /// Command to run (subject to allowlist).
         command: String,
+        /// Command arguments.
         args: Vec<String>,
         /// Working directory (within allowed paths).
         cwd: Option<String>,
@@ -81,39 +130,65 @@ pub enum BrokerOperation {
 
     // --- Network Probe (v0.4) ---
     /// Ping a host and return latency.
-    NetPing { host: String, count: u32 },
+    NetPing {
+        /// Target host.
+        host: String,
+        /// Number of pings to send.
+        count: u32,
+    },
     /// DNS lookup.
     NetDnsLookup {
+        /// Hostname to resolve.
         hostname: String,
+        /// DNS record type (e.g. "A", "AAAA").
         record_type: String,
     },
     /// TCP port check.
     NetPortCheck {
+        /// Target host.
         host: String,
+        /// Target port.
         port: u16,
+        /// Connection timeout in seconds.
         timeout_secs: u64,
     },
     /// Traceroute to a host.
-    NetTraceroute { host: String, max_hops: u32 },
+    NetTraceroute {
+        /// Target host.
+        host: String,
+        /// Maximum number of hops.
+        max_hops: u32,
+    },
 
     // --- Metrics (v0.4) ---
     /// Emit a metric value from a capability.
     MetricEmit {
+        /// Metric name.
         name: String,
+        /// Metric value.
         value: f64,
+        /// Optional unit.
         unit: Option<String>,
+        /// Metric tags as key/value pairs.
         tags: Vec<(String, String)>,
     },
     /// Emit a batch of metrics.
-    MetricEmitBatch { metrics: Vec<MetricPoint> },
+    MetricEmitBatch {
+        /// The metric points to emit.
+        metrics: Vec<MetricPoint>,
+    },
 }
 
 /// A single metric data point for batch emission.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricPoint {
+    /// Metric name.
     pub name: String,
+    /// Metric value.
     pub value: f64,
+    /// Optional unit.
     pub unit: Option<String>,
+    /// Metric tags as key/value pairs.
     pub tags: Vec<(String, String)>,
     /// Unix timestamp in milliseconds. 0 = use current time.
     pub timestamp_ms: u64,

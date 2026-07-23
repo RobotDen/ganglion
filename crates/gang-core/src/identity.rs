@@ -61,6 +61,7 @@ impl PeerId {
         Ok(Self(s.to_string()))
     }
 
+    /// The peer ID as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -199,18 +200,22 @@ impl Keypair {
         }
     }
 
+    /// The peer ID derived from this keypair's public key.
     pub fn peer_id(&self) -> PeerId {
         PeerId::from_public_key(&self.signing_key.verifying_key())
     }
 
+    /// This keypair's Ed25519 public (verifying) key.
     pub fn public_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
     }
 
+    /// Sign a message with this keypair's private key.
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key.sign(message)
     }
 
+    /// Verify a signature over `message` against `public_key`.
     pub fn verify(public_key: &VerifyingKey, message: &[u8], signature: &Signature) -> bool {
         public_key.verify(message, signature).is_ok()
     }
@@ -247,15 +252,20 @@ pub struct PeerRegistry {
     entries: HashMap<String, PeerEntry>,
 }
 
+/// A registry entry binding a name to a peer's ID, role, and relay addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerEntry {
+    /// The peer's identifier.
     pub peer_id: PeerId,
+    /// The peer's network role.
     pub role: Role,
+    /// Known relay multiaddresses for reaching this peer.
     #[serde(default)]
     pub relay_addrs: Vec<String>,
 }
 
 impl PeerRegistry {
+    /// Load the registry from `path`, returning an empty registry if absent.
     pub fn load(path: &Path) -> Result<Self, std::io::Error> {
         if !path.exists() {
             return Ok(Self::default());
@@ -265,6 +275,7 @@ impl PeerRegistry {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 
+    /// Persist the registry to `path`, creating parent directories as needed.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -274,14 +285,17 @@ impl PeerRegistry {
         std::fs::write(path, json)
     }
 
+    /// Register (or replace) a named peer entry.
     pub fn register(&mut self, name: String, entry: PeerEntry) {
         self.entries.insert(name, entry);
     }
 
+    /// Look up an entry by its human-readable name.
     pub fn lookup(&self, name: &str) -> Option<&PeerEntry> {
         self.entries.get(name)
     }
 
+    /// Look up the name and entry for a given peer ID.
     pub fn lookup_by_peer_id(&self, peer_id: &PeerId) -> Option<(&str, &PeerEntry)> {
         self.entries
             .iter()
@@ -289,10 +303,12 @@ impl PeerRegistry {
             .map(|(name, entry)| (name.as_str(), entry))
     }
 
+    /// Remove a named entry, returning it if it existed.
     pub fn remove(&mut self, name: &str) -> Option<PeerEntry> {
         self.entries.remove(name)
     }
 
+    /// Iterate over all `(name, entry)` pairs.
     pub fn list(&self) -> impl Iterator<Item = (&str, &PeerEntry)> {
         self.entries.iter().map(|(k, v)| (k.as_str(), v))
     }

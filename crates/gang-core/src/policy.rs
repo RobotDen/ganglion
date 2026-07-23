@@ -17,6 +17,7 @@ pub struct Policy {
     pub peer_rules: Vec<PeerRule>,
 }
 
+/// A rule permitting a capability group and constraining its patterns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityRule {
     /// Capability group name (e.g., "ganglion:ros/interface").
@@ -28,6 +29,7 @@ pub struct CapabilityRule {
     pub max_access: Option<String>,
 }
 
+/// A rule governing what a given peer is authorized to deploy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerRule {
     /// Peer ID this rule applies to. "*" means any peer.

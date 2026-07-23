@@ -22,9 +22,13 @@ pub struct ComponentManifest {
     /// Manifest schema version ("2.0" for v0.4+).
     #[serde(default = "default_schema_version")]
     pub schema_version: String,
+    /// Capability name.
     pub name: String,
+    /// Capability version.
     pub version: String,
+    /// Capability groups the component declares.
     pub declared_capabilities: Vec<CapabilityGroup>,
+    /// Peer ID of the manifest author.
     pub author_peer_id: PeerId,
     /// Blake3 hash of the component .wasm bytes.
     pub component_hash: String,
@@ -66,8 +70,11 @@ pub struct ResourceLimits {
 /// A manifest with its signature attached — the wire/storage format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedManifest {
+    /// CBOR-encoded [`ComponentManifest`] bytes (the signed payload).
     pub manifest_cbor: Vec<u8>,
+    /// Ed25519 signature over `manifest_cbor`.
     pub signature: Vec<u8>,
+    /// The author's Ed25519 public key bytes.
     pub author_public_key: Vec<u8>,
 }
 
@@ -161,17 +168,23 @@ impl SignedManifest {
 /// Trust store: a list of peer IDs whose signatures are accepted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TrustStore {
+    /// The peers whose signatures are accepted.
     pub trusted_peers: Vec<TrustedPeer>,
 }
 
+/// A single trusted peer entry: an identity plus its public key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustedPeer {
+    /// The trusted peer's ID.
     pub peer_id: PeerId,
+    /// Human-readable name for the peer.
     pub name: String,
+    /// The peer's Ed25519 public key bytes.
     pub public_key: Vec<u8>,
 }
 
 impl TrustStore {
+    /// Load the trust store from `path`, returning an empty store if absent.
     pub fn load(path: &std::path::Path) -> Result<Self, std::io::Error> {
         if !path.exists() {
             return Ok(Self::default());
@@ -181,6 +194,7 @@ impl TrustStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 
+    /// Persist the trust store to `path`, creating parent directories.
     pub fn save(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -190,10 +204,12 @@ impl TrustStore {
         std::fs::write(path, json)
     }
 
+    /// Whether the given peer is present in the trust store.
     pub fn is_trusted(&self, peer_id: &PeerId) -> bool {
         self.trusted_peers.iter().any(|p| &p.peer_id == peer_id)
     }
 
+    /// The stored public key bytes for a trusted peer, if present.
     pub fn get_public_key(&self, peer_id: &PeerId) -> Option<&[u8]> {
         self.trusted_peers
             .iter()
@@ -201,12 +217,14 @@ impl TrustStore {
             .map(|p| p.public_key.as_slice())
     }
 
+    /// Add a peer to the trust store (no-op if already present).
     pub fn add(&mut self, peer: TrustedPeer) {
         if !self.is_trusted(&peer.peer_id) {
             self.trusted_peers.push(peer);
         }
     }
 
+    /// Remove a peer from the trust store.
     pub fn remove(&mut self, peer_id: &PeerId) {
         self.trusted_peers.retain(|p| &p.peer_id != peer_id);
     }

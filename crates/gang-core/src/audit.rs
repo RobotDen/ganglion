@@ -30,20 +30,39 @@ pub struct AuditRecord {
     pub io_stats: Vec<CapabilityIoStats>,
 }
 
+/// Terminal status of an audited capability invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExitStatus {
+    /// The invocation completed successfully.
     Success,
-    Failed { message: String },
+    /// The invocation failed with a message.
+    Failed {
+        /// Failure message.
+        message: String,
+    },
+    /// The invocation exceeded its deadline.
     Timeout,
-    Trapped { message: String },
-    PolicyDenied { reason: String },
+    /// The WASM guest trapped.
+    Trapped {
+        /// Trap message.
+        message: String,
+    },
+    /// The invocation was denied by policy.
+    PolicyDenied {
+        /// Reason for denial.
+        reason: String,
+    },
 }
 
+/// Per-capability byte counters recorded for an invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityIoStats {
+    /// The capability these counters apply to.
     pub capability: String,
+    /// Bytes read from the resource.
     pub bytes_in: u64,
+    /// Bytes written to the resource.
     pub bytes_out: u64,
 }
 
@@ -97,6 +116,8 @@ pub struct AuditLog {
 }
 
 impl AuditLog {
+    /// Create a log handle for `path`, rotating once it exceeds
+    /// `max_size_bytes` (0 disables rotation).
     pub fn new(path: PathBuf, max_size_bytes: u64) -> Self {
         Self {
             path,

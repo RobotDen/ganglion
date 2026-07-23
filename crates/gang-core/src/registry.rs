@@ -23,7 +23,12 @@ pub enum RegistryError {
 
     /// The entry's declared author does not match the signed manifest author.
     #[error("author mismatch: entry claims {entry}, signed manifest is authored by {manifest}")]
-    AuthorMismatch { entry: String, manifest: String },
+    AuthorMismatch {
+        /// The author declared by the registry entry.
+        entry: String,
+        /// The author authenticated by the signed manifest.
+        manifest: String,
+    },
 
     /// A capability with this name and version is already published.
     #[error("{0} already published")]
@@ -61,14 +66,20 @@ pub struct RegistryEntry {
     pub min_ganglion_version: Option<String>,
 }
 
+/// The language a capability was authored in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum CapabilityLanguage {
+    /// Rust.
     Rust,
+    /// C++.
     Cpp,
+    /// Python.
     Python,
+    /// Go.
     Go,
+    /// Any other or unspecified language.
     #[default]
     Other,
 }
@@ -96,11 +107,17 @@ pub struct Registry {
 /// Search results from the registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
+    /// Capability name.
     pub name: String,
+    /// Highest published semantic version.
     pub latest_version: String,
+    /// Short description.
     pub description: String,
+    /// Author peer ID.
     pub author: String,
+    /// Authoring language.
     pub language: CapabilityLanguage,
+    /// Discoverability tags.
     pub tags: Vec<String>,
 }
 

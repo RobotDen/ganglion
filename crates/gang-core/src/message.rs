@@ -36,10 +36,13 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(
     Ok((msg, total))
 }
 
+/// Errors returned when decoding a length-prefixed message frame.
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
+    /// The buffer does not yet contain a complete frame.
     #[error("incomplete frame, need more data")]
     Incomplete,
+    /// The CBOR payload failed to decode.
     #[error("cbor decode: {0}")]
     CborError(String),
 }
@@ -79,19 +82,28 @@ fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
 /// Messages on /ganglion/control/1.0
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ControlMessage {
     /// Presence announcement from a robot agent.
     Presence {
+        /// The announcing peer's ID.
         peer_id: PeerId,
+        /// Names of installed capabilities.
         capabilities: Vec<String>,
+        /// Agent uptime in seconds.
         uptime_secs: u64,
+        /// Ganglion version string.
         version: String,
     },
     /// Deploy a signed capability to a robot.
     DeployCapability {
+        /// Capability name.
         name: String,
+        /// Capability version.
         version: String,
+        /// CBOR-encoded signed manifest.
         manifest_cbor: Vec<u8>,
+        /// The WASM component bytes.
         component_bytes: Vec<u8>,
         /// Unique per-request nonce for replay protection (v1.1, additive).
         /// Empty on legacy messages predating replay protection.
@@ -104,8 +116,11 @@ pub enum ControlMessage {
     },
     /// Invoke an installed capability.
     InvokeCapability {
+        /// Capability name.
         name: String,
+        /// Invocation arguments.
         args: Vec<String>,
+        /// Correlation ID matching the eventual `InvokeResult`.
         request_id: String,
         /// Unique per-request nonce for replay protection (v1.1, additive).
         /// Empty on legacy messages predating replay protection.
@@ -118,37 +133,58 @@ pub enum ControlMessage {
     },
     /// Response to a capability invocation.
     InvokeResult {
+        /// Correlation ID of the originating request.
         request_id: String,
+        /// Terminal status of the invocation.
         status: InvokeStatus,
+        /// Captured output bytes.
         output: Vec<u8>,
     },
     /// List installed capabilities (request).
     ListCapabilities,
     /// List installed capabilities (response).
-    CapabilityList { capabilities: Vec<CapabilityInfo> },
+    CapabilityList {
+        /// The installed capabilities.
+        capabilities: Vec<CapabilityInfo>,
+    },
     /// Error response.
     Error {
+        /// Correlation ID of the request that failed, if any.
         request_id: Option<String>,
+        /// Machine-readable error code.
         code: String,
+        /// Human-readable error message.
         message: String,
     },
 }
 
+/// Terminal status of a capability invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum InvokeStatus {
+    /// The invocation completed successfully.
     Success,
+    /// The invocation failed.
     Failed,
+    /// The invocation exceeded its deadline.
     Timeout,
+    /// The invocation was denied by policy.
     PolicyDenied,
+    /// The WASM guest trapped.
     Trapped,
 }
 
+/// Summary of an installed capability, returned in `CapabilityList`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityInfo {
+    /// Capability name.
     pub name: String,
+    /// Installed version.
     pub version: String,
+    /// Author peer ID.
     pub author: PeerId,
+    /// Declared capability group names.
     pub declared_capabilities: Vec<String>,
 }
 
@@ -288,11 +324,17 @@ impl ReplayGuard {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolMessage {
     /// Data chunk from capability to operator (or vice versa).
-    Data { payload: Vec<u8> },
+    Data {
+        /// The chunk payload.
+        payload: Vec<u8>,
+    },
     /// End of stream.
     Eof,
     /// Error during tool execution.
-    Error { message: String },
+    Error {
+        /// Human-readable error message.
+        message: String,
+    },
 }
 
 // --- Bulk transfer messages ---
@@ -303,19 +345,32 @@ pub enum ToolMessage {
 pub enum BulkMessage {
     /// Offer an artifact for transfer.
     Offer {
+        /// Artifact name.
         name: String,
+        /// Total artifact size in bytes.
         size: u64,
+        /// Content hash of the artifact.
         hash: String,
     },
     /// Accept the offered artifact.
     Accept,
     /// A data chunk.
-    Chunk { offset: u64, data: Vec<u8> },
+    Chunk {
+        /// Byte offset of this chunk within the artifact.
+        offset: u64,
+        /// The chunk bytes.
+        data: Vec<u8>,
+    },
     /// Transfer complete.
-    Complete { hash: String },
+    Complete {
+        /// Content hash of the fully-received artifact.
+        hash: String,
+    },
     /// Progress report.
     Progress {
+        /// Bytes transferred so far.
         bytes_transferred: u64,
+        /// Total bytes expected.
         total_bytes: u64,
     },
 }
