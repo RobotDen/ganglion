@@ -7,6 +7,25 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+# Only flag unmaintained advisories for direct workspace dependencies.
+# Transitive unmaintained crates (currently fxhash via libp2p and paste via
+# several proc-macro users) are their parents' problem to migrate off; we
+# still see vulnerability advisories for them regardless of this setting.
+unmaintained = "workspace"
+ignore = [
+    # hickory-proto 0.25.x comes transitively via libp2p 0.56's `dns`
+    # feature (libp2p-dns). Both advisories are DoS-class issues in DNS
+    # validation/encoding paths, not remote code execution:
+    #   - RUSTSEC-2026-0118: NSEC3 closest-encloser proof validation can
+    #     enter an unbounded loop; fix requires hickory-proto 0.26.1.
+    #   - RUSTSEC-2026-0119: O(n²) name-compression CPU blowup during
+    #     message encoding; no safe upgrade — the affected code moved to
+    #     hickory-net in 0.26.
+    # libp2p-dns pins hickory ^0.25, so we cannot take 0.26 without a
+    # libp2p bump. Revisit when libp2p updates hickory to 0.26.
+    { id = "RUSTSEC-2026-0118", reason = "transitive via libp2p-dns; DoS-class (unbounded loop in NSEC3 validation); blocked on libp2p bumping hickory to 0.26" },
+    { id = "RUSTSEC-2026-0119", reason = "transitive via libp2p-dns; DoS-class (O(n^2) name compression during encoding); no safe upgrade until libp2p moves to hickory 0.26/hickory-net" },
+]
 
 [bans]
 multiple-versions = "warn"
