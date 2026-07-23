@@ -20,7 +20,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
-async-trait = "0.1"
+async-trait = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wat = "1"

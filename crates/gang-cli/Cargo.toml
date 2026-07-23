@@ -16,12 +16,12 @@ gang-core = { path = "../gang-core", version = "1.0.0" }
 gang-libp2p = { path = "../gang-libp2p", version = "1.0.0" }
 gang-ros = { path = "../gang-ros", version = "1.0.0" }
 clap = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
-hex = "0.4"
+hex = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

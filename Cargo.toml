@@ -27,9 +27,28 @@ repository = "https://github.com/tafy-labs/ganglion"
 rust-version = "1.85"
 
 [workspace.dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
+# Async runtime.
+# Library crates take this base feature set; the `gang` binary widens it to
+# "full" in its own manifest (CODE-15) so downstream consumers of the library
+# crates are not forced to pull all of tokio.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "io-util",
+    "net",
+    "fs",
+    "process",
+    "signal",
+] }
 futures = "0.3"
+
+# Shared across multiple crates (CODE-27: hoisted from per-crate manifests).
+async-trait = "0.1"
+hex = "0.4"
+glob-match = "0.2"
+semver = "1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -38,6 +57,9 @@ serde_json = "1"
 
 # Crypto
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+# Pinned to 0.8: ed25519-dalek 2 depends on rand_core 0.6, which rand 0.8
+# provides. Do NOT bump to 0.9 (rand_core 0.9) without upgrading ed25519-dalek
+# in lockstep — the RNG traits are incompatible across that boundary.
 rand = "0.8"
 blake3 = "1"
 
@@ -82,3 +104,11 @@ wasmtime-wasi = "29"
 
 # Testing
 tempfile = "3"
+
+# Release profile tuned for a field-deployed binary + relay (CODE-16):
+# smaller, faster artifacts at the cost of longer release builds. Debug builds
+# are unaffected.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
