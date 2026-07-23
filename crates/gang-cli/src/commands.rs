@@ -360,6 +360,14 @@ pub async fn peer_add(
             peer_id_str
         );
     }
+    // Validate the 32-char hex payload after the "12D3-" prefix.
+    let hex_payload = &peer_id.as_str()[5..];
+    if hex::decode(hex_payload).is_err() {
+        anyhow::bail!(
+            "Invalid peer ID: '{}'. The 32 characters after '12D3-' must be hex.",
+            peer_id_str
+        );
+    }
 
     let role = match role_str {
         "robot-agent" | "robot" => Role::RobotAgent,
