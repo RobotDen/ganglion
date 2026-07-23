@@ -23,3 +23,4 @@ chrono = { workspace = true }
 async-trait = "0.1"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+wat = "1"

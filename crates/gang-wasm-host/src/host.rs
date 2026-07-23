@@ -20,10 +20,17 @@ pub struct CapabilityHost {
     pub stdout: Vec<u8>,
     /// Stderr captured from the component.
     pub stderr: Vec<u8>,
+    /// Resource limits (linear memory, tables, instances) enforced by the
+    /// Wasmtime store. Installed via `Store::limiter` so that a component that
+    /// tries to grow memory beyond the manifest-derived cap is trapped rather
+    /// than allowed to OOM the host.
+    pub limits: wasmtime::StoreLimits,
 }
 
 impl CapabilityHost {
     /// Create a new host with the given brokers and declared capabilities.
+    /// The store limits default to unlimited; use [`with_limits`] to install a
+    /// memory cap derived from the component manifest.
     pub fn new(
         brokers: HashMap<String, Arc<dyn CapabilityBroker>>,
         declared_capabilities: Vec<CapabilityGroup>,
@@ -33,7 +40,15 @@ impl CapabilityHost {
             declared_capabilities,
             stdout: Vec::new(),
             stderr: Vec::new(),
+            limits: wasmtime::StoreLimits::default(),
         }
+    }
+
+    /// Attach resource limits to this host. The limits are consulted by the
+    /// Wasmtime store via `Store::limiter(|h| &mut h.limits)`.
+    pub fn with_limits(mut self, limits: wasmtime::StoreLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Check whether a capability group is declared by this component.
