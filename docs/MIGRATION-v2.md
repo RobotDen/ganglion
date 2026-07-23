@@ -5,7 +5,7 @@ breaking changes to the wire protocol, on-disk trust configuration, and several
 public library APIs. This guide lists exactly what an operator, a robot
 maintainer, and a library consumer must do to upgrade.
 
-Read the [CHANGELOG](../CHANGELOG.md#200---yyyy-mm-dd) for the full list of
+Read the [CHANGELOG](../CHANGELOG.md) `[2.0.0]` section for the full list of
 changes; this document is the actionable subset.
 
 ## TL;DR
