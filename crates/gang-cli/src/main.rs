@@ -250,6 +250,11 @@ enum Commands {
         /// Metrics HTTP port (placeholder for future Prometheus endpoint).
         #[arg(long, default_value = "9090")]
         metrics_port: u16,
+
+        /// Directory for the relay's persisted identity key (sets GANG_KEY_PATH).
+        /// Without this, the default ~/.gang/identity.key is used.
+        #[arg(long, value_name = "PATH")]
+        data_dir: Option<String>,
     },
 }
 
@@ -560,26 +565,17 @@ async fn main() -> anyhow::Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "gang", &mut std::io::stdout());
         }
         Commands::Status => commands::status(&cli.format).await?,
-        Commands::List => {
-            eprintln!("This command requires relay connectivity (not yet available in v0.6).");
-            eprintln!(
-                "Run `gang demo` to see current capabilities, or `gang status` for a summary."
-            );
-        }
+        Commands::List => commands::wip_stub("list", &cli.format)?,
         Commands::Connect {
             robot: _,
             prefer_transport: _,
-        } => {
-            eprintln!("This command requires relay connectivity (not yet available in v0.6).");
-            eprintln!(
-                "Run `gang demo` to see current capabilities, or `gang status` for a summary."
-            );
-        }
+        } => commands::wip_stub("connect", &cli.format)?,
         Commands::Relay {
             listen_addr,
             port,
             metrics_port,
-        } => commands::relay(listen_addr, port, metrics_port).await?,
+            data_dir,
+        } => commands::relay(listen_addr, port, metrics_port, data_dir.as_deref()).await?,
     }
 
     Ok(())

@@ -2722,11 +2722,28 @@ pub async fn relay(
     listen_addrs: Option<Vec<String>>,
     port: u16,
     metrics_port: u16,
+    data_dir: Option<&str>,
 ) -> anyhow::Result<()> {
     use gang_libp2p::Libp2pConfig;
 
-    // Load or generate identity
-    let key_path = gang_core::identity::default_key_path();
+    // Resolve the identity key path. With --data-dir we persist the relay
+    // identity there and export GANG_KEY_PATH so gang-core's default_key_path
+    // (being taught to honor GANG_KEY_PATH) and any downstream lookups agree.
+    let key_path = match data_dir {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("creating data dir {}", dir.display()))?;
+            let kp = dir.join("identity.key");
+            // SAFETY: set before any threads rely on the env var; single-threaded
+            // startup path.
+            unsafe {
+                std::env::set_var("GANG_KEY_PATH", &kp);
+            }
+            kp
+        }
+        None => gang_core::identity::default_key_path(),
+    };
     let keypair = gang_core::identity::Keypair::load_or_generate(&key_path)?;
     let peer_id = keypair.peer_id();
 
