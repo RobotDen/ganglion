@@ -187,20 +187,25 @@ pub(crate) struct PeerConnection {
 
 impl Libp2pTransportAdapter {
     /// Create a new adapter from configuration.
-    pub async fn new(config: Libp2pConfig) -> anyhow::Result<Self> {
+    pub async fn new(config: Libp2pConfig) -> Result<Self, crate::TransportError> {
         let keypair = Keypair::load_or_generate(&config.key_path)?;
         let local_peer_id = keypair.peer_id();
 
         // Load the raw secret once (validated, non-panicking) and hand it to
         // the swarm builder so the key file is not read a second time.
-        let secret_key = swarm::load_ed25519_secret(&config.key_path)?;
-        let (mut swarm, libp2p_peer_id) = swarm::build_swarm(&config, secret_key).await?;
+        let secret_key = swarm::load_ed25519_secret(&config.key_path)
+            .map_err(|e| crate::TransportError::InvalidKey(e.to_string()))?;
+        let (mut swarm, libp2p_peer_id) = swarm::build_swarm(&config, secret_key)
+            .await
+            .map_err(|e| crate::TransportError::SwarmBuild(e.to_string()))?;
 
         // Start listening
-        swarm::start_listening(&mut swarm, &config)?;
+        swarm::start_listening(&mut swarm, &config)
+            .map_err(|e| crate::TransportError::SwarmBuild(e.to_string()))?;
 
         // Add bootstrap peers
-        swarm::add_bootstrap_peers(&mut swarm, &config)?;
+        swarm::add_bootstrap_peers(&mut swarm, &config)
+            .map_err(|e| crate::TransportError::SwarmBuild(e.to_string()))?;
 
         // Command channel to the single swarm-owning task. This same channel
         // carries the shutdown signal (`SwarmCommand::Shutdown`).
@@ -235,24 +240,28 @@ impl Libp2pTransportAdapter {
 
     /// Start the swarm event loop. This must be called once after construction
     /// and runs until `shutdown()` is called (or all command senders drop).
-    pub async fn run_event_loop(&self) -> anyhow::Result<()> {
+    pub async fn run_event_loop(&self) -> Result<(), crate::TransportError> {
         let worker = self.worker.lock().await.take();
         match worker {
-            Some(worker) => worker.run().await,
-            None => anyhow::bail!("event loop already running or already consumed"),
+            Some(worker) => {
+                worker.run().await;
+                Ok(())
+            }
+            None => Err(crate::TransportError::EventLoopAlreadyRunning),
         }
     }
 
     /// Connect to relay nodes specified in config.
-    pub async fn connect_to_relays(&self) -> anyhow::Result<()> {
+    pub async fn connect_to_relays(&self) -> Result<(), crate::TransportError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(SwarmCommand::ConnectToRelays { reply: reply_tx })
             .await
-            .map_err(|_| anyhow::anyhow!("swarm task is not running"))?;
+            .map_err(|_| crate::TransportError::SwarmTaskStopped)?;
         reply_rx
             .await
-            .map_err(|_| anyhow::anyhow!("swarm task dropped the reply channel"))?
+            .map_err(|_| crate::TransportError::SwarmTaskStopped)?
+            .map_err(|e| crate::TransportError::Relay(e.to_string()))
     }
 
     /// Dial a peer by their libp2p multiaddr.
@@ -361,7 +370,7 @@ struct SwarmWorker {
 impl SwarmWorker {
     /// Run until a `Shutdown` command arrives, all senders drop, or the swarm
     /// stream ends.
-    async fn run(mut self) -> anyhow::Result<()> {
+    async fn run(mut self) {
         use futures::StreamExt;
         use libp2p::swarm::SwarmEvent;
 
@@ -412,8 +421,6 @@ impl SwarmWorker {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// Remove pending requests whose deadline has passed, replying with a
