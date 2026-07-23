@@ -7,5 +7,11 @@ target/
 .obsidian/
 .smart-env/
 docs/
+test-harness/
+examples/
+deploy/
+output/
+scripts/
+deny.toml
 *.md
 !crates/**/*.md
