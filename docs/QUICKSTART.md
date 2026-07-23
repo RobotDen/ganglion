@@ -70,18 +70,76 @@ This runs six network probes and classifies your environment into one of five ar
 
 ## 5. Sign and deploy a capability
 
+This walks the full sign → deploy → invoke loop against a *local* robot agent.
+No second terminal is needed: `gang deploy`, `gang caps`, and `gang run` spin up
+an in-process local agent over a shared data directory
+(`/tmp/gang-agent-<robot>`); a separately started `gang agent` process is not
+consulted on this path. (Remote dispatch to a real agent over a relay is WIP —
+see [CLI_REFERENCE.md](CLI_REFERENCE.md).)
+
+You need an identity (step 3) and a `.wasm` file to sign. `gang sign` signs any
+file's bytes, so a placeholder is enough for the walkthrough — building a real
+capability is step 6:
+
 ```bash
-# Sign a WASM component (declare its capabilities explicitly)
-gang sign my-diagnostics.wasm --name my-diagnostics \
-    --component-version 0.1.0 --capabilities diagnostics,logs
+# Create a placeholder component (real ones come from `gang capability scaffold`)
+printf '\0asm\1\0\0\0' > my-diagnostics.wasm
 
-# Start a local robot agent
-gang agent --data-dir /tmp/my-robot
+# Sign it, declaring its capabilities explicitly
+gang sign my-diagnostics.wasm --capabilities diagnostics
 
-# In another terminal, deploy and invoke
+# Create the local agent's data directory — this is what makes the name
+# 'my-robot' resolve to a local agent at /tmp/gang-agent-my-robot
+mkdir -p /tmp/gang-agent-my-robot
+
+# Deploy, list, invoke
 gang deploy my-robot my-diagnostics.wasm
+gang caps my-robot
 gang run my-robot my-diagnostics
 ```
+
+`gang sign` prints the manifest it produced:
+
+```
+Signed component: my-diagnostics.wasm
+  Name:     my-diagnostics
+  Version:  0.1.0
+  Manifest: my-diagnostics.manifest.cbor
+  Author:   12D3-6c128fa3aae7bf5eb20105aa8eca5cc0
+  Hash:     0d66d411a21e80d93afa1487b002a186...
+  Capabilities:
+    - ganglion:diagnostics/collect@1.0
+```
+
+Deploy and invoke report against the local agent ("[log lines]" summarizes the
+agent's tracing output — you'll see permissive-policy and empty-trust-store
+warnings, which are expected in this dev flow):
+
+```
+$ gang deploy my-robot my-diagnostics.wasm
+[log lines]
+Deployed 'my-diagnostics' to robot 'my-robot'
+
+$ gang caps my-robot
+[log lines]
+Capabilities on 'my-robot':
+  my-diagnostics v0.1.0 (by 12D3-6c128fa3aae7bf5eb20105aa8eca5cc0)
+    - ganglion:diagnostics/collect@1.0
+
+$ gang run my-robot my-diagnostics
+[log lines]
+System Information:
+  Hostname:  vm
+  OS:        linux 6.18.5
+  Arch:      x86_64
+  CPUs:      2
+  Memory:    7 GB
+  Uptime:    0h 57m
+  Ganglion:  v2.0.0
+...
+```
+
+Clean up with `rm -rf /tmp/gang-agent-my-robot` when done.
 
 ## 6. Scaffold a new capability
 
