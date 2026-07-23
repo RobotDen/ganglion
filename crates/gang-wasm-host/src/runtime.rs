@@ -44,6 +44,13 @@ pub const DEFAULT_WALL_CLOCK_SECS: u64 = 300;
 /// Absolute hard cap on the wall-clock deadline (seconds).
 pub const HARD_MAX_WALL_CLOCK_SECS: u64 = 3600;
 
+/// Bound on the compiled-component cache. Robots install a handful of
+/// capabilities, so this is a safety valve against unbounded growth (e.g. a
+/// caller invoking many distinct component hashes), not an LRU tuned for hit
+/// rate — when the cap is reached an arbitrary entry is evicted; evicted
+/// components are simply recompiled on next use.
+pub const MAX_CACHED_COMPONENTS: usize = 64;
+
 /// Resolve the effective linear-memory ceiling (bytes) from manifest limits,
 /// applying the host default for unset values and clamping to the hard cap.
 pub fn effective_memory_bytes(limits: &ResourceLimits) -> usize {
@@ -228,10 +235,11 @@ impl ComponentRuntime {
         let component = Component::new(self.engine.engine(), component_bytes).map_err(|e| {
             InvocationError::InstantiationFailed(format!("failed to compile component: {e}"))
         })?;
-        self.component_cache
-            .write()
-            .await
-            .insert(component_hash.to_string(), component.clone());
+        insert_bounded(
+            &mut *self.component_cache.write().await,
+            component_hash.to_string(),
+            component.clone(),
+        );
         Ok(component)
     }
 
@@ -364,6 +372,19 @@ impl ComponentRuntime {
     }
 }
 
+/// Insert into the component cache, evicting an arbitrary entry first if the
+/// cache is at [`MAX_CACHED_COMPONENTS`] and the key is new. Keeps the cache
+/// bounded (see the constant's doc comment); generic over the value type so
+/// the bound can be unit-tested without compiling real components.
+fn insert_bounded<V>(cache: &mut HashMap<String, V>, key: String, value: V) {
+    if cache.len() >= MAX_CACHED_COMPONENTS && !cache.contains_key(&key) {
+        if let Some(evict) = cache.keys().next().cloned() {
+            cache.remove(&evict);
+        }
+    }
+    cache.insert(key, value);
+}
+
 /// Extract the return data from a component result value.
 fn extract_result_data(results: &[wasmtime::component::Val]) -> Result<Vec<u8>, InvocationError> {
     match results.first() {
@@ -451,6 +472,24 @@ mod tests {
         let engine = GanglionEngine::new().unwrap();
         let brokers: HashMap<String, Arc<dyn CapabilityBroker>> = HashMap::new();
         let _runtime = ComponentRuntime::new(engine, brokers).unwrap();
+    }
+
+    // --- Component cache bound ---
+
+    #[test]
+    fn component_cache_bounded_at_cap() {
+        let mut cache: HashMap<String, u32> = HashMap::new();
+        for i in 0..(MAX_CACHED_COMPONENTS * 2) {
+            insert_bounded(&mut cache, format!("hash-{i}"), i as u32);
+            assert!(cache.len() <= MAX_CACHED_COMPONENTS);
+        }
+        assert_eq!(cache.len(), MAX_CACHED_COMPONENTS);
+
+        // Re-inserting an existing key does not evict anything.
+        let key = cache.keys().next().cloned().unwrap();
+        insert_bounded(&mut cache, key.clone(), 999);
+        assert_eq!(cache.len(), MAX_CACHED_COMPONENTS);
+        assert_eq!(cache[&key], 999);
     }
 
     // --- SEC-04: memory limit clamping ---
