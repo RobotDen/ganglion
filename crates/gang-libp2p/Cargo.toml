@@ -24,4 +24,5 @@ async-stream = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true }
+# test-util enables tokio's paused clock for deterministic timeout tests.
+tokio = { workspace = true, features = ["test-util"] }

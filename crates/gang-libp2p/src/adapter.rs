@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::time::{Duration, Instant};
 
 use futures::Stream;
-use libp2p::request_response::{self, OutboundRequestId};
+use libp2p::request_response::{self, OutboundRequestId, ResponseChannel};
 use libp2p::{Multiaddr, PeerId as Libp2pPeerId, Swarm};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tracing::{debug, info, warn};
@@ -19,6 +21,115 @@ use gang_core::transport::{
 use crate::config::Libp2pConfig;
 use crate::swarm::{self, GanglionBehaviour};
 
+/// How long a caller waits for an RPC or dial reply before timing out.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound on the number of concurrently pending outbound requests. New
+/// requests beyond this are rejected rather than allowed to grow the map
+/// without limit.
+const MAX_PENDING_REQUESTS: usize = 1024;
+/// How often the worker sweeps out pending requests that have passed their
+/// deadline, guaranteeing their entries are removed even if no response or
+/// failure event ever arrives.
+const PENDING_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Commands sent to the single task that owns the [`Swarm`].
+///
+/// The swarm is never shared behind a mutex; all interaction happens by
+/// sending one of these commands over an mpsc channel and (for request/reply
+/// commands) awaiting a `oneshot` response. This keeps the swarm owned by
+/// exactly one task, so it is never held across `.await` by multiple callers.
+enum SwarmCommand {
+    /// Dial a raw multiaddr.
+    Dial {
+        addr: Multiaddr,
+        reply: oneshot::Sender<Result<(), TransportError>>,
+    },
+    /// Connect to the relays listed in config.
+    ConnectToRelays {
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    /// Send an RPC request to a connected peer and await the response.
+    SendRpc {
+        peer: PeerId,
+        libp2p_peer: Libp2pPeerId,
+        protocol: ProtocolId,
+        request: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>, TransportError>>,
+    },
+    /// Send a response for an inbound request back over its channel.
+    /// Emitted internally once a registered handler has produced a response.
+    SendResponse {
+        channel: ResponseChannel<Vec<u8>>,
+        data: Vec<u8>,
+    },
+    /// Stop the event loop.
+    Shutdown,
+}
+
+/// Tracks a pending outbound request so we can deliver the response
+/// to the awaiting caller.
+struct PendingRequest {
+    peer_id: PeerId,
+    protocol: ProtocolId,
+    reply: oneshot::Sender<Result<Vec<u8>, TransportError>>,
+    /// After this instant the request is considered timed out and its entry
+    /// is swept from the pending map.
+    deadline: Instant,
+}
+
+/// Fan-out of transport events to every live subscriber.
+///
+/// `TransportEvent` (defined in gang-core) is not `Clone`, so
+/// `tokio::sync::broadcast` cannot be used directly. This bus reconstructs
+/// each event per subscriber so that multiple `events()` consumers all see
+/// every event, rather than competing for items from a single receiver.
+#[derive(Clone, Default)]
+struct EventBus {
+    subscribers: Arc<StdMutex<Vec<mpsc::UnboundedSender<TransportEvent>>>>,
+}
+
+impl EventBus {
+    /// Register a new subscriber and return its receiver.
+    fn subscribe(&self) -> mpsc::UnboundedReceiver<TransportEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    /// Deliver `event` to every live subscriber, pruning closed ones.
+    fn publish(&self, event: TransportEvent) {
+        let mut subs = self.subscribers.lock().unwrap();
+        subs.retain(|tx| !tx.is_closed());
+        if subs.is_empty() {
+            return;
+        }
+        // Reconstruct a copy for all but the last subscriber, then move the
+        // original into the last one to avoid one needless clone.
+        let last = subs.len() - 1;
+        for tx in subs.iter().take(last) {
+            let _ = tx.send(clone_event(&event));
+        }
+        let _ = subs[last].send(event);
+    }
+}
+
+/// Reconstruct a `TransportEvent` (which does not implement `Clone`).
+fn clone_event(event: &TransportEvent) -> TransportEvent {
+    match event {
+        TransportEvent::PeerConnected { peer_id, via_relay } => TransportEvent::PeerConnected {
+            peer_id: peer_id.clone(),
+            via_relay: *via_relay,
+        },
+        TransportEvent::PeerDisconnected { peer_id } => TransportEvent::PeerDisconnected {
+            peer_id: peer_id.clone(),
+        },
+        TransportEvent::PresenceReceived(info) => TransportEvent::PresenceReceived(info.clone()),
+        TransportEvent::DirectUpgrade { peer_id } => TransportEvent::DirectUpgrade {
+            peer_id: peer_id.clone(),
+        },
+    }
+}
+
 /// libp2p implementation of the Ganglion TransportAdapter trait.
 ///
 /// This is the recommended default transport. It provides:
@@ -29,28 +140,24 @@ use crate::swarm::{self, GanglionBehaviour};
 /// - DCUtR for direct connection upgrades
 /// - Kademlia for peer routing
 /// - Ganglion stream protocols via request-response
+///
+/// The underlying `Swarm` is owned by a single task (started by
+/// [`Libp2pTransportAdapter::run_event_loop`]); all callers interact with it
+/// exclusively through the command channel.
 pub struct Libp2pTransportAdapter {
     config: Libp2pConfig,
     keypair: Keypair,
     local_peer_id: PeerId,
     libp2p_peer_id: Libp2pPeerId,
-    swarm: Arc<Mutex<Swarm<GanglionBehaviour>>>,
-    event_tx: mpsc::Sender<TransportEvent>,
-    event_rx: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
+    /// Channel to the swarm-owning task.
+    command_tx: mpsc::Sender<SwarmCommand>,
+    /// Fan-out of transport events to `events()` subscribers.
+    events: EventBus,
     connected_peers: Arc<RwLock<HashMap<String, PeerConnection>>>,
     /// Registered protocol handlers for incoming streams.
     protocol_handlers: Arc<RwLock<HashMap<String, StreamHandler>>>,
-    /// Pending outbound requests awaiting a response.
-    pending_requests: Arc<Mutex<HashMap<OutboundRequestId, PendingRequest>>>,
-    shutdown_tx: Option<mpsc::Sender<()>>,
-}
-
-/// Tracks a pending outbound request so we can deliver the response
-/// as a `GanglionStream`.
-struct PendingRequest {
-    peer_id: PeerId,
-    protocol: ProtocolId,
-    response_tx: oneshot::Sender<Result<Vec<u8>, TransportError>>,
+    /// The swarm-owning worker, taken by `run_event_loop`.
+    worker: Mutex<Option<SwarmWorker>>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,376 +187,81 @@ pub(crate) struct PeerConnection {
 
 impl Libp2pTransportAdapter {
     /// Create a new adapter from configuration.
-    pub async fn new(config: Libp2pConfig) -> anyhow::Result<Self> {
+    pub async fn new(config: Libp2pConfig) -> Result<Self, crate::TransportError> {
         let keypair = Keypair::load_or_generate(&config.key_path)?;
         let local_peer_id = keypair.peer_id();
 
-        let (mut swarm, libp2p_peer_id) = swarm::build_swarm(&config).await?;
+        // Load the raw secret once (validated, non-panicking) and hand it to
+        // the swarm builder so the key file is not read a second time.
+        let secret_key = swarm::load_ed25519_secret(&config.key_path)
+            .map_err(|e| crate::TransportError::InvalidKey(e.to_string()))?;
+        let (mut swarm, libp2p_peer_id) = swarm::build_swarm(&config, secret_key)
+            .await
+            .map_err(|e| crate::TransportError::SwarmBuild(e.to_string()))?;
 
         // Start listening
-        swarm::start_listening(&mut swarm, &config)?;
+        swarm::start_listening(&mut swarm, &config)
+            .map_err(|e| crate::TransportError::SwarmBuild(e.to_string()))?;
 
         // Add bootstrap peers
-        swarm::add_bootstrap_peers(&mut swarm, &config)?;
+        swarm::add_bootstrap_peers(&mut swarm, &config)
+            .map_err(|e| crate::TransportError::SwarmBuild(e.to_string()))?;
 
-        let (event_tx, event_rx) = mpsc::channel(256);
+        // Command channel to the single swarm-owning task. This same channel
+        // carries the shutdown signal (`SwarmCommand::Shutdown`).
+        let (command_tx, command_rx) = mpsc::channel(256);
+        let events = EventBus::default();
+        let connected_peers = Arc::new(RwLock::new(HashMap::new()));
+        let protocol_handlers = Arc::new(RwLock::new(HashMap::new()));
 
-        let adapter = Self {
+        let worker = SwarmWorker {
+            swarm,
+            command_rx,
+            command_tx: command_tx.clone(),
+            events: events.clone(),
+            connected_peers: connected_peers.clone(),
+            protocol_handlers: protocol_handlers.clone(),
+            pending_requests: HashMap::new(),
+            config: config.clone(),
+        };
+
+        Ok(Self {
             config,
             keypair,
             local_peer_id,
             libp2p_peer_id,
-            swarm: Arc::new(Mutex::new(swarm)),
-            event_tx,
-            event_rx: Arc::new(Mutex::new(event_rx)),
-            connected_peers: Arc::new(RwLock::new(HashMap::new())),
-            protocol_handlers: Arc::new(RwLock::new(HashMap::new())),
-            pending_requests: Arc::new(Mutex::new(HashMap::new())),
-            shutdown_tx: None,
-        };
-
-        Ok(adapter)
+            command_tx,
+            events,
+            connected_peers,
+            protocol_handlers,
+            worker: Mutex::new(Some(worker)),
+        })
     }
 
-    /// Start the swarm event loop. This must be called after construction
-    /// and runs until shutdown.
-    pub async fn run_event_loop(&self) -> anyhow::Result<()> {
-        use futures::StreamExt;
-        use libp2p::swarm::SwarmEvent;
-
-        let swarm = self.swarm.clone();
-        let event_tx = self.event_tx.clone();
-        let connected_peers = self.connected_peers.clone();
-
-        loop {
-            let event = {
-                let mut swarm = swarm.lock().await;
-                swarm.next().await
-            };
-
-            match event {
-                Some(SwarmEvent::ConnectionEstablished {
-                    peer_id, endpoint, ..
-                }) => {
-                    let gang_peer_id = libp2p_to_gang_peer_id(&peer_id);
-                    let via_relay = endpoint.is_relayed();
-
-                    info!(
-                        peer = %peer_id,
-                        relay = via_relay,
-                        "Connection established"
-                    );
-
-                    // Determine transport from endpoint multiaddr.
-                    // Recognises current (tcp, quic) and future (webtransport,
-                    // webrtc) transports so the field is correct if/when those
-                    // features land in a future libp2p release.
-                    let transport_name = if via_relay {
-                        "relay".to_string()
-                    } else {
-                        let addr_str = endpoint.get_remote_address().to_string();
-                        if addr_str.contains("/webtransport/") {
-                            "webtransport".to_string()
-                        } else if addr_str.contains("/webrtc-direct/")
-                            || addr_str.contains("/webrtc/")
-                        {
-                            "webrtc".to_string()
-                        } else if addr_str.contains("quic") {
-                            "quic".to_string()
-                        } else {
-                            "tcp".to_string()
-                        }
-                    };
-
-                    let peer_key = gang_peer_id.as_str().to_string();
-                    let mut peers = connected_peers.write().await;
-                    let reconnections = peers
-                        .get(&peer_key)
-                        .map(|p| p.reconnections + 1)
-                        .unwrap_or(0);
-
-                    peers.insert(
-                        peer_key,
-                        PeerConnection {
-                            libp2p_peer_id: peer_id,
-                            via_relay,
-                            connected_at: std::time::Instant::now(),
-                            transport: transport_name,
-                            last_rtt: None,
-                            dcutr_attempted: false,
-                            dcutr_succeeded: false,
-                            messages_sent: 0,
-                            messages_received: 0,
-                            bytes_sent: 0,
-                            bytes_received: 0,
-                            reconnections,
-                        },
-                    );
-
-                    let _ = event_tx
-                        .send(TransportEvent::PeerConnected {
-                            peer_id: gang_peer_id,
-                            via_relay,
-                        })
-                        .await;
-                }
-                Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
-                    let gang_peer_id = libp2p_to_gang_peer_id(&peer_id);
-                    info!(peer = %peer_id, "Connection closed");
-
-                    connected_peers.write().await.remove(gang_peer_id.as_str());
-
-                    let _ = event_tx
-                        .send(TransportEvent::PeerDisconnected {
-                            peer_id: gang_peer_id,
-                        })
-                        .await;
-                }
-                Some(SwarmEvent::NewListenAddr { address, .. }) => {
-                    info!("Listening on {address}");
-                }
-                Some(SwarmEvent::Behaviour(event)) => {
-                    self.handle_behaviour_event(event).await;
-                }
-                Some(other) => {
-                    debug!("Swarm event: {other:?}");
-                }
-                None => {
-                    info!("Swarm event stream ended");
-                    break;
-                }
+    /// Start the swarm event loop. This must be called once after construction
+    /// and runs until `shutdown()` is called (or all command senders drop).
+    pub async fn run_event_loop(&self) -> Result<(), crate::TransportError> {
+        let worker = self.worker.lock().await.take();
+        match worker {
+            Some(worker) => {
+                worker.run().await;
+                Ok(())
             }
-        }
-
-        Ok(())
-    }
-
-    async fn handle_behaviour_event(&self, event: swarm::GanglionBehaviourEvent) {
-        use swarm::GanglionBehaviourEvent;
-
-        match event {
-            GanglionBehaviourEvent::Identify(libp2p::identify::Event::Received {
-                peer_id,
-                info,
-                ..
-            }) => {
-                debug!(
-                    peer = %peer_id,
-                    agent = %info.agent_version,
-                    "Identified peer"
-                );
-
-                // Add peer addresses to Kademlia
-                let mut swarm = self.swarm.lock().await;
-                for addr in &info.listen_addrs {
-                    swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer_id, addr.clone());
-                }
-            }
-            GanglionBehaviourEvent::Ping(libp2p::ping::Event {
-                peer,
-                result: Ok(rtt),
-                ..
-            }) => {
-                debug!(peer = %peer, rtt = ?rtt, "Ping");
-                // Update RTT tracking
-                let gang_peer_id = libp2p_to_gang_peer_id(&peer);
-                let mut peers = self.connected_peers.write().await;
-                if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
-                    conn.last_rtt = Some(rtt);
-                }
-            }
-            GanglionBehaviourEvent::Dcutr(libp2p::dcutr::Event {
-                remote_peer_id,
-                result: Ok(_),
-                ..
-            }) => {
-                let gang_peer_id = libp2p_to_gang_peer_id(&remote_peer_id);
-                info!(peer = %remote_peer_id, "Direct connection upgraded via DCUtR");
-
-                // Track DCUtR success
-                let mut peers = self.connected_peers.write().await;
-                if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
-                    conn.dcutr_attempted = true;
-                    conn.dcutr_succeeded = true;
-                    conn.via_relay = false;
-                    conn.transport = "quic".into(); // DCUtR typically upgrades to direct QUIC
-                }
-
-                let _ = self
-                    .event_tx
-                    .send(TransportEvent::DirectUpgrade {
-                        peer_id: gang_peer_id,
-                    })
-                    .await;
-            }
-            GanglionBehaviourEvent::GanglionRpc(request_response::Event::Message {
-                peer,
-                message,
-                ..
-            }) => {
-                self.handle_rpc_message(peer, message).await;
-            }
-            GanglionBehaviourEvent::GanglionRpc(request_response::Event::OutboundFailure {
-                request_id,
-                error,
-                ..
-            }) => {
-                warn!(request_id = ?request_id, error = ?error, "Outbound RPC failed");
-                let mut pending = self.pending_requests.lock().await;
-                if let Some(req) = pending.remove(&request_id) {
-                    let _ = req.response_tx.send(Err(TransportError::DialFailed {
-                        peer: req.peer_id.to_string(),
-                        reason: format!("outbound request failed: {error:?}"),
-                    }));
-                }
-            }
-            GanglionBehaviourEvent::GanglionRpc(request_response::Event::InboundFailure {
-                peer,
-                request_id,
-                error,
-                ..
-            }) => {
-                warn!(
-                    peer = %peer,
-                    request_id = ?request_id,
-                    error = ?error,
-                    "Inbound RPC failed"
-                );
-            }
-            GanglionBehaviourEvent::RelayServer(event) => {
-                debug!("Relay server event: {event:?}");
-            }
-            _ => {}
-        }
-    }
-
-    /// Handle an incoming or outgoing RPC message.
-    async fn handle_rpc_message(
-        &self,
-        peer: Libp2pPeerId,
-        message: request_response::Message<Vec<u8>, Vec<u8>>,
-    ) {
-        match message {
-            request_response::Message::Request {
-                request, channel, ..
-            } => {
-                let gang_peer_id = libp2p_to_gang_peer_id(&peer);
-
-                // Update message counters
-                {
-                    let mut peers = self.connected_peers.write().await;
-                    if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
-                        conn.messages_received += 1;
-                        conn.bytes_received += request.len() as u64;
-                    }
-                }
-
-                // Try to find a registered handler for any Ganglion protocol.
-                // The request_response behaviour negotiates the protocol, so
-                // we check registered handlers in protocol priority order.
-                let handlers = self.protocol_handlers.read().await;
-                let handler_protocol = protocol::ALL_PROTOCOLS
-                    .iter()
-                    .find(|p| handlers.contains_key(**p));
-
-                if let Some(&proto) = handler_protocol {
-                    debug!(
-                        peer = %peer,
-                        protocol = proto,
-                        len = request.len(),
-                        "Incoming RPC request"
-                    );
-
-                    // Build a GanglionStream from the request data.
-                    // The response channel is used to send back data.
-                    let (response_data_tx, response_data_rx) = oneshot::channel::<Vec<u8>>();
-
-                    // Create a duplex stream for the handler.
-                    let (client_read, server_write) = tokio::io::duplex(64 * 1024);
-                    let (server_read, mut client_write) = tokio::io::duplex(64 * 1024);
-
-                    // Write the request data into the read side for the handler
-                    let request_data = request;
-                    tokio::spawn(async move {
-                        use tokio::io::AsyncWriteExt;
-                        let _ = client_write.write_all(&request_data).await;
-                        let _ = client_write.shutdown().await;
-                    });
-
-                    // Collect the handler's response
-                    tokio::spawn(async move {
-                        use tokio::io::AsyncReadExt;
-                        let mut buf = Vec::new();
-                        let mut reader = server_read;
-                        let _ = reader.read_to_end(&mut buf).await;
-                        let _ = response_data_tx.send(buf);
-                    });
-
-                    let stream = GanglionStream {
-                        protocol: ProtocolId::new(proto),
-                        remote_peer: gang_peer_id,
-                        inner: Box::new(merge_rw(client_read, server_write)),
-                    };
-
-                    if let Some(handler) = handlers.get(proto) {
-                        let fut = handler(stream);
-                        tokio::spawn(fut);
-                    }
-
-                    // Wait for the handler's response and send it back
-                    let swarm = self.swarm.clone();
-                    tokio::spawn(async move {
-                        let response = response_data_rx.await.unwrap_or_default();
-                        let mut swarm = swarm.lock().await;
-                        let _ = swarm
-                            .behaviour_mut()
-                            .ganglion_rpc
-                            .send_response(channel, response);
-                    });
-                } else {
-                    debug!(peer = %peer, "No handler registered, sending empty response");
-                    let mut swarm = self.swarm.lock().await;
-                    let _ = swarm
-                        .behaviour_mut()
-                        .ganglion_rpc
-                        .send_response(channel, Vec::new());
-                }
-            }
-            request_response::Message::Response {
-                request_id,
-                response,
-            } => {
-                let mut pending = self.pending_requests.lock().await;
-                if let Some(req) = pending.remove(&request_id) {
-                    debug!(
-                        peer = %req.peer_id,
-                        protocol = %req.protocol,
-                        len = response.len(),
-                        "Received RPC response"
-                    );
-
-                    // Update message counters
-                    {
-                        let mut peers = self.connected_peers.write().await;
-                        if let Some(conn) = peers.get_mut(req.peer_id.as_str()) {
-                            conn.messages_received += 1;
-                            conn.bytes_received += response.len() as u64;
-                        }
-                    }
-
-                    let _ = req.response_tx.send(Ok(response));
-                }
-            }
+            None => Err(crate::TransportError::EventLoopAlreadyRunning),
         }
     }
 
     /// Connect to relay nodes specified in config.
-    pub async fn connect_to_relays(&self) -> anyhow::Result<()> {
-        let mut swarm = self.swarm.lock().await;
-        swarm::connect_to_relays(&mut swarm, &self.config).await
+    pub async fn connect_to_relays(&self) -> Result<(), crate::TransportError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(SwarmCommand::ConnectToRelays { reply: reply_tx })
+            .await
+            .map_err(|_| crate::TransportError::SwarmTaskStopped)?;
+        reply_rx
+            .await
+            .map_err(|_| crate::TransportError::SwarmTaskStopped)?
+            .map_err(|e| crate::TransportError::Relay(e.to_string()))
     }
 
     /// Dial a peer by their libp2p multiaddr.
@@ -461,13 +273,19 @@ impl Libp2pTransportAdapter {
                     reason: e.to_string(),
                 })?;
 
-        let mut swarm = self.swarm.lock().await;
-        swarm.dial(addr).map_err(|e| TransportError::DialFailed {
-            peer: "unknown".into(),
-            reason: e.to_string(),
-        })?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(SwarmCommand::Dial {
+                addr,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))?;
 
-        Ok(())
+        reply_rx.await.map_err(|_| TransportError::DialFailed {
+            peer: "unknown".into(),
+            reason: "swarm task dropped the reply channel".into(),
+        })?
     }
 
     /// Get the list of currently connected peers.
@@ -499,52 +317,33 @@ impl Libp2pTransportAdapter {
         peer: &PeerId,
         request_bytes: Vec<u8>,
     ) -> Result<Vec<u8>, TransportError> {
-        let libp2p_peer_id = {
-            let conn = self.connected_peers.read().await;
-            match conn.get(peer.as_str()) {
-                Some(peer_conn) => peer_conn.libp2p_peer_id,
-                None => {
-                    return Err(TransportError::DialFailed {
-                        peer: peer.to_string(),
-                        reason: "peer not connected, use dial_multiaddr first".into(),
-                    });
-                }
-            }
-        };
+        let libp2p_peer_id = self.resolve_peer(peer).await?;
 
-        let (response_tx, response_rx) = oneshot::channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.command_tx
+            .send(SwarmCommand::SendRpc {
+                peer: peer.clone(),
+                libp2p_peer: libp2p_peer_id,
+                protocol: ProtocolId::control(),
+                request: request_bytes,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))?;
 
-        let request_id = {
-            let mut swarm = self.swarm.lock().await;
-            swarm
-                .behaviour_mut()
-                .ganglion_rpc
-                .send_request(&libp2p_peer_id, request_bytes)
-        };
+        await_reply(peer, reply_rx).await
+    }
 
-        {
-            let mut pending = self.pending_requests.lock().await;
-            pending.insert(
-                request_id,
-                PendingRequest {
-                    peer_id: peer.clone(),
-                    protocol: ProtocolId::control(),
-                    response_tx,
-                },
-            );
+    /// Look up the libp2p peer id for a connected gang peer.
+    async fn resolve_peer(&self, peer: &PeerId) -> Result<Libp2pPeerId, TransportError> {
+        let conn = self.connected_peers.read().await;
+        match conn.get(peer.as_str()) {
+            Some(peer_conn) => Ok(peer_conn.libp2p_peer_id),
+            None => Err(TransportError::DialFailed {
+                peer: peer.to_string(),
+                reason: "peer not connected, use dial_multiaddr first".into(),
+            }),
         }
-
-        {
-            let mut peers = self.connected_peers.write().await;
-            if let Some(conn) = peers.get_mut(peer.as_str()) {
-                conn.messages_sent += 1;
-            }
-        }
-
-        response_rx.await.map_err(|_| TransportError::DialFailed {
-            peer: peer.to_string(),
-            reason: "response channel closed".into(),
-        })?
     }
 
     /// Get the libp2p peer ID for this node.
@@ -553,68 +352,492 @@ impl Libp2pTransportAdapter {
     }
 }
 
+/// The task that owns the [`Swarm`] and drives its event loop. It receives
+/// [`SwarmCommand`]s over an mpsc channel and never shares the swarm.
+struct SwarmWorker {
+    swarm: Swarm<GanglionBehaviour>,
+    command_rx: mpsc::Receiver<SwarmCommand>,
+    /// A clone of the command sender, used to re-inject `SendResponse` once an
+    /// inbound handler finishes.
+    command_tx: mpsc::Sender<SwarmCommand>,
+    events: EventBus,
+    connected_peers: Arc<RwLock<HashMap<String, PeerConnection>>>,
+    protocol_handlers: Arc<RwLock<HashMap<String, StreamHandler>>>,
+    pending_requests: HashMap<OutboundRequestId, PendingRequest>,
+    config: Libp2pConfig,
+}
+
+impl SwarmWorker {
+    /// Run until a `Shutdown` command arrives, all senders drop, or the swarm
+    /// stream ends.
+    async fn run(mut self) {
+        use futures::StreamExt;
+        use libp2p::swarm::SwarmEvent;
+
+        let mut sweep = tokio::time::interval(PENDING_SWEEP_INTERVAL);
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = sweep.tick() => {
+                    self.sweep_pending_requests();
+                }
+                command = self.command_rx.recv() => {
+                    match command {
+                        Some(SwarmCommand::Shutdown) | None => {
+                            info!("Transport event loop shutting down");
+                            break;
+                        }
+                        Some(command) => self.handle_command(command).await,
+                    }
+                }
+                event = self.swarm.next() => {
+                    match event {
+                        Some(SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. }) => {
+                            self.on_connection_established(peer_id, endpoint).await;
+                        }
+                        Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                            let gang_peer_id = libp2p_to_gang_peer_id(&peer_id);
+                            info!(peer = %peer_id, "Connection closed");
+                            self.connected_peers.write().await.remove(gang_peer_id.as_str());
+                            self.events.publish(TransportEvent::PeerDisconnected {
+                                peer_id: gang_peer_id,
+                            });
+                        }
+                        Some(SwarmEvent::NewListenAddr { address, .. }) => {
+                            info!("Listening on {address}");
+                        }
+                        Some(SwarmEvent::Behaviour(event)) => {
+                            self.handle_behaviour_event(event).await;
+                        }
+                        Some(other) => {
+                            debug!("Swarm event: {other:?}");
+                        }
+                        None => {
+                            info!("Swarm event stream ended");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Remove pending requests whose deadline has passed, replying with a
+    /// timeout error. This guarantees the pending map is cleaned up even when
+    /// no response or failure event ever arrives for a request.
+    fn sweep_pending_requests(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<OutboundRequestId> = self
+            .pending_requests
+            .iter()
+            .filter(|(_, req)| req.deadline <= now)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            if let Some(req) = self.pending_requests.remove(&id) {
+                warn!(peer = %req.peer_id, protocol = %req.protocol, "RPC request timed out");
+                let _ = req
+                    .reply
+                    .send(Err(TransportError::Timeout(REQUEST_TIMEOUT)));
+            }
+        }
+    }
+
+    async fn handle_command(&mut self, command: SwarmCommand) {
+        match command {
+            SwarmCommand::Dial { addr, reply } => {
+                let result = self
+                    .swarm
+                    .dial(addr)
+                    .map_err(|e| TransportError::DialFailed {
+                        peer: "unknown".into(),
+                        reason: e.to_string(),
+                    });
+                let _ = reply.send(result);
+            }
+            SwarmCommand::ConnectToRelays { reply } => {
+                let result = swarm::connect_to_relays(&mut self.swarm, &self.config).await;
+                let _ = reply.send(result);
+            }
+            SwarmCommand::SendRpc {
+                peer,
+                libp2p_peer,
+                protocol,
+                request,
+                reply,
+            } => {
+                // Bound the pending map: reject rather than grow without limit.
+                if self.pending_requests.len() >= MAX_PENDING_REQUESTS {
+                    let _ = reply.send(Err(TransportError::DialFailed {
+                        peer: peer.to_string(),
+                        reason: format!(
+                            "too many in-flight requests ({MAX_PENDING_REQUESTS}), try again later"
+                        ),
+                    }));
+                    return;
+                }
+
+                let request_id = self.swarm.behaviour_mut().ganglion_rpc.send_request(
+                    &libp2p_peer,
+                    crate::swarm::GanglionRequest {
+                        protocol: protocol.as_str().to_string(),
+                        payload: request,
+                    },
+                );
+                self.pending_requests.insert(
+                    request_id,
+                    PendingRequest {
+                        peer_id: peer.clone(),
+                        protocol,
+                        reply,
+                        deadline: Instant::now() + REQUEST_TIMEOUT,
+                    },
+                );
+                let mut peers = self.connected_peers.write().await;
+                if let Some(conn) = peers.get_mut(peer.as_str()) {
+                    conn.messages_sent += 1;
+                }
+            }
+            SwarmCommand::SendResponse { channel, data } => {
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .ganglion_rpc
+                    .send_response(channel, data);
+            }
+            SwarmCommand::Shutdown => {
+                // Handled directly in `run`; nothing to do here.
+            }
+        }
+    }
+
+    async fn on_connection_established(
+        &mut self,
+        peer_id: Libp2pPeerId,
+        endpoint: libp2p::core::ConnectedPoint,
+    ) {
+        let gang_peer_id = libp2p_to_gang_peer_id(&peer_id);
+        let via_relay = endpoint.is_relayed();
+
+        info!(peer = %peer_id, relay = via_relay, "Connection established");
+
+        // Determine transport from endpoint multiaddr. Recognises current
+        // (tcp, quic) and future (webtransport, webrtc) transports so the field
+        // is correct if/when those features land in a future libp2p release.
+        let transport_name = if via_relay {
+            "relay".to_string()
+        } else {
+            let addr_str = endpoint.get_remote_address().to_string();
+            if addr_str.contains("/webtransport/") {
+                "webtransport".to_string()
+            } else if addr_str.contains("/webrtc-direct/") || addr_str.contains("/webrtc/") {
+                "webrtc".to_string()
+            } else if addr_str.contains("quic") {
+                "quic".to_string()
+            } else {
+                "tcp".to_string()
+            }
+        };
+
+        let peer_key = gang_peer_id.as_str().to_string();
+        let mut peers = self.connected_peers.write().await;
+        let reconnections = peers
+            .get(&peer_key)
+            .map(|p| p.reconnections + 1)
+            .unwrap_or(0);
+
+        peers.insert(
+            peer_key,
+            PeerConnection {
+                libp2p_peer_id: peer_id,
+                via_relay,
+                connected_at: std::time::Instant::now(),
+                transport: transport_name,
+                last_rtt: None,
+                dcutr_attempted: false,
+                dcutr_succeeded: false,
+                messages_sent: 0,
+                messages_received: 0,
+                bytes_sent: 0,
+                bytes_received: 0,
+                reconnections,
+            },
+        );
+        drop(peers);
+
+        self.events.publish(TransportEvent::PeerConnected {
+            peer_id: gang_peer_id,
+            via_relay,
+        });
+    }
+
+    async fn handle_behaviour_event(&mut self, event: swarm::GanglionBehaviourEvent) {
+        use swarm::GanglionBehaviourEvent;
+
+        match event {
+            GanglionBehaviourEvent::Identify(libp2p::identify::Event::Received {
+                peer_id,
+                info,
+                ..
+            }) => {
+                debug!(peer = %peer_id, agent = %info.agent_version, "Identified peer");
+
+                // Add peer addresses to Kademlia
+                for addr in &info.listen_addrs {
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+                }
+            }
+            GanglionBehaviourEvent::Ping(libp2p::ping::Event {
+                peer,
+                result: Ok(rtt),
+                ..
+            }) => {
+                debug!(peer = %peer, rtt = ?rtt, "Ping");
+                let gang_peer_id = libp2p_to_gang_peer_id(&peer);
+                let mut peers = self.connected_peers.write().await;
+                if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
+                    conn.last_rtt = Some(rtt);
+                }
+            }
+            GanglionBehaviourEvent::Dcutr(libp2p::dcutr::Event {
+                remote_peer_id,
+                result: Ok(_),
+                ..
+            }) => {
+                let gang_peer_id = libp2p_to_gang_peer_id(&remote_peer_id);
+                info!(peer = %remote_peer_id, "Direct connection upgraded via DCUtR");
+
+                {
+                    let mut peers = self.connected_peers.write().await;
+                    if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
+                        conn.dcutr_attempted = true;
+                        conn.dcutr_succeeded = true;
+                        conn.via_relay = false;
+                        conn.transport = "quic".into();
+                    }
+                }
+
+                self.events.publish(TransportEvent::DirectUpgrade {
+                    peer_id: gang_peer_id,
+                });
+            }
+            GanglionBehaviourEvent::GanglionRpc(request_response::Event::Message {
+                peer,
+                message,
+                ..
+            }) => {
+                self.handle_rpc_message(peer, message).await;
+            }
+            GanglionBehaviourEvent::GanglionRpc(request_response::Event::OutboundFailure {
+                request_id,
+                error,
+                ..
+            }) => {
+                warn!(request_id = ?request_id, error = ?error, "Outbound RPC failed");
+                if let Some(req) = self.pending_requests.remove(&request_id) {
+                    let _ = req.reply.send(Err(TransportError::DialFailed {
+                        peer: req.peer_id.to_string(),
+                        reason: format!("outbound request failed: {error:?}"),
+                    }));
+                }
+            }
+            GanglionBehaviourEvent::GanglionRpc(request_response::Event::InboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            }) => {
+                warn!(peer = %peer, request_id = ?request_id, error = ?error, "Inbound RPC failed");
+            }
+            GanglionBehaviourEvent::RelayServer(event) => {
+                debug!("Relay server event: {event:?}");
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle an incoming or outgoing RPC message.
+    async fn handle_rpc_message(
+        &mut self,
+        peer: Libp2pPeerId,
+        message: request_response::Message<crate::swarm::GanglionRequest, Vec<u8>>,
+    ) {
+        match message {
+            request_response::Message::Request {
+                request, channel, ..
+            } => {
+                let gang_peer_id = libp2p_to_gang_peer_id(&peer);
+                let crate::swarm::GanglionRequest { protocol, payload } = request;
+
+                {
+                    let mut peers = self.connected_peers.write().await;
+                    if let Some(conn) = peers.get_mut(gang_peer_id.as_str()) {
+                        conn.messages_received += 1;
+                        conn.bytes_received += payload.len() as u64;
+                    }
+                }
+
+                // Dispatch by the NEGOTIATED protocol, not the first registered
+                // handler. This ensures a `/ganglion/bulk/1.0` request is never
+                // handed to, say, the control handler.
+                let handlers = self.protocol_handlers.read().await;
+                if let Some(handler) = handlers.get(&protocol) {
+                    debug!(peer = %peer, protocol = %protocol, len = payload.len(), "Incoming RPC request");
+
+                    let response_rx =
+                        serve_request(handler, ProtocolId::new(protocol), gang_peer_id, payload);
+                    drop(handlers);
+
+                    let command_tx = self.command_tx.clone();
+                    tokio::spawn(async move {
+                        match response_rx.await {
+                            Ok(data) => {
+                                let _ = command_tx
+                                    .send(SwarmCommand::SendResponse { channel, data })
+                                    .await;
+                            }
+                            Err(_) => {
+                                // The handler failed to produce a response
+                                // (its task was dropped without sending).
+                                // Drop the channel instead of masking the
+                                // failure with an empty "success" response;
+                                // the peer then observes a genuine
+                                // InboundFailure::ResponseOmission.
+                                warn!(
+                                    "handler produced no response; omitting response so the peer sees a failure"
+                                );
+                            }
+                        }
+                    });
+                } else {
+                    debug!(peer = %peer, protocol = %protocol, "No handler registered for protocol, sending empty response");
+                    drop(handlers);
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .ganglion_rpc
+                        .send_response(channel, Vec::new());
+                }
+            }
+            request_response::Message::Response {
+                request_id,
+                response,
+            } => {
+                if let Some(req) = self.pending_requests.remove(&request_id) {
+                    debug!(
+                        peer = %req.peer_id,
+                        protocol = %req.protocol,
+                        len = response.len(),
+                        "Received RPC response"
+                    );
+
+                    {
+                        let mut peers = self.connected_peers.write().await;
+                        if let Some(conn) = peers.get_mut(req.peer_id.as_str()) {
+                            conn.messages_received += 1;
+                            conn.bytes_received += response.len() as u64;
+                        }
+                    }
+
+                    let _ = req.reply.send(Ok(response));
+                }
+            }
+        }
+    }
+}
+
+/// Await a reply from the swarm task, bounded by [`REQUEST_TIMEOUT`].
+///
+/// On timeout the caller returns promptly; the worker's periodic sweep is
+/// responsible for removing the corresponding pending-request entry.
+async fn await_reply(
+    peer: &PeerId,
+    reply_rx: oneshot::Receiver<Result<Vec<u8>, TransportError>>,
+) -> Result<Vec<u8>, TransportError> {
+    match tokio::time::timeout(REQUEST_TIMEOUT, reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(TransportError::DialFailed {
+            peer: peer.to_string(),
+            reason: "response channel closed".into(),
+        }),
+        Err(_) => Err(TransportError::Timeout(REQUEST_TIMEOUT)),
+    }
+}
+
+/// Run a registered stream handler against an inbound request payload,
+/// returning a receiver that resolves to the handler's response bytes.
+fn serve_request(
+    handler: &StreamHandler,
+    protocol: ProtocolId,
+    remote_peer: PeerId,
+    payload: Vec<u8>,
+) -> oneshot::Receiver<Vec<u8>> {
+    let (response_data_tx, response_data_rx) = oneshot::channel::<Vec<u8>>();
+
+    // Two independent pipes: one carries the request to the handler, the other
+    // carries the handler's response back. The handler's stream reads the
+    // request pipe and writes the response pipe.
+    let (mut request_writer, request_reader) = tokio::io::duplex(64 * 1024);
+    let (response_reader, response_writer) = tokio::io::duplex(64 * 1024);
+
+    // Feed the request payload to the handler.
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let _ = request_writer.write_all(&payload).await;
+        let _ = request_writer.shutdown().await;
+    });
+
+    // Collect the handler's response.
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut reader = response_reader;
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf).await;
+        let _ = response_data_tx.send(buf);
+    });
+
+    let stream = GanglionStream {
+        protocol,
+        remote_peer,
+        inner: Box::new(merge_rw(request_reader, response_writer)),
+    };
+
+    tokio::spawn(handler(stream));
+
+    response_data_rx
+}
+
 #[async_trait::async_trait]
 impl TransportAdapter for Libp2pTransportAdapter {
     async fn dial(&self, peer: &PeerId) -> Result<GanglionStream, TransportError> {
-        // Look up the peer in connected peers
-        let libp2p_peer_id = {
-            let conn = self.connected_peers.read().await;
-            match conn.get(peer.as_str()) {
-                Some(peer_conn) => peer_conn.libp2p_peer_id,
-                None => {
-                    return Err(TransportError::DialFailed {
-                        peer: peer.to_string(),
-                        reason: "peer not connected, use dial_multiaddr first".into(),
-                    });
-                }
-            }
-        };
+        let libp2p_peer_id = self.resolve_peer(peer).await?;
 
-        // Open a request-response stream on the control protocol
+        // Open a request-response stream on the control protocol.
         let protocol = ProtocolId::control();
-        let (response_tx, response_rx) = oneshot::channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
 
-        let request_id = {
-            let mut swarm = self.swarm.lock().await;
-            swarm
-                .behaviour_mut()
-                .ganglion_rpc
-                .send_request(&libp2p_peer_id, Vec::new())
-        };
+        self.command_tx
+            .send(SwarmCommand::SendRpc {
+                peer: peer.clone(),
+                libp2p_peer: libp2p_peer_id,
+                protocol: protocol.clone(),
+                request: Vec::new(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))?;
 
-        // Track the pending request
-        {
-            let mut pending = self.pending_requests.lock().await;
-            pending.insert(
-                request_id,
-                PendingRequest {
-                    peer_id: peer.clone(),
-                    protocol: protocol.clone(),
-                    response_tx,
-                },
-            );
-        }
+        let response = await_reply(peer, reply_rx).await?;
 
-        // Update send counters
-        {
-            let mut peers = self.connected_peers.write().await;
-            if let Some(conn) = peers.get_mut(peer.as_str()) {
-                conn.messages_sent += 1;
-            }
-        }
-
-        // Wait for the response
-        let response = response_rx.await.map_err(|_| TransportError::DialFailed {
-            peer: peer.to_string(),
-            reason: "response channel closed".into(),
-        })??;
-
-        // Build a GanglionStream from the response data
+        // Build a GanglionStream from the response data.
         let (read_half, mut write_half) = tokio::io::duplex(64 * 1024);
-        let response_data = response;
         tokio::spawn(async move {
             use tokio::io::AsyncWriteExt;
-            let _ = write_half.write_all(&response_data).await;
+            let _ = write_half.write_all(&response).await;
             let _ = write_half.shutdown().await;
         });
 
@@ -681,14 +904,10 @@ impl TransportAdapter for Libp2pTransportAdapter {
     }
 
     fn events(&self) -> Pin<Box<dyn Stream<Item = TransportEvent> + Send>> {
-        let event_rx = self.event_rx.clone();
+        let mut rx = self.events.subscribe();
         Box::pin(async_stream::stream! {
-            loop {
-                let event = event_rx.lock().await.recv().await;
-                match event {
-                    Some(e) => yield e,
-                    None => break,
-                }
+            while let Some(event) = rx.recv().await {
+                yield event;
             }
         })
     }
@@ -725,9 +944,8 @@ impl TransportAdapter for Libp2pTransportAdapter {
 
     async fn shutdown(&self) -> Result<(), TransportError> {
         info!("Shutting down transport");
-        if let Some(tx) = &self.shutdown_tx {
-            let _ = tx.send(()).await;
-        }
+        // Best-effort: if the worker already stopped the channel is closed.
+        let _ = self.command_tx.send(SwarmCommand::Shutdown).await;
         Ok(())
     }
 }
@@ -736,14 +954,15 @@ impl TransportAdapter for Libp2pTransportAdapter {
 /// Uses the libp2p peer ID string as a deterministic input.
 fn libp2p_to_gang_peer_id(peer_id: &Libp2pPeerId) -> PeerId {
     let hash = blake3::hash(peer_id.to_bytes().as_slice());
-    // Re-derive using the same format as gang-core PeerId
+    // Re-derive using the same format as gang-core PeerId. Construct the
+    // PeerId directly instead of round-tripping through a JSON string literal.
     let hex = hex::encode(&hash.as_bytes()[..16]);
-    serde_json::from_str::<PeerId>(&format!("\"12D3-{hex}\"")).expect("valid peer id format")
+    PeerId::new(&format!("12D3-{hex}"))
 }
 
 /// Parse a gang peer ID string back into a PeerId.
 fn parse_gang_peer_id(id: &str) -> Option<PeerId> {
-    serde_json::from_str::<PeerId>(&format!("\"{id}\"")).ok()
+    Some(PeerId::new(id))
 }
 
 /// Merge a read half and a write half into a single AsyncRead + AsyncWrite stream.
@@ -826,12 +1045,13 @@ mod tests {
             .unwrap();
 
         let config = Libp2pConfig {
-            key_path,
+            key_path: key_path.clone(),
             listen_addrs: vec![], // Don't bind ports in tests
             ..Default::default()
         };
 
-        let result = swarm::build_swarm(&config).await;
+        let secret = swarm::load_ed25519_secret(&key_path).unwrap();
+        let result = swarm::build_swarm(&config, secret).await;
         assert!(result.is_ok(), "swarm build failed: {:?}", result.err());
 
         let (_swarm, peer_id) = result.unwrap();
@@ -848,13 +1068,14 @@ mod tests {
             .unwrap();
 
         let config = Libp2pConfig {
-            key_path,
+            key_path: key_path.clone(),
             listen_addrs: vec![],
             relay_server: true,
             ..Default::default()
         };
 
-        let result = swarm::build_swarm(&config).await;
+        let secret = swarm::load_ed25519_secret(&key_path).unwrap();
+        let result = swarm::build_swarm(&config, secret).await;
         assert!(
             result.is_ok(),
             "relay server swarm build failed: {:?}",
@@ -880,6 +1101,90 @@ mod tests {
         assert_eq!(caps.transports.len(), 2);
         assert!(caps.transports.contains(&"tcp".to_string()));
         assert!(caps.transports.contains(&"quic".to_string()));
+    }
+
+    /// A handler that drains the request and responds with a fixed tag, so a
+    /// test can tell which registered handler actually ran.
+    fn tag_handler(tag: &'static [u8]) -> StreamHandler {
+        Box::new(move |mut stream| {
+            Box::pin(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let _ = stream.inner.read_to_end(&mut buf).await;
+                let _ = stream.inner.write_all(tag).await;
+                let _ = stream.inner.shutdown().await;
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn test_inbound_dispatch_uses_negotiated_protocol() {
+        use gang_core::protocol::{ALL_PROTOCOLS, PROTOCOL_BULK, PROTOCOL_CONTROL};
+
+        // The control protocol is first in ALL_PROTOCOLS, so the previous
+        // "first registered handler" logic would always have picked it.
+        assert_eq!(ALL_PROTOCOLS[0], PROTOCOL_CONTROL);
+
+        let mut handlers: HashMap<String, StreamHandler> = HashMap::new();
+        handlers.insert(PROTOCOL_CONTROL.to_string(), tag_handler(b"control"));
+        handlers.insert(PROTOCOL_BULK.to_string(), tag_handler(b"bulk"));
+
+        // A request negotiated on the bulk protocol must be served by the bulk
+        // handler, not the control handler.
+        let negotiated = PROTOCOL_BULK.to_string();
+        let handler = handlers.get(&negotiated).expect("bulk handler present");
+        let rx = serve_request(
+            handler,
+            ProtocolId::new(negotiated),
+            PeerId::new("12D3-peer"),
+            b"request".to_vec(),
+        );
+        let response = rx.await.unwrap();
+        assert_eq!(
+            response, b"bulk",
+            "bulk request was dispatched to the wrong handler"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_await_reply_times_out() {
+        // Keep the sender alive so the channel is not closed; the reply never
+        // arrives, so await_reply must resolve with a Timeout error once the
+        // (virtual) clock passes REQUEST_TIMEOUT.
+        let (_tx, rx) = oneshot::channel::<Result<Vec<u8>, TransportError>>();
+        let peer = PeerId::new("12D3-timeout");
+        let result = await_reply(&peer, rx).await;
+        assert!(
+            matches!(result, Err(TransportError::Timeout(_))),
+            "expected timeout, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_fans_out_to_multiple_subscribers() {
+        let bus = EventBus::default();
+        let mut a = bus.subscribe();
+        let mut b = bus.subscribe();
+
+        let peer = PeerId::new("12D3-abcdef");
+        bus.publish(TransportEvent::PeerConnected {
+            peer_id: peer.clone(),
+            via_relay: false,
+        });
+
+        let ea = a.recv().await.expect("subscriber A missed the event");
+        let eb = b.recv().await.expect("subscriber B missed the event");
+
+        match (ea, eb) {
+            (
+                TransportEvent::PeerConnected { peer_id: pa, .. },
+                TransportEvent::PeerConnected { peer_id: pb, .. },
+            ) => {
+                assert_eq!(pa, peer);
+                assert_eq!(pb, peer);
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
     }
 
     #[tokio::test]
