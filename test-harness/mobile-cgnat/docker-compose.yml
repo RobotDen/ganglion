@@ -5,13 +5,22 @@
 
 services:
   # Relay on the public internet.
+  # Fixed test identity (TEST KEY — DO NOT USE); the entrypoint wrapper
+  # publishes the relay's dialable multiaddr to the shared volume.
   relay:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["relay", "--port", "4001"]
+    entrypoint: ["/bin/bash", "/harness/relay-entrypoint.sh"]
+    environment:
+      GANG_KEY_PATH: /keys/relay.key
+      RELAY_IP: 10.2.0.10
+      RELAY_PORT: "4001"
     volumes:
       - relay-data:/data
+      - ../scripts:/harness:ro
+      - ../keys/mobile-cgnat-relay.key:/keys/relay.key:ro
+      - relay-shared:/shared
     networks:
       internet:
         ipv4_address: 10.2.0.10
@@ -21,9 +30,11 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["agent", "--data-dir", "/data"]
+    entrypoint: ["/bin/bash", "/harness/agent-entrypoint.sh"]
     volumes:
       - robot-data:/data
+      - ../scripts:/harness:ro
+      - relay-shared:/shared:ro
     networks:
       cgnat-inner:
         ipv4_address: 10.64.0.20
@@ -37,9 +48,11 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["agent", "--data-dir", "/data"]
+    entrypoint: ["/bin/bash", "/harness/agent-entrypoint.sh"]
     volumes:
       - operator-data:/data
+      - ../scripts:/harness:ro
+      - relay-shared:/shared:ro
     networks:
       internet:
         ipv4_address: 10.2.0.30
@@ -129,3 +142,4 @@ volumes:
   relay-data:
   robot-data:
   operator-data:
+  relay-shared:

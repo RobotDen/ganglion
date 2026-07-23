@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     dnsutils \
     ca-certificates \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/gang /usr/local/bin/gang

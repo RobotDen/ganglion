@@ -4,14 +4,24 @@
 # No direct connectivity. Relay required. DCUtR unlikely to succeed.
 
 services:
-  # Relay on the public internet, listening on port 443.
+  # Relay on the public internet, listening on port 443 — the DMZ firewall
+  # only allows TCP 443 egress, so the relay MUST listen there.
+  # Fixed test identity (TEST KEY — DO NOT USE); the entrypoint wrapper
+  # publishes the relay's dialable multiaddr to the shared volume.
   relay:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["relay", "--port", "443"]
+    entrypoint: ["/bin/bash", "/harness/relay-entrypoint.sh"]
+    environment:
+      GANG_KEY_PATH: /keys/relay.key
+      RELAY_IP: 10.1.0.10
+      RELAY_PORT: "443"
     volumes:
       - relay-data:/data
+      - ../scripts:/harness:ro
+      - ../keys/enterprise-dmz-relay.key:/keys/relay.key:ro
+      - relay-shared:/shared
     networks:
       internet:
         ipv4_address: 10.1.0.10
@@ -22,9 +32,11 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["agent", "--data-dir", "/data"]
+    entrypoint: ["/bin/bash", "/harness/agent-entrypoint.sh"]
     volumes:
       - robot-data:/data
+      - ../scripts:/harness:ro
+      - relay-shared:/shared:ro
     networks:
       robot-vlan:
         ipv4_address: 172.16.10.20
@@ -37,9 +49,11 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    command: ["agent", "--data-dir", "/data"]
+    entrypoint: ["/bin/bash", "/harness/agent-entrypoint.sh"]
     volumes:
       - operator-data:/data
+      - ../scripts:/harness:ro
+      - relay-shared:/shared:ro
     networks:
       internet:
         ipv4_address: 10.1.0.30
@@ -104,3 +118,4 @@ volumes:
   relay-data:
   robot-data:
   operator-data:
+  relay-shared:

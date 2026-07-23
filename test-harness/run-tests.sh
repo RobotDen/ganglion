@@ -84,6 +84,19 @@ echo ""
 
 # --- Run scenarios ---
 
+# Poll a service's logs for a pattern, up to N 1-second attempts.
+wait_for_log() {
+    local project_name="$1" compose_file="$2" service="$3" pattern="$4" attempts="$5"
+    local i
+    for (( i = 0; i < attempts; i++ )); do
+        if docker compose -p "$project_name" -f "$compose_file" logs "$service" 2>&1 | grep -q "$pattern"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 teardown() {
     local scenario="$1"
     local project_name="ganglion-${scenario}"
@@ -107,26 +120,33 @@ run_scenario() {
     # Tear down any leftover from previous runs
     teardown "$scenario"
 
-    # Start the scenario
-    echo "Starting containers..."
-    if ! docker compose -p "$project_name" -f "$compose_file" up -d --build 2>&1; then
-        log_fail "docker compose up failed"
+    # Start the scenario, bounded by the per-scenario timeout (OPS-12).
+    echo "Starting containers (timeout: ${TIMEOUT}s)..."
+    if ! timeout "$TIMEOUT" docker compose -p "$project_name" -f "$compose_file" up -d --build 2>&1; then
+        log_fail "docker compose up failed (or exceeded ${TIMEOUT}s timeout)"
         FAIL=$((FAIL + 1))
         RESULTS+=("$scenario: FAIL (compose up failed)")
         return 1
     fi
 
-    # Wait for services to stabilize
+    # Wait for services to stabilize: poll container state instead of a fixed
+    # sleep. Attempts are derived from the per-scenario timeout (2s interval).
     echo "Waiting for services to stabilize..."
-    sleep 5
+    local running=0 expected=0 attempt=0
+    local max_attempts=$(( TIMEOUT / 2 ))
+    [ "$max_attempts" -lt 1 ] && max_attempts=1
+    while [ "$attempt" -lt "$max_attempts" ]; do
+        running=$(docker compose -p "$project_name" -f "$compose_file" ps --format '{{.State}}' 2>/dev/null | grep -c "running" || true)
+        expected=$(docker compose -p "$project_name" -f "$compose_file" ps -a --format '{{.State}}' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$expected" -gt 0 ] && [ "$running" -eq "$expected" ]; then
+            break
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
 
     # --- Check 1: All containers running ---
     checks_total=$((checks_total + 1))
-    local running
-    running=$(docker compose -p "$project_name" -f "$compose_file" ps --format '{{.State}}' 2>/dev/null | grep -c "running" || true)
-    local expected
-    expected=$(docker compose -p "$project_name" -f "$compose_file" ps -a --format '{{.State}}' 2>/dev/null | wc -l | tr -d ' ')
-
     if [ "$running" -eq "$expected" ] && [ "$running" -gt 0 ]; then
         log_pass "all $running containers running"
         checks_passed=$((checks_passed + 1))
@@ -278,6 +298,29 @@ run_scenario() {
             fi
             ;;
     esac
+
+    # --- Check 7: robot agent established a relay connection (OPS-13) ---
+    # The agent entrypoint wrapper dials the relay multiaddr published on the
+    # shared volume; "Connected to relay" is the agent's success line. Retry
+    # for a while: NAT/netem scenarios can be slow to converge.
+    checks_total=$((checks_total + 1))
+    if wait_for_log "$project_name" "$compose_file" robot "Connected to relay" 30; then
+        log_pass "robot agent connected to relay"
+        checks_passed=$((checks_passed + 1))
+    else
+        log_fail "robot agent never logged 'Connected to relay'"
+        docker compose -p "$project_name" -f "$compose_file" logs robot 2>&1 | tail -10 | sed 's/^/    /'
+    fi
+
+    # --- Check 8: operator agent established a relay connection (OPS-13) ---
+    checks_total=$((checks_total + 1))
+    if wait_for_log "$project_name" "$compose_file" operator "Connected to relay" 30; then
+        log_pass "operator agent connected to relay"
+        checks_passed=$((checks_passed + 1))
+    else
+        log_fail "operator agent never logged 'Connected to relay'"
+        docker compose -p "$project_name" -f "$compose_file" logs operator 2>&1 | tail -10 | sed 's/^/    /'
+    fi
 
     echo ""
 

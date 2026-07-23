@@ -27,7 +27,9 @@ docker compose up -d
 ```
 
 The first run builds the container image (takes a few minutes for the Rust
-compile) and generates an Ed25519 identity key in the `relay-data` volume.
+compile) and generates an Ed25519 identity key. The container sets
+`GANG_KEY_PATH=/data/identity.key`, so the key is created inside the
+`relay-data` volume rather than the container filesystem.
 
 ### Get the relay's peer ID
 
@@ -43,8 +45,9 @@ Copy the peer ID. You will use it to configure robots and operators.
 docker compose down
 ```
 
-The identity key persists in the `relay-data` volume. Restarting reuses the
-same peer ID.
+Because `GANG_KEY_PATH` points at `/data/identity.key`, the identity key
+persists in the `relay-data` volume. Restarting reuses the same peer ID as
+long as the volume is kept.
 
 ## Configuring robots to use the relay
 
@@ -94,5 +97,6 @@ Most connections upgrade to direct via DCUtR within seconds.
   request a relay reservation.
 - All traffic is encrypted end-to-end with Noise. The relay cannot read
   relayed application data.
-- The relay's identity key is stored in the Docker volume at `/data/identity.key`.
-  Back it up if you want to preserve the peer ID across volume recreation.
+- The relay's identity key is stored in the Docker volume at `/data/identity.key`
+  (the container sets `GANG_KEY_PATH` to that path). Back it up if you want to
+  preserve the peer ID across volume recreation.
