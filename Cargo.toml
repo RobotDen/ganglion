@@ -99,7 +99,7 @@ libp2p = { version = "0.56", features = [
 ] }
 
 # WASM runtime
-wasmtime = { version = "36", features = ["component-model"] }
+wasmtime = { version = "47", features = ["component-model"] }
 wasmtime-wasi = "36"
 
 # Testing
