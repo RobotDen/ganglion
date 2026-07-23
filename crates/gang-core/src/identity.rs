@@ -348,10 +348,10 @@ pub fn default_config_dir() -> PathBuf {
 /// identity persistence and testing), falling back to
 /// `~/.gang/identity.key`.
 pub fn default_key_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("GANG_KEY_PATH") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
+    if let Some(path) = std::env::var_os("GANG_KEY_PATH")
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
     }
     default_config_dir().join("identity.key")
 }

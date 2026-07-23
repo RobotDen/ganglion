@@ -176,18 +176,17 @@ impl Policy {
                         });
                     }
                     // Check access level
-                    if pattern.access == RosAccess::ReadWrite {
-                        if let Some(max) = &rule.max_access {
-                            if max == "read_only" {
-                                return Err(PolicyError::PatternExceedsPolicy {
-                                    capability: group_name.into(),
-                                    pattern: format!(
-                                        "{} (read_write exceeds max read_only)",
-                                        pattern.pattern
-                                    ),
-                                });
-                            }
-                        }
+                    if pattern.access == RosAccess::ReadWrite
+                        && let Some(max) = &rule.max_access
+                        && max == "read_only"
+                    {
+                        return Err(PolicyError::PatternExceedsPolicy {
+                            capability: group_name.into(),
+                            pattern: format!(
+                                "{} (read_write exceeds max read_only)",
+                                pattern.pattern
+                            ),
+                        });
                     }
                 }
             }

@@ -141,17 +141,18 @@ impl AuditLog {
         // chains stay linked across a rotation (verifiable while the rotated
         // file is still present).
         let mut rotated_tip: Option<String> = None;
-        if let Ok(metadata) = std::fs::metadata(&self.path) {
-            if metadata.len() > self.max_size_bytes && self.max_size_bytes > 0 {
-                rotated_tip = Some(
-                    self.read_chained()?
-                        .last()
-                        .map(|last| last.record_hash.clone())
-                        .unwrap_or_default(),
-                );
-                self.rotate()
-                    .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
-            }
+        if let Ok(metadata) = std::fs::metadata(&self.path)
+            && metadata.len() > self.max_size_bytes
+            && self.max_size_bytes > 0
+        {
+            rotated_tip = Some(
+                self.read_chained()?
+                    .last()
+                    .map(|last| last.record_hash.clone())
+                    .unwrap_or_default(),
+            );
+            self.rotate()
+                .map_err(|e| AuditError::WriteFailed(e.to_string()))?;
         }
 
         // Determine the chain head (seq + prev_hash): after rotation the new
@@ -486,7 +487,8 @@ mod tests {
         assert_eq!(recs[0].seq, 0);
         assert_eq!(recs[0].prev_hash, rotated_tip);
         assert!(!recs[0].prev_hash.is_empty());
-        log.verify_chain().expect("post-rotation chain should verify");
+        log.verify_chain()
+            .expect("post-rotation chain should verify");
 
         // The rotated file remains verifiable on its own.
         let rotated = AuditLog::new(dir.path().join("audit.log.1"), 0);
