@@ -106,6 +106,15 @@ When an operator deploys a component to a robot:
 5. Evaluates every declared capability against the policy engine
 6. Only if all checks pass: stores the component and manifest to disk
 
+### Registry entries are authenticated against the manifest
+
+The local capability registry accepts an entry only with an accompanying
+signed manifest (SEC-15) and validates the entry **field-by-field** against it:
+name, version, capabilities, and component CID must all match the
+authenticated manifest contents. CLI overrides that contradict the manifest
+(e.g. `gang registry publish --version`) are rejected, so registry metadata
+cannot silently diverge from what was signed.
+
 ## Policy engine
 
 The policy engine is default-deny and is defined in TOML:
@@ -189,6 +198,7 @@ WASM components have:
 ### Filesystem broker
 
 - **Canonicalized symlink jail (TOCTOU-closed, SEC-10)**: Paths are canonicalized before use; for writes to new files, the *parent* directory is canonicalized. The canonicalized path is checked against the jail root, and callers operate on the returned canonical path — closing the time-of-check/time-of-use window where an attacker swaps in a symlink after the check. Paths that resolve outside the jail are rejected.
+- **Final-component symlink rejection**: For writes to new files, a symlink at the final path component — including a *dangling* symlink, which parent canonicalization alone would not catch — is rejected, so a planted link cannot redirect the write outside the jail.
 - **Pattern matching**: Only paths matching the declared `FsAccessPattern` patterns are accessible.
 - **Permission flags**: Each pattern has explicit `read`, `write`, `execute` flags.
 
@@ -202,7 +212,8 @@ WASM components have:
 ### Network probe broker
 
 - Provides structured probing primitives (ping, DNS, port check, traceroute) rather than raw socket access.
-- **SSRF hardening**: Every probe target is checked against a configured host/CIDR allowlist. Sensitive ranges — IPv4 loopback (`127.0.0.0/8`), link-local/cloud-metadata (`169.254.0.0/16`, including `169.254.169.254`), and IPv6 ULA — are blocked *unconditionally*, regardless of the allowlist, to prevent SSRF and cloud-metadata exfiltration. An empty allowlist denies all targets.
+- **SSRF hardening**: Every probe target is checked against a configured host/CIDR allowlist. Sensitive ranges — IPv4 loopback (`127.0.0.0/8`), link-local/cloud-metadata (`169.254.0.0/16`, including `169.254.169.254`), IPv6 link-local (`fe80::/10`), IPv4-mapped-IPv6 addresses, and IPv6 ULA — are blocked *unconditionally*, regardless of the allowlist, to prevent SSRF and cloud-metadata exfiltration. An empty allowlist denies all targets.
+- **DNS-rebinding resistance**: A hostname target is resolved once, the resulting addresses are canonicalized and vetted against the blocklist/allowlist, and probes then connect *only to those vetted addresses* — the hostname is never re-resolved for the connection, so a DNS answer that changes between check and use cannot redirect a probe to a blocked address.
 - Userspace implementations: ping uses TCP connect, DNS uses standard library resolution, traceroute is a stub in userspace contexts.
 
 ## Audit logging
@@ -228,7 +239,18 @@ is linked into a **Blake3 hash chain** — the stored hash for record *n* is
 `blake3(prev_hash || seq || cbor(record))` — so any reordering, deletion, or
 in-place edit breaks the chain. `AuditLog::verify_chain()` walks the log and
 detects tampering. The log file is created with `0600` permissions and rotates
-by size (configurable).
+by size (configurable). On rotation, the new log file **carries the rotated
+file's tip hash** as its starting `prev_hash`, so the chain spans rotated
+files rather than restarting.
+
+**Honest trust bounds:** the hash chain has no external anchor. An attacker who
+can rewrite the whole log file (and its rotated predecessors) can recompute a
+consistent chain — a *full rewrite is undetectable*. Likewise, *truncating
+trailing records* is undetectable, because the shortened chain is still
+internally consistent. What the chain detects is tampering *within* a log an
+attacker cannot fully rewrite: reordering, deletion of interior records, and
+in-place edits. For stronger guarantees, periodically export the tip hash to an
+external system (see deployment recommendations).
 
 The audit log is designed to be forensically useful: it records not just what ran, but who ran it, what capabilities were used, how much data was read/written, and whether execution succeeded or failed — and now whether the record sequence is intact.
 
@@ -241,6 +263,11 @@ nonce/timestamp are required, a pre-2.0 operator that omits them is rejected —
 all agents and operators must run compatible versions (see
 [MIGRATION-v2.md](MIGRATION-v2.md)).
 
+The replay guard tracks at most **100,000 nonces** and **fails closed**: when
+the guard is at capacity, new requests are rejected rather than accepted
+untracked, so memory stays bounded without ever degrading into accepting
+replays.
+
 ## Transport encryption
 
 All peer-to-peer traffic is encrypted using the Noise protocol (XX handshake pattern) as implemented by libp2p. The relay server handles only encrypted ciphertext and cannot inspect or modify payloads.
@@ -252,6 +279,6 @@ QUIC connections provide their own TLS 1.3 encryption in addition to the Noise l
 1. **Restrict the trust store** — only add operator keys that need to deploy to specific robots.
 2. **Use restrictive policies** — start with deny-all and add only the capabilities each component needs.
 3. **Protect identity keys** — the agent enforces `0600` on `identity.key`, but keep the containing directory and backups equally restricted.
-4. **Monitor audit logs** — forward audit logs to a central monitoring system for anomaly detection.
+4. **Monitor audit logs** — forward audit logs to a central monitoring system for anomaly detection, and periodically record the chain's tip hash externally: the hash chain alone cannot detect a full rewrite or trailing truncation, but an externally anchored tip hash can.
 5. **Pin component hashes** — after verifying a component, record its Blake3 hash and verify on subsequent deploys.
 6. **Run your own relay** — don't rely on third-party relays for production traffic.
