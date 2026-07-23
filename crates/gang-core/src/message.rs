@@ -244,6 +244,10 @@ pub enum ReplayError {
     /// The nonce has already been observed within the window.
     #[error("request nonce has already been seen (replay)")]
     Replay,
+    /// The guard is tracking its maximum number of nonces; new requests are
+    /// rejected (fail closed) until entries age out of the window.
+    #[error("replay guard is at capacity; rejecting request (fail closed)")]
+    CapacityExhausted,
 }
 
 /// Tracks recently-seen request nonces to reject replays, evicting entries
@@ -257,15 +261,35 @@ pub struct ReplayGuard {
     window: std::time::Duration,
     /// Map of seen nonce -> timestamp_ms it was seen at.
     seen: std::collections::HashMap<String, u64>,
+    /// Hard cap on tracked nonces (memory bound).
+    max_tracked: usize,
 }
+
+/// Default hard cap on the number of nonces a [`ReplayGuard`] tracks.
+///
+/// Without a cap, an attacker could grow the seen-nonce map without bound by
+/// sending unique fresh nonces inside the freshness window. When the guard is
+/// full (after evicting aged entries), new requests are *rejected* — failing
+/// closed — rather than accepted untracked, which would reopen the replay
+/// window.
+pub const MAX_SEEN: usize = 100_000;
 
 impl ReplayGuard {
     /// Create a guard that accepts requests whose timestamp is within `window`
-    /// of the current time and whose nonce has not been seen.
+    /// of the current time and whose nonce has not been seen. Tracks at most
+    /// [`MAX_SEEN`] nonces; see [`ReplayGuard::with_max_tracked`].
     pub fn new(window: std::time::Duration) -> Self {
+        Self::with_max_tracked(window, MAX_SEEN)
+    }
+
+    /// Like [`ReplayGuard::new`] but with an explicit cap on tracked nonces.
+    /// Once `max_tracked` nonces are retained (and none have aged out), new
+    /// requests fail with [`ReplayError::CapacityExhausted`].
+    pub fn with_max_tracked(window: std::time::Duration, max_tracked: usize) -> Self {
         Self {
             window,
             seen: std::collections::HashMap::new(),
+            max_tracked,
         }
     }
 
@@ -300,6 +324,12 @@ impl ReplayGuard {
         }
         if self.seen.contains_key(nonce) {
             return Err(ReplayError::Replay);
+        }
+        // Hard memory bound: when full even after eviction, reject rather
+        // than accept an untracked nonce (fail closed — accepting would let
+        // the same nonce be replayed while the guard is saturated).
+        if self.seen.len() >= self.max_tracked {
+            return Err(ReplayError::CapacityExhausted);
         }
         self.seen.insert(nonce.to_string(), timestamp_ms);
         Ok(())
@@ -491,6 +521,39 @@ mod tests {
         let t1 = t0 + 120_000;
         assert_eq!(guard.observe_at("new", t1, t1), Ok(()));
         assert_eq!(guard.tracked(), 1, "aged nonce should have been evicted");
+    }
+
+    #[test]
+    fn replay_guard_caps_tracked_nonces_and_fails_closed() {
+        let mut guard = ReplayGuard::with_max_tracked(std::time::Duration::from_secs(30), 3);
+        let now = 1_000_000u64;
+
+        assert_eq!(guard.observe_at("n1", now, now), Ok(()));
+        assert_eq!(guard.observe_at("n2", now, now), Ok(()));
+        assert_eq!(guard.observe_at("n3", now, now), Ok(()));
+        assert_eq!(guard.tracked(), 3);
+
+        // Guard is full: a fresh, unseen nonce is REJECTED (fail closed),
+        // not silently accepted untracked.
+        assert_eq!(
+            guard.observe_at("n4", now, now),
+            Err(ReplayError::CapacityExhausted)
+        );
+        assert_eq!(guard.tracked(), 3, "rejected nonce must not be stored");
+
+        // A replayed nonce still reports Replay, even at capacity.
+        assert_eq!(guard.observe_at("n1", now, now), Err(ReplayError::Replay));
+
+        // Once entries age out of the window, capacity frees up again.
+        let later = now + 120_000;
+        assert_eq!(guard.observe_at("n5", later, later), Ok(()));
+        assert_eq!(guard.tracked(), 1);
+    }
+
+    #[test]
+    fn replay_guard_default_cap_is_max_seen() {
+        let guard = ReplayGuard::new(std::time::Duration::from_secs(30));
+        assert_eq!(guard.max_tracked, MAX_SEEN);
     }
 
     #[test]
