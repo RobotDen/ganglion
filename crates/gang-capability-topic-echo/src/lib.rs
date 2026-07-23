@@ -123,7 +123,7 @@ pub fn decimate(
     let mut seq: u64 = 0;
 
     for (i, data) in raw_messages.iter().enumerate() {
-        if (i as u32) % decimation != 0 {
+        if !(i as u32).is_multiple_of(decimation) {
             continue;
         }
         if max_messages > 0 && captured.len() >= max_messages as usize {
