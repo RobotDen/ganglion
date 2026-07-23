@@ -13,7 +13,8 @@ multiple-versions = "warn"
 wildcards = "deny"
 
 [licenses]
-# Permissive licenses only. Ganglion itself is Apache-2.0.
+# Permissive and weak-copyleft (file-level) licenses only.
+# Ganglion itself is Apache-2.0.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -27,14 +28,14 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "Unicode-DFS-2016",
+    # MPL-2.0 is file-level copyleft; used by attohttpc and option-ext.
+    "MPL-2.0",
 ]
 confidence-threshold = 0.8
 
-[[licenses.clarify]]
-# ring bundles code under multiple licenses; upstream declares this set.
-crate = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+# No clarify needed for ring: since 0.17, ring declares
+# `license = "Apache-2.0 AND ISC"` in its own metadata, and both
+# licenses are in the allow list above.
 
 [sources]
 unknown-registry = "deny"
