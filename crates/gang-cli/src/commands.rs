@@ -2051,14 +2051,12 @@ pub async fn capability_scaffold(
         _ => anyhow::bail!("unsupported language: {language}. Supported: rust, cpp, python, go"),
     }
 
-    // Copy WIT interface to project
+    // Write the real WIT interface into the project. Embedded at build time
+    // from the in-repo canonical copy so scaffolds are usable out of the box.
+    const GANGLION_WIT: &str = include_str!("../../gang-wasm-host/wit/ganglion.wit");
     let wit_dir = project_dir.join("wit");
     std::fs::create_dir_all(&wit_dir)?;
-    std::fs::write(
-        wit_dir.join("README.md"),
-        "Copy ganglion.wit from the Ganglion repository into this directory.\n\
-         See: https://github.com/tafy-labs/ganglion/tree/main/crates/gang-wasm-host/wit\n",
-    )?;
+    std::fs::write(wit_dir.join("ganglion.wit"), GANGLION_WIT)?;
 
     println!(
         "Scaffolded {} capability at {}",
@@ -2066,10 +2064,9 @@ pub async fn capability_scaffold(
         project_dir.display()
     );
     println!("\nNext steps:");
-    println!("  1. Copy ganglion.wit into {}/wit/", name);
-    println!("  2. Implement your capability logic");
-    println!("  3. Build: see docs/CAPABILITY_AUTHOR_GUIDE.md");
-    println!("  4. Sign: gang sign {name}.component.wasm --name {name} --version 0.1.0");
+    println!("  1. Implement your capability logic (WIT is in {name}/wit/ganglion.wit)");
+    println!("  2. Build: see docs/CAPABILITY_AUTHOR_GUIDE.md");
+    println!("  3. Sign: gang sign {name}.component.wasm --name {name} --version 0.1.0");
     Ok(())
 }
 
