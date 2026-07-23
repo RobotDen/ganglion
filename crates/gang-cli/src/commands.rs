@@ -292,8 +292,13 @@ pub fn resolve_target(
 
     // 1. Explicit --peer flag
     if let Some(peer_str) = explicit_peer {
+        let peer_id = PeerId::parse(peer_str).map_err(|e| {
+            anyhow::anyhow!(
+                "Invalid peer ID '{peer_str}': {e}. Expected format: 12D3-<32 hex chars>"
+            )
+        })?;
         return Ok(ResolvedTarget {
-            peer_id: Some(PeerId::new(peer_str)),
+            peer_id: Some(peer_id),
             relay_addr: resolve_relay(explicit_relay, None),
             name: None,
             is_local: false,
@@ -343,8 +348,11 @@ pub fn resolve_target(
 
     // 4. Full peer ID
     if robot.starts_with("12D3-") && robot.len() == 37 {
+        let peer_id = PeerId::parse(robot).map_err(|e| {
+            anyhow::anyhow!("Invalid peer ID '{robot}': {e}. Expected format: 12D3-<32 hex chars>")
+        })?;
         return Ok(ResolvedTarget {
-            peer_id: Some(PeerId::new(robot)),
+            peer_id: Some(peer_id),
             relay_addr: resolve_relay(explicit_relay, None),
             name: None,
             is_local: false,
@@ -381,21 +389,13 @@ pub async fn peer_add(
 ) -> anyhow::Result<()> {
     use gang_core::identity::{PeerEntry, PeerId, PeerRegistry, Role, default_registry_path};
 
-    let peer_id = PeerId::new(peer_id_str);
-    if !peer_id.as_str().starts_with("12D3-") || peer_id.as_str().len() != 37 {
-        anyhow::bail!(
-            "Invalid peer ID: '{}'. Expected format: 12D3-<32 hex chars>",
-            peer_id_str
-        );
-    }
-    // Validate the 32-char hex payload after the "12D3-" prefix.
-    let hex_payload = &peer_id.as_str()[5..];
-    if hex::decode(hex_payload).is_err() {
-        anyhow::bail!(
-            "Invalid peer ID: '{}'. The 32 characters after '12D3-' must be hex.",
-            peer_id_str
-        );
-    }
+    // `PeerId::parse` validates the full shape: the "12D3-" prefix followed by
+    // exactly 32 hex characters.
+    let peer_id = PeerId::parse(peer_id_str).map_err(|e| {
+        anyhow::anyhow!(
+            "Invalid peer ID '{peer_id_str}': {e}. Expected format: 12D3-<32 hex chars>"
+        )
+    })?;
 
     let role = match role_str {
         "robot-agent" | "robot" => Role::RobotAgent,
