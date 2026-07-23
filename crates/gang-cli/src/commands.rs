@@ -187,9 +187,11 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
 pub async fn identity_show() -> anyhow::Result<()> {
     let key_path = gang_core::identity::default_key_path();
     if !key_path.exists() {
-        eprintln!("No identity found. Run `gang identity generate` first.");
-        eprintln!("Expected key at: {}", key_path.display());
-        std::process::exit(1);
+        anyhow::bail!(
+            "No identity found. Run `gang identity generate` first.\n\
+             Expected key at: {}",
+            key_path.display()
+        );
     }
 
     let keypair = gang_core::identity::Keypair::load(&key_path)?;
@@ -206,9 +208,10 @@ pub async fn identity_show() -> anyhow::Result<()> {
 pub async fn identity_generate(force: bool) -> anyhow::Result<()> {
     let key_path = gang_core::identity::default_key_path();
     if key_path.exists() && !force {
-        eprintln!("Identity already exists at {}.", key_path.display());
-        eprintln!("Use --force to overwrite.");
-        std::process::exit(1);
+        anyhow::bail!(
+            "Identity already exists at {}. Use --force to overwrite.",
+            key_path.display()
+        );
     }
 
     let keypair = gang_core::identity::Keypair::generate();
