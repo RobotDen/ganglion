@@ -30,6 +30,17 @@ pub enum RegistryError {
         manifest: String,
     },
 
+    /// A field of the entry contradicts the verified signed manifest.
+    #[error("{field} mismatch: entry claims {entry:?}, signed manifest says {manifest:?}")]
+    EntryManifestMismatch {
+        /// The entry field that disagrees with the manifest.
+        field: &'static str,
+        /// The value declared by the registry entry.
+        entry: String,
+        /// The value authenticated by the signed manifest.
+        manifest: String,
+    },
+
     /// A capability with this name and version is already published.
     #[error("{0} already published")]
     DuplicateVersion(String),
@@ -176,6 +187,13 @@ impl Registry {
     /// key) and the entry's declared `author_peer_id` must match the verified
     /// manifest author. Publishing is rejected on any mismatch, preventing an
     /// entry from being attributed to a peer that did not sign the manifest.
+    ///
+    /// Beyond the author, the entry's *content* must agree with the verified
+    /// manifest (SEC-15 completion): `name`, `version`, the declared
+    /// capability set (compared as qualified names, order-insensitive), and
+    /// `component_cid` (which must encode the manifest's Blake3
+    /// `component_hash`) are all checked, so a publisher cannot attach a
+    /// validly-signed manifest for component X to an entry claiming Y.
     pub fn publish(
         &mut self,
         entry: RegistryEntry,
@@ -188,6 +206,51 @@ impl Registry {
             return Err(RegistryError::AuthorMismatch {
                 entry: entry.author_peer_id.clone(),
                 manifest: manifest.author_peer_id.to_string(),
+            });
+        }
+
+        if entry.name != manifest.name {
+            return Err(RegistryError::EntryManifestMismatch {
+                field: "name",
+                entry: entry.name.clone(),
+                manifest: manifest.name.clone(),
+            });
+        }
+
+        if entry.version != manifest.version {
+            return Err(RegistryError::EntryManifestMismatch {
+                field: "version",
+                entry: entry.version.clone(),
+                manifest: manifest.version.clone(),
+            });
+        }
+
+        // Declared capabilities must match the manifest's, compared as
+        // qualified names (e.g. "ganglion:logs/stream@1.0"), order-insensitive.
+        let mut entry_caps = entry.declared_capabilities.clone();
+        entry_caps.sort();
+        let mut manifest_caps: Vec<String> = manifest
+            .declared_capabilities
+            .iter()
+            .map(|g| g.qualified_name())
+            .collect();
+        manifest_caps.sort();
+        if entry_caps != manifest_caps {
+            return Err(RegistryError::EntryManifestMismatch {
+                field: "declared_capabilities",
+                entry: entry_caps.join(","),
+                manifest: manifest_caps.join(","),
+            });
+        }
+
+        // The component CID and the manifest's component hash encode the same
+        // Blake3 digest (CID format: "bafy" + hex(blake3)), so they must agree.
+        let expected_cid = format!("bafy{}", manifest.component_hash.to_lowercase());
+        if entry.component_cid.as_str().to_lowercase() != expected_cid {
+            return Err(RegistryError::EntryManifestMismatch {
+                field: "component_cid",
+                entry: entry.component_cid.to_string(),
+                manifest: expected_cid,
             });
         }
 
@@ -291,6 +354,7 @@ impl Registry {
 mod tests {
     use super::*;
 
+    use crate::capability::CapabilityGroup;
     use crate::identity::Keypair;
     use crate::manifest::{ComponentManifest, MANIFEST_SCHEMA_VERSION, ResourceLimits};
 
@@ -303,7 +367,7 @@ mod tests {
             language: CapabilityLanguage::Rust,
             component_cid: Cid::from_bytes(format!("{name}-{version}-component").as_bytes()),
             manifest_cid: Cid::from_bytes(format!("{name}-{version}-manifest").as_bytes()),
-            declared_capabilities: vec!["ganglion:diagnostics/collect".into()],
+            declared_capabilities: vec!["ganglion:diagnostics/collect@1.0".into()],
             published_at: "2026-04-23T12:00:00Z".into(),
             tags: vec![name.replace("gang-capability-", ""), "system".into()],
             min_ganglion_version: Some("0.4.0".into()),
@@ -312,13 +376,18 @@ mod tests {
 
     /// Build an entry plus a matching signed manifest authored by `kp`.
     fn signed_entry(kp: &Keypair, name: &str, version: &str) -> (RegistryEntry, SignedManifest) {
+        // Same bytes as sample_entry() uses for its component CID, so the
+        // manifest hash and the entry CID encode the same digest.
+        let component_bytes = format!("{name}-{version}-component");
         let manifest = ComponentManifest {
             schema_version: MANIFEST_SCHEMA_VERSION.into(),
             name: name.into(),
             version: version.into(),
-            declared_capabilities: vec![],
+            declared_capabilities: vec![CapabilityGroup::DiagnosticsCollect {
+                version: "1.0".into(),
+            }],
             author_peer_id: kp.peer_id(),
-            component_hash: blake3::hash(format!("{name}-{version}").as_bytes())
+            component_hash: blake3::hash(component_bytes.as_bytes())
                 .to_hex()
                 .to_string(),
             limits: ResourceLimits::default(),
@@ -383,6 +452,119 @@ mod tests {
 
         let result = reg.publish(entry, &signed);
         assert!(matches!(result, Err(RegistryError::Manifest(_))));
+    }
+
+    /// Assert that publishing `entry` fails with an `EntryManifestMismatch`
+    /// on the given field, and that nothing was published.
+    fn assert_mismatch(
+        reg: &mut Registry,
+        entry: RegistryEntry,
+        signed: &SignedManifest,
+        expected_field: &str,
+    ) {
+        let result = reg.publish(entry, signed);
+        match result {
+            Err(RegistryError::EntryManifestMismatch { field, .. }) => {
+                assert_eq!(field, expected_field);
+            }
+            other => panic!("expected {expected_field} mismatch, got {other:?}"),
+        }
+        assert_eq!(reg.count(), 0);
+    }
+
+    #[test]
+    fn publish_rejects_name_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
+
+        let (mut entry, signed) = signed_entry(&kp, "real-cap", "1.0.0");
+        entry.name = "impostor-cap".into();
+        assert_mismatch(&mut reg, entry, &signed, "name");
+    }
+
+    #[test]
+    fn publish_rejects_version_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
+
+        let (mut entry, signed) = signed_entry(&kp, "cap", "1.0.0");
+        entry.version = "9.9.9".into();
+        assert_mismatch(&mut reg, entry, &signed, "version");
+    }
+
+    #[test]
+    fn publish_rejects_capabilities_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
+
+        // Claiming extra capabilities the manifest did not declare.
+        let (mut entry, signed) = signed_entry(&kp, "cap", "1.0.0");
+        entry
+            .declared_capabilities
+            .push("ganglion:process/spawn@1.0".into());
+        assert_mismatch(&mut reg, entry, &signed, "declared_capabilities");
+
+        // Claiming fewer (understating) is a mismatch too.
+        let (mut entry, signed) = signed_entry(&kp, "cap", "1.0.0");
+        entry.declared_capabilities.clear();
+        assert_mismatch(&mut reg, entry, &signed, "declared_capabilities");
+    }
+
+    #[test]
+    fn publish_accepts_capabilities_in_any_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
+
+        // Two declared capabilities, entry lists them in reverse order.
+        let component_bytes = "cap-1.0.0-component";
+        let manifest = ComponentManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION.into(),
+            name: "cap".into(),
+            version: "1.0.0".into(),
+            declared_capabilities: vec![
+                CapabilityGroup::DiagnosticsCollect {
+                    version: "1.0".into(),
+                },
+                CapabilityGroup::ArtifactsPublish {
+                    version: "1.0".into(),
+                },
+            ],
+            author_peer_id: kp.peer_id(),
+            component_hash: blake3::hash(component_bytes.as_bytes())
+                .to_hex()
+                .to_string(),
+            limits: ResourceLimits::default(),
+            language: CapabilityLanguage::Rust,
+            description: String::new(),
+            tags: vec![],
+            min_ganglion_version: None,
+        };
+        let signed = SignedManifest::sign(&manifest, &kp).unwrap();
+
+        let mut entry = sample_entry("cap", "1.0.0");
+        entry.author_peer_id = kp.peer_id().to_string();
+        entry.declared_capabilities = vec![
+            "ganglion:diagnostics/collect@1.0".into(),
+            "ganglion:artifacts/publish@1.0".into(),
+        ];
+        reg.publish(entry, &signed).unwrap();
+        assert_eq!(reg.count(), 1);
+    }
+
+    #[test]
+    fn publish_rejects_component_cid_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
+
+        let (mut entry, signed) = signed_entry(&kp, "cap", "1.0.0");
+        // CID of different bytes than the manifest's component hash.
+        entry.component_cid = Cid::from_bytes(b"some other component");
+        assert_mismatch(&mut reg, entry, &signed, "component_cid");
     }
 
     #[test]
