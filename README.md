@@ -17,8 +17,12 @@ Three layers:
 ## Quick start
 
 ```bash
-# Build from source (Rust 1.85+)
-cargo install --path crates/gang-cli
+# Install the CLI from crates.io (Rust 1.85+)
+cargo install gang
+
+# ...or build from source (see CONTRIBUTING.md):
+#   git clone https://github.com/TafyLabs/ganglion.git
+#   cd ganglion && cargo install --path crates/gang-cli
 
 # Run the self-contained demo — no Docker, no ROS 2, no external dependencies
 gang demo
@@ -70,12 +74,19 @@ ganglion/
 │   ├── DesignSpec.md                       # Original design specification
 │   ├── IMPLEMENTATION.md                   # Implementation plan and progress
 │   └── adr/                                # Architecture Decision Records (ADR-001 to ADR-020)
+├── deploy/
+│   └── relay/                              # Bootstrap circuit-relay v2 Docker deployment
+├── scripts/                               # Developer scripts (e.g. setup-hooks.sh)
 ├── .github/workflows/
 │   ├── ci.yml                              # CI: check, fmt, clippy, test, doc
 │   └── release.yml                         # Release: validate + GitHub Release on tags
 ├── .githooks/
 │   └── pre-commit                          # Pre-commit: fmt, clippy -Dwarnings, test
-└── CONTRIBUTING.md                         # Contribution guidelines
+├── CHANGELOG.md                            # Release history
+├── CLAUDE.md                               # Agent/contributor working notes
+├── CONTRIBUTING.md                         # Contribution guidelines
+├── LICENSE                                 # Apache-2.0
+└── NOTICE                                  # Apache-2.0 attribution notice
 ```
 
 ## CLI commands
@@ -83,15 +94,16 @@ ganglion/
 ```
 gang identity show                    Show your PeerId and public key
 gang identity generate [--force]      Generate a new Ed25519 keypair
-gang sign <wasm> [--key K] [--name N] Sign a WASM component, produce .manifest.cbor
+gang sign <wasm> [--capabilities C]   Sign a WASM component, produce .manifest.cbor
+                 [--key K] [--name N] [--component-version V]
 gang agent [--data-dir] [-r relay]    Run a robot agent (local or remote mode)
 gang deploy <robot> <wasm>            Deploy a signed capability to a robot
 gang run <robot> <cap> [args...]      Invoke an installed capability
 gang caps <robot>                     List capabilities installed on a robot
-gang logs <robot> [--follow]          Stream robot logs
+gang logs <robot> [--follow]          Stream robot logs [WIP]
 gang demo                             Self-contained end-to-end demo
 gang diagnose [robot]                 Detect network archetype, recommend transport config
-gang transport-stats <robot>          Show per-transport connection statistics
+gang transport-stats <robot>          Show per-transport connection statistics [WIP: simulated]
 gang test-archetype <archetype>       Launch a Docker network scenario
 gang fetch <cid> [-o path]            Retrieve an artifact by CID
 gang push <path> [--content-type T]   Publish a file to the content store
@@ -99,7 +111,7 @@ gang artifacts                        List locally-stored artifacts
 gang capability scaffold <name>       Generate a capability project skeleton
 gang registry search <query>          Search the capability registry
 gang registry install <name>          Install a capability from the registry
-gang registry publish <wasm>          Publish a capability to the registry
+gang registry publish <wasm>          Publish a capability (signed manifest required)
 gang registry list                    List all registry capabilities
 gang registry info <name>             Show capability details
 gang peer add <name> <peer-id>        Register a known peer
@@ -162,11 +174,13 @@ See [docs/NETWORK_ARCHETYPES.md](docs/NETWORK_ARCHETYPES.md) for a deep dive.
 - Ed25519 keypair identity with PeerId derivation (Blake3 hash of public key)
 - Noise protocol encrypted channels (libp2p)
 - Signed WASM component manifests with trust store verification
-- Default-deny policy engine with glob pattern matching
-- Append-only audit logging with size-based rotation
-- Symlink jail enforcement on filesystem access
-- Command allowlist on subprocess execution
-- Fuel metering and epoch-based wall-clock deadlines for WASM execution
+- Default-deny policy engine with glob pattern matching; policy and trust store fail closed (malformed files abort startup)
+- Tamper-evident audit logging: Blake3 hash chain with `verify_chain()` integrity check, `0600` permissions, size-based rotation
+- Replay protection (nonce + timestamp) on control requests
+- Canonicalized (TOCTOU-closed) symlink jail on filesystem access
+- Absolute-path command allowlist and environment scrubbing on subprocess execution
+- Network-probe SSRF guards (loopback / link-local / cloud-metadata blocked) with host allowlist
+- Fuel metering, manifest-derived memory limits, and epoch-based wall-clock deadlines for WASM execution (component bytes re-hashed before execution)
 
 See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 
@@ -174,9 +188,10 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 
 ```bash
 # Prerequisites: Rust 1.85+, cargo
+# System deps (Debian/Ubuntu): sudo apt-get install pkg-config libssl-dev
 cargo build --release
 
-# Run all tests (254 tests across 13 crates)
+# Run all tests (317 tests across 13 crates)
 cargo test
 
 # Run with warnings as errors (matches CI)
