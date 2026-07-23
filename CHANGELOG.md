@@ -67,7 +67,26 @@ has landed. See [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) for upgrade steps.
 - **Filesystem broker TOCTOU closure (SEC-10)** — operates on canonicalized
   paths, including canonicalizing the parent for writes to new files.
 - **SEC-15** — registry entries authenticated against signed manifests (see
-  breaking notes).
+  breaking notes). The registry additionally validates each entry
+  **field-by-field** against the signed manifest — name, version, capabilities,
+  and component CID must all match; `gang registry publish` rejects a
+  `--version` override that contradicts the manifest.
+- **Network-probe DNS-rebinding resistance** — probes resolve the target once,
+  vet the canonicalized addresses, and then connect only to those vetted
+  addresses (the hostname is never re-resolved for the connection). Blocked
+  ranges now also include IPv4-mapped-IPv6 addresses and IPv6 link-local
+  (`fe80::/10`).
+- **Filesystem broker final-component symlink rejection** — writes to new files
+  reject a symlink (including a dangling symlink) at the final path component,
+  closing the remaining symlink-planting window on the new-file write path.
+- **Replay guard capacity bound** — the control-plane replay guard has a hard
+  capacity of 100,000 tracked nonces and fails closed (rejects requests) when
+  full, bounding memory while never degrading to accepting replays.
+- **Audit chain rotation linkage** — on size-based rotation, the new audit log
+  file carries the rotated file's tip hash, so the hash chain spans rotations.
+  The audit documentation now states the honest trust bounds: without an
+  external anchor, a full rewrite of the log is undetectable, and trailing
+  truncation is undetectable.
 
 ### Changed
 
@@ -84,8 +103,31 @@ has landed. See [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) for upgrade steps.
 - `gang logs`, `gang list`, `gang connect` are marked `[WIP]` and now exit
   non-zero; `gang transport-stats` output is explicitly labeled simulated.
 - `RUST_LOG` is now honored; added a `-q`/`--quiet` global flag.
-- `gang relay` gains `--data-dir` for the persisted identity key.
+- `gang relay` gains `--data-dir` for the persisted identity key; the key path
+  is plumbed directly to the relay (no environment variable is set or read at
+  relay runtime).
 - `gang demo` keeps its data under `/tmp/gang-demo` and prints a cleanup hint.
+- `gang agent -r <relay>` no longer hangs or exits when the relay is
+  unreachable: it warns, keeps serving, and retries the relay dial every 5
+  seconds.
+- `gang peer add` rejects a malformed peer id with a clean error instead of
+  panicking.
+- CLI polish: `gang --help` prints a long description and an after-help pointer
+  to `gang demo`; subcommand aliases `id` (identity), `cap` (capability), and
+  `dx` (diagnose); `gang status` shows the registry
+  (`~/.local/share/gang/registry`) and artifact-store data directories.
+- `gang test-archetype` polls container state until services are up instead of
+  sleeping for a fixed interval.
+- The WASM runtime caches compiled components (bounded at 64 entries; evicted
+  components are recompiled on next use), and the transport's event fan-out
+  prunes closed subscribers with in-flight outbound requests capped at 1024.
+- **MSRV raised to Rust 1.88** — declared as the workspace `rust-version`,
+  checked by a dedicated CI job, and used by both Dockerfiles
+  (`rust:1.88-slim-bookworm`).
+- **CI expanded** — jobs now cover fmt, clippy, test (Ubuntu + macOS), rustdoc
+  (`-Dwarnings`), MSRV (1.88), dependency audit (`cargo-deny`), and the Docker
+  test harness on pushes to `main` (blocking: open-warehouse + e2e-dispatch
+  smoke; non-blocking: nat-office, enterprise-dmz, mobile-cgnat).
 
 ### Fixed / clarified WIP
 
