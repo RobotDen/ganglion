@@ -84,9 +84,9 @@ The relay is lightweight. Expected resource consumption on a small VPS:
 The relay uses libp2p's default circuit relay v2 limits:
 
 - Max 128 concurrent relay reservations
-- Max 64 KB/s per relayed connection
 - Reservation duration: 1 hour
 - Max data transfer per relay circuit: 128 KiB
+- Max circuit duration: 2 minutes
 
 These defaults are sufficient for the relay's role as a rendezvous point.
 Most connections upgrade to direct via DCUtR within seconds.
