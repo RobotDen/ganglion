@@ -52,7 +52,14 @@ impl Keypair {
     }
 
     /// Load a keypair from a file (raw 32-byte secret key).
+    ///
+    /// If the file permissions are looser than `0600` the mode is repaired
+    /// (tightened to owner read/write only) before the key is used. A warning
+    /// is logged when a repair is performed.
     pub fn load(path: &Path) -> Result<Self, std::io::Error> {
+        #[cfg(unix)]
+        Self::repair_permissions(path)?;
+
         let bytes = std::fs::read(path)?;
         if bytes.len() != 32 {
             return Err(std::io::Error::new(
@@ -67,12 +74,79 @@ impl Keypair {
         })
     }
 
+    /// If the secret key file is readable/writable by group or others, tighten
+    /// its mode to `0600`. Best-effort: logs a warning if the mode cannot be
+    /// adjusted rather than failing the load.
+    #[cfg(unix)]
+    fn repair_permissions(path: &Path) -> Result<(), std::io::Error> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = std::fs::metadata(path)?;
+        let mode = metadata.permissions().mode();
+        // Only the lower permission bits matter here.
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                path = %path.display(),
+                mode = format!("{:o}", mode & 0o7777),
+                "identity key file has loose permissions; repairing to 0600"
+            );
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o600);
+            if let Err(e) = std::fs::set_permissions(path, perms) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to repair identity key file permissions"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Save the keypair to a file (raw 32-byte secret key).
+    ///
+    /// On Unix the secret key file is created with mode `0600` and its parent
+    /// directory (if created here) with mode `0700`, so the key material is
+    /// only accessible to the owning user.
     pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                // Tighten the directory to 0700 (best-effort; only if it exists).
+                if let Ok(meta) = std::fs::metadata(parent) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(0o700);
+                    let _ = std::fs::set_permissions(parent, perms);
+                }
+            }
         }
-        std::fs::write(path, self.signing_key.to_bytes())
+
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            // If the file pre-existed with looser perms, enforce 0600.
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = file.metadata()?.permissions();
+                perms.set_mode(0o600);
+                let _ = file.set_permissions(perms);
+            }
+            file.write_all(&self.signing_key.to_bytes())
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path, self.signing_key.to_bytes())
+        }
     }
 
     /// Load or generate a keypair at the given path.
@@ -254,6 +328,43 @@ mod tests {
         // Second call loads the same key
         let kp2 = Keypair::load_or_generate(&path).unwrap();
         assert_eq!(kp1.peer_id(), kp2.peer_id());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_key_file_mode_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("identity.key");
+
+        let kp = Keypair::generate();
+        kp.save(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "expected 0600, got {:o}", mode & 0o777);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_repairs_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("identity.key");
+
+        let kp = Keypair::generate();
+        kp.save(&path).unwrap();
+
+        // Loosen permissions to world-readable/writable.
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o666);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        // Load should repair the mode.
+        let _ = Keypair::load(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "expected group/other bits cleared, got {:o}", mode & 0o777);
     }
 
     #[test]
