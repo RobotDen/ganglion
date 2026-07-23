@@ -1970,7 +1970,7 @@ fn format_bytes(bytes: u64) -> String {
 pub async fn fetch_artifact(
     cid_str: &str,
     output: Option<&str>,
-    _format: &crate::OutputFormat,
+    format: &crate::OutputFormat,
 ) -> anyhow::Result<()> {
     use gang_core::artifacts::{ArtifactStore, ArtifactStoreConfig, Cid};
 
@@ -1991,17 +1991,28 @@ pub async fn fetch_artifact(
     let data = store.retrieve(&cid)?;
     let meta = store.meta(&cid);
 
-    match output {
-        Some(path) => {
-            std::fs::write(path, &data)?;
-            println!("Wrote {} bytes to {path}", data.len());
+    let dest = match output {
+        Some(path) => path.to_string(),
+        None => meta
+            .and_then(|m| m.filename.as_deref())
+            .unwrap_or("artifact.bin")
+            .to_string(),
+    };
+    std::fs::write(&dest, &data).with_context(|| format!("writing {dest}"))?;
+
+    match format {
+        crate::OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "cid": cid.as_str(),
+                    "path": dest,
+                    "bytes": data.len(),
+                }))?
+            );
         }
-        None => {
-            let filename = meta
-                .and_then(|m| m.filename.as_deref())
-                .unwrap_or("artifact.bin");
-            std::fs::write(filename, &data)?;
-            println!("Wrote {} bytes to {filename}", data.len());
+        crate::OutputFormat::Text => {
+            println!("Wrote {} bytes to {dest}", data.len());
         }
     }
 
@@ -2411,9 +2422,27 @@ fn registry_dir() -> PathBuf {
 }
 
 /// `gang registry search <query>`
-pub async fn registry_search(query: &str, _format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn registry_search(query: &str, format: &OutputFormat) -> anyhow::Result<()> {
     let reg = gang_core::registry::Registry::open(&registry_dir())?;
     let results = reg.search(query);
+
+    if let OutputFormat::Json = format {
+        let entries: Vec<_> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "version": r.latest_version,
+                    "description": r.description,
+                    "language": r.language.to_string(),
+                    "author": r.author,
+                    "tags": r.tags,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
 
     if results.is_empty() {
         println!("No capabilities found matching \"{query}\".");
@@ -2523,31 +2552,67 @@ pub async fn registry_publish(
 
     let entry = gang_core::registry::RegistryEntry {
         name: name.clone(),
-        version: "0.1.0".into(),
-        description: description.unwrap_or("A Ganglion capability").into(),
+        version: version.clone(),
+        description,
         author_peer_id: author,
-        language: gang_core::registry::CapabilityLanguage::Rust,
+        language,
         component_cid: component_cid.clone(),
         manifest_cid,
-        declared_capabilities: vec![],
+        declared_capabilities,
         published_at: chrono::Utc::now().to_rfc3339(),
         tags: tags.map(|t| t.to_vec()).unwrap_or_default(),
-        min_ganglion_version: Some("0.4.0".into()),
+        min_ganglion_version,
     };
 
     let mut reg = gang_core::registry::Registry::open(&registry_dir())?;
     reg.publish(entry)?;
 
-    println!("Published {} to local registry.", name);
+    println!("Published {name} v{version} to local registry.");
+    if manifest.is_none() {
+        println!(
+            "  (no signed manifest found next to the component — used filename/defaults; \
+             sign it first for accurate metadata)"
+        );
+    }
     println!("  Component CID: {}", component_cid);
     println!("  Registry path: {}", registry_dir().display());
     Ok(())
 }
 
+/// Parse a language string into a `CapabilityLanguage`.
+fn parse_language(lang: &str) -> anyhow::Result<gang_core::registry::CapabilityLanguage> {
+    use gang_core::registry::CapabilityLanguage;
+    match lang.to_lowercase().as_str() {
+        "rust" | "rs" => Ok(CapabilityLanguage::Rust),
+        "cpp" | "c++" => Ok(CapabilityLanguage::Cpp),
+        "python" | "py" => Ok(CapabilityLanguage::Python),
+        "go" | "golang" => Ok(CapabilityLanguage::Go),
+        other => anyhow::bail!("unknown language '{other}'. Valid: rust, cpp, python, go"),
+    }
+}
+
 /// `gang registry list`
-pub async fn registry_list(_format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn registry_list(format: &OutputFormat) -> anyhow::Result<()> {
     let reg = gang_core::registry::Registry::open(&registry_dir())?;
     let list = reg.list();
+
+    if let OutputFormat::Json = format {
+        let entries: Vec<_> = list
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "version": r.latest_version,
+                    "description": r.description,
+                    "language": r.language.to_string(),
+                    "author": r.author,
+                    "tags": r.tags,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
 
     if list.is_empty() {
         println!("No capabilities in local registry.");

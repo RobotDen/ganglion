@@ -32,6 +32,17 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Reject `--format json` on subcommands that only produce human-readable
+/// output, rather than silently emitting text when JSON was requested.
+fn reject_json(format: &OutputFormat, command: &str) -> anyhow::Result<()> {
+    if matches!(format, OutputFormat::Json) {
+        anyhow::bail!(
+            "`gang {command}` does not support `--format json`; omit it for text output."
+        );
+    }
+    Ok(())
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Manage peer identity.
