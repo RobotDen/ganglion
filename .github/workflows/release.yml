@@ -5,7 +5,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,11 +15,33 @@ jobs:
     name: Validate Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Assert tag matches workspace version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          workspace_versions=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '[.packages[].version] | unique | .[]')
+          if [ "$(echo "$workspace_versions" | wc -l)" -ne 1 ]; then
+            echo "Workspace crates disagree on version:" >&2
+            echo "$workspace_versions" >&2
+            exit 1
+          fi
+          if [ "$workspace_versions" != "$tag_version" ]; then
+            echo "Tag version ($tag_version) does not match workspace version ($workspace_versions)" >&2
+            exit 1
+          fi
+      - name: Assert CHANGELOG has a non-empty section for this version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          section=$(sed -n "/^## \[${version}\]/,/^## \[/{ /^## \[/d; p; }" CHANGELOG.md)
+          if [ -z "$(printf '%s' "$section" | tr -d '[:space:]')" ]; then
+            echo "CHANGELOG.md section for ${version} is missing or empty" >&2
+            exit 1
+          fi
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
       - run: cargo test
@@ -31,8 +53,10 @@ jobs:
     name: Create Release
     needs: validate
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - name: Extract version from tag
@@ -47,9 +71,111 @@ jobs:
           echo "$section" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: Ganglion v${{ steps.version.outputs.version }}
           body: ${{ steps.changelog.outputs.body }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Publish workspace crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          # gang-core first (no internal deps), then the layers that depend on
+          # it, then the capability crates, then the CLI (package name: gang).
+          crates=(
+            gang-core
+            gang-wasm-host
+            gang-libp2p
+            gang-ros
+            gang-capability-canary-probe
+            gang-capability-diagnostic-bundle
+            gang-capability-diagnostics
+            gang-capability-log-normalize
+            gang-capability-network-archetype
+            gang-capability-param-inspect
+            gang-capability-rosbag-slice
+            gang-capability-topic-echo
+            gang
+          )
+          for crate in "${crates[@]}"; do
+            echo "=== Publishing ${crate} ==="
+            cargo publish -p "${crate}" --locked
+            if [ "${crate}" != "gang" ]; then
+              # Give the crates.io index time to pick up the new version
+              # before publishing dependents.
+              sleep 30
+            fi
+          done
+
+  binaries:
+    name: Binary (${{ matrix.target }})
+    needs: [validate, release]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.target }}
+      - name: Build gang binary
+        run: cargo build --release --locked -p gang --target ${{ matrix.target }}
+      - name: Package tarball
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bindir="target/${{ matrix.target }}/release"
+          strip "${bindir}/gang"
+          mkdir -p dist
+          tar -C "${bindir}" -czf "dist/gang-v${version}-${{ matrix.target }}.tar.gz" gang
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gang-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  upload-assets:
+    name: Upload Release Assets
+    needs: [release, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: gang-*
+          merge-multiple: true
+          path: dist
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum gang-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            dist/gang-*.tar.gz
+            dist/SHA256SUMS
