@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::{Duration, Instant};
 
 use futures::Stream;
 use libp2p::request_response::{self, OutboundRequestId, ResponseChannel};
@@ -19,6 +20,17 @@ use gang_core::transport::{
 
 use crate::config::Libp2pConfig;
 use crate::swarm::{self, GanglionBehaviour};
+
+/// How long a caller waits for an RPC or dial reply before timing out.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound on the number of concurrently pending outbound requests. New
+/// requests beyond this are rejected rather than allowed to grow the map
+/// without limit.
+const MAX_PENDING_REQUESTS: usize = 1024;
+/// How often the worker sweeps out pending requests that have passed their
+/// deadline, guaranteeing their entries are removed even if no response or
+/// failure event ever arrives.
+const PENDING_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Commands sent to the single task that owns the [`Swarm`].
 ///
@@ -60,6 +72,9 @@ struct PendingRequest {
     peer_id: PeerId,
     protocol: ProtocolId,
     reply: oneshot::Sender<Result<Vec<u8>, TransportError>>,
+    /// After this instant the request is considered timed out and its entry
+    /// is swept from the pending map.
+    deadline: Instant,
 }
 
 /// Fan-out of transport events to every live subscriber.
@@ -307,10 +322,7 @@ impl Libp2pTransportAdapter {
             .await
             .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))?;
 
-        reply_rx.await.map_err(|_| TransportError::DialFailed {
-            peer: peer.to_string(),
-            reason: "response channel closed".into(),
-        })?
+        await_reply(peer, reply_rx).await
     }
 
     /// Look up the libp2p peer id for a connected gang peer.
@@ -353,8 +365,14 @@ impl SwarmWorker {
         use futures::StreamExt;
         use libp2p::swarm::SwarmEvent;
 
+        let mut sweep = tokio::time::interval(PENDING_SWEEP_INTERVAL);
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
+                _ = sweep.tick() => {
+                    self.sweep_pending_requests();
+                }
                 command = self.command_rx.recv() => {
                     match command {
                         Some(SwarmCommand::Shutdown) | None => {
@@ -398,6 +416,27 @@ impl SwarmWorker {
         Ok(())
     }
 
+    /// Remove pending requests whose deadline has passed, replying with a
+    /// timeout error. This guarantees the pending map is cleaned up even when
+    /// no response or failure event ever arrives for a request.
+    fn sweep_pending_requests(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<OutboundRequestId> = self
+            .pending_requests
+            .iter()
+            .filter(|(_, req)| req.deadline <= now)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            if let Some(req) = self.pending_requests.remove(&id) {
+                warn!(peer = %req.peer_id, protocol = %req.protocol, "RPC request timed out");
+                let _ = req
+                    .reply
+                    .send(Err(TransportError::Timeout(REQUEST_TIMEOUT)));
+            }
+        }
+    }
+
     async fn handle_command(&mut self, command: SwarmCommand) {
         match command {
             SwarmCommand::Dial { addr, reply } => {
@@ -421,6 +460,17 @@ impl SwarmWorker {
                 request,
                 reply,
             } => {
+                // Bound the pending map: reject rather than grow without limit.
+                if self.pending_requests.len() >= MAX_PENDING_REQUESTS {
+                    let _ = reply.send(Err(TransportError::DialFailed {
+                        peer: peer.to_string(),
+                        reason: format!(
+                            "too many in-flight requests ({MAX_PENDING_REQUESTS}), try again later"
+                        ),
+                    }));
+                    return;
+                }
+
                 let request_id = self
                     .swarm
                     .behaviour_mut()
@@ -432,6 +482,7 @@ impl SwarmWorker {
                         peer_id: peer.clone(),
                         protocol,
                         reply,
+                        deadline: Instant::now() + REQUEST_TIMEOUT,
                     },
                 );
                 let mut peers = self.connected_peers.write().await;
@@ -683,6 +734,24 @@ impl SwarmWorker {
     }
 }
 
+/// Await a reply from the swarm task, bounded by [`REQUEST_TIMEOUT`].
+///
+/// On timeout the caller returns promptly; the worker's periodic sweep is
+/// responsible for removing the corresponding pending-request entry.
+async fn await_reply(
+    peer: &PeerId,
+    reply_rx: oneshot::Receiver<Result<Vec<u8>, TransportError>>,
+) -> Result<Vec<u8>, TransportError> {
+    match tokio::time::timeout(REQUEST_TIMEOUT, reply_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(TransportError::DialFailed {
+            peer: peer.to_string(),
+            reason: "response channel closed".into(),
+        }),
+        Err(_) => Err(TransportError::Timeout(REQUEST_TIMEOUT)),
+    }
+}
+
 /// Run a registered stream handler against an inbound request payload,
 /// returning a receiver that resolves to the handler's response bytes.
 fn serve_request(
@@ -744,10 +813,7 @@ impl TransportAdapter for Libp2pTransportAdapter {
             .await
             .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))?;
 
-        let response = reply_rx.await.map_err(|_| TransportError::DialFailed {
-            peer: peer.to_string(),
-            reason: "response channel closed".into(),
-        })??;
+        let response = await_reply(peer, reply_rx).await?;
 
         // Build a GanglionStream from the response data.
         let (read_half, mut write_half) = tokio::io::duplex(64 * 1024);
@@ -1016,6 +1082,20 @@ mod tests {
         assert_eq!(caps.transports.len(), 2);
         assert!(caps.transports.contains(&"tcp".to_string()));
         assert!(caps.transports.contains(&"quic".to_string()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_await_reply_times_out() {
+        // Keep the sender alive so the channel is not closed; the reply never
+        // arrives, so await_reply must resolve with a Timeout error once the
+        // (virtual) clock passes REQUEST_TIMEOUT.
+        let (_tx, rx) = oneshot::channel::<Result<Vec<u8>, TransportError>>();
+        let peer = PeerId::new("12D3-timeout");
+        let result = await_reply(&peer, rx).await;
+        assert!(
+            matches!(result, Err(TransportError::Timeout(_))),
+            "expected timeout, got {result:?}"
+        );
     }
 
     #[tokio::test]
