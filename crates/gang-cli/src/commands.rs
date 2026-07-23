@@ -2705,8 +2705,42 @@ pub async fn registry_list(format: &OutputFormat) -> anyhow::Result<()> {
 }
 
 /// `gang registry info <name>`
-pub async fn registry_info(name: &str, _format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn registry_info(name: &str, format: &OutputFormat) -> anyhow::Result<()> {
     let reg = gang_core::registry::Registry::open(&registry_dir())?;
+
+    if let OutputFormat::Json = format {
+        let versions = reg.get(name);
+        let entries: Vec<_> = versions
+            .map(|vs| {
+                vs.iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "name": e.name,
+                            "version": e.version,
+                            "description": e.description,
+                            "author": e.author_peer_id,
+                            "language": e.language.to_string(),
+                            "published_at": e.published_at,
+                            "component_cid": e.component_cid.as_str(),
+                            "manifest_cid": e.manifest_cid.as_str(),
+                            "declared_capabilities": e.declared_capabilities,
+                            "tags": e.tags,
+                            "min_ganglion_version": e.min_ganglion_version,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": name,
+                "found": !entries.is_empty(),
+                "versions": entries,
+            }))?
+        );
+        return Ok(());
+    }
 
     match reg.get(name) {
         Some(versions) => {
