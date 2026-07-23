@@ -50,15 +50,18 @@ correcting earlier over-counted figures:
 
 The GitHub Actions CI workflow runs on every push and pull request to `main`:
 
-| Job | What it checks | Matrix |
-|-----|---------------|--------|
-| Check | `cargo check --all-targets` | ubuntu-latest |
-| Format | `cargo fmt --check` | ubuntu-latest |
-| Clippy | `cargo clippy --all-targets` with `RUSTFLAGS="-Dwarnings"` | ubuntu-latest |
-| Test | `cargo test` | ubuntu-latest, macos-latest |
-| Documentation | `cargo doc --no-deps` with `RUSTDOCFLAGS="-Dwarnings"` | ubuntu-latest |
+| Job | What it checks | Where it runs |
+|-----|---------------|---------------|
+| `fmt` | `cargo fmt --check` | ubuntu-latest |
+| `clippy` | `cargo clippy --all-targets` with `RUSTFLAGS="-Dwarnings"` | ubuntu-latest |
+| `test` | `cargo test` | ubuntu-latest, macos-latest |
+| `doc` | `cargo doc --no-deps` with `RUSTDOCFLAGS="-Dwarnings"` | ubuntu-latest |
+| `msrv` | Build on the minimum supported Rust version (1.88) | ubuntu-latest |
+| `deny` | `cargo-deny` (licenses, advisories, bans, sources) | ubuntu-latest |
+| `harness` | Docker test harness — open-warehouse scenario + e2e-dispatch smoke test. **Blocking**; runs on pushes to `main` | ubuntu-latest |
+| `harness-nat` | Docker test harness — nat-office, enterprise-dmz, mobile-cgnat. **Non-blocking** (`continue-on-error`); runs on pushes to `main` | ubuntu-latest |
 
-All jobs must pass before merging.
+All blocking jobs must pass before merging.
 
 ## Pre-commit hooks
 
