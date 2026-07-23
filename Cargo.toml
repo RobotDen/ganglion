@@ -60,7 +60,7 @@ ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
 # Pinned to 0.8: ed25519-dalek 2 depends on rand_core 0.6, which rand 0.8
 # provides. Do NOT bump to 0.9 (rand_core 0.9) without upgrading ed25519-dalek
 # in lockstep — the RNG traits are incompatible across that boundary.
-rand = "0.8"
+rand = "0.10"
 blake3 = "1"
 
 # Logging
