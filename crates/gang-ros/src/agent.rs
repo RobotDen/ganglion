@@ -414,20 +414,20 @@ impl RobotAgent {
                         capability_group: "ganglion:diagnostics/collect".into(),
                         operation: gang_core::broker::BrokerOperation::ProcessList,
                     };
-                    if let Ok(resp) = self.diagnostics_broker.handle_request(proc_req).await {
-                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.data) {
-                            results.insert("processes".into(), val);
-                        }
+                    if let Ok(resp) = self.diagnostics_broker.handle_request(proc_req).await
+                        && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.data)
+                    {
+                        results.insert("processes".into(), val);
                     }
 
                     let net_req = gang_core::broker::CapabilityRequest {
                         capability_group: "ganglion:diagnostics/collect".into(),
                         operation: gang_core::broker::BrokerOperation::NetworkState,
                     };
-                    if let Ok(resp) = self.diagnostics_broker.handle_request(net_req).await {
-                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.data) {
-                            results.insert("network".into(), val);
-                        }
+                    if let Ok(resp) = self.diagnostics_broker.handle_request(net_req).await
+                        && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.data)
+                    {
+                        results.insert("network".into(), val);
                     }
                 }
                 CapabilityGroup::LogStream { .. } => {
@@ -435,10 +435,10 @@ impl RobotAgent {
                         capability_group: "ganglion:logs/stream".into(),
                         operation: gang_core::broker::BrokerOperation::LogSourceList,
                     };
-                    if let Ok(resp) = self.log_broker.handle_request(req).await {
-                        if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.data) {
-                            results.insert("log_sources".into(), val);
-                        }
+                    if let Ok(resp) = self.log_broker.handle_request(req).await
+                        && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&resp.data)
+                    {
+                        results.insert("log_sources".into(), val);
                     }
                 }
                 CapabilityGroup::RosInterface { .. } => {
