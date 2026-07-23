@@ -27,7 +27,13 @@ impl FsBroker {
     }
 
     /// Check if a path is permitted under the current rules.
-    fn check_access(&self, path: &str, needs_write: bool) -> Result<(), BrokerError> {
+    ///
+    /// Returns the fully-canonicalized path on success. Callers MUST perform
+    /// the actual filesystem operation on the returned path, never on the
+    /// caller-supplied string: canonicalization resolves every symlink, so
+    /// operating on the returned path cannot re-traverse a symlink that an
+    /// attacker swaps in after this check (defeating the TOCTOU race).
+    fn check_access(&self, path: &str, needs_write: bool) -> Result<String, BrokerError> {
         // Resolve to canonical path to prevent symlink jailbreak
         let canonical = if Path::new(path).exists() {
             std::fs::canonicalize(path)
@@ -75,7 +81,7 @@ impl FsBroker {
                         reason: "read not permitted for this pattern".into(),
                     });
                 }
-                return Ok(());
+                return Ok(canonical);
             }
         }
 
@@ -95,9 +101,9 @@ impl CapabilityBroker for FsBroker {
     ) -> Result<CapabilityResponse, BrokerError> {
         match req.operation {
             BrokerOperation::FsRead { ref path } => {
-                self.check_access(path, false)?;
+                let canonical = self.check_access(path, false)?;
 
-                match std::fs::read(path) {
+                match std::fs::read(&canonical) {
                     Ok(data) => {
                         let bytes_out = data.len() as u64;
                         Ok(CapabilityResponse {
@@ -115,10 +121,10 @@ impl CapabilityBroker for FsBroker {
                 }
             }
             BrokerOperation::FsWrite { ref path, ref data } => {
-                self.check_access(path, true)?;
+                let canonical = self.check_access(path, true)?;
 
                 let bytes_in = data.len() as u64;
-                std::fs::write(path, data).map_err(|e| BrokerError::Unavailable {
+                std::fs::write(&canonical, data).map_err(|e| BrokerError::Unavailable {
                     broker: "fs".into(),
                     reason: e.to_string(),
                 })?;
@@ -132,9 +138,9 @@ impl CapabilityBroker for FsBroker {
                 })
             }
             BrokerOperation::FsList { ref path } => {
-                self.check_access(path, false)?;
+                let canonical = self.check_access(path, false)?;
 
-                let entries: Vec<String> = std::fs::read_dir(path)
+                let entries: Vec<String> = std::fs::read_dir(&canonical)
                     .map_err(|e| BrokerError::Unavailable {
                         broker: "fs".into(),
                         reason: e.to_string(),
@@ -158,11 +164,13 @@ impl CapabilityBroker for FsBroker {
                 })
             }
             BrokerOperation::FsStat { ref path } => {
-                self.check_access(path, false)?;
+                let canonical = self.check_access(path, false)?;
 
-                let metadata = std::fs::metadata(path).map_err(|e| BrokerError::Unavailable {
-                    broker: "fs".into(),
-                    reason: e.to_string(),
+                let metadata = std::fs::symlink_metadata(&canonical).map_err(|e| {
+                    BrokerError::Unavailable {
+                        broker: "fs".into(),
+                        reason: e.to_string(),
+                    }
                 })?;
 
                 let stat = FileStat {
@@ -422,6 +430,53 @@ mod tests {
             result.is_ok(),
             "write to new file in allowed dir must succeed"
         );
+    }
+
+    #[tokio::test]
+    async fn read_operates_on_canonical_path_not_symlink() {
+        // TOCTOU (SEC-10): check_access canonicalizes a symlink to its target
+        // inside the jail. Even if the symlink is swapped afterwards to point
+        // outside the jail, the read must operate on the already-resolved
+        // canonical target, not re-traverse the swapped symlink.
+        let dir = TempDir::new().unwrap();
+        let canonical_dir = canon(dir.path());
+        let jail = PathBuf::from(&canonical_dir);
+
+        // Real, allowed file the symlink initially resolves to.
+        let real = jail.join("real.txt");
+        std::fs::write(&real, b"legitimate").unwrap();
+
+        // Secret file outside the jail we must never read.
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, b"SECRET").unwrap();
+
+        // Symlink inside the jail pointing at the allowed real file.
+        let link = jail.join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let broker = test_broker(dir.path());
+
+        // check_access resolves the symlink to its in-jail target.
+        let canonical = broker
+            .check_access(&link.to_string_lossy(), false)
+            .expect("symlink to in-jail target must be allowed");
+        assert_eq!(canonical, canon(&real));
+
+        // Attacker swaps the symlink to point outside the jail.
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        // A read via the broker uses the canonical (resolved) path, so it
+        // still returns the legitimate content, never the secret.
+        let req = CapabilityRequest {
+            capability_group: "ganglion:fs/bounded".into(),
+            operation: BrokerOperation::FsRead {
+                path: canonical.clone(),
+            },
+        };
+        let resp = broker.handle_request(req).await.unwrap();
+        assert_eq!(resp.data, b"legitimate");
     }
 
     #[tokio::test]

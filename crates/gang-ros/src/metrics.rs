@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -16,8 +17,10 @@ use gang_core::error::BrokerError;
 /// these would be forwarded to a time-series database or streamed to the
 /// operator via the bulk protocol.
 pub struct MetricsBroker {
-    /// Accumulated metrics, protected by a mutex for concurrent capability access.
-    store: Arc<Mutex<Vec<StoredMetric>>>,
+    /// Accumulated metrics, protected by a mutex for concurrent capability
+    /// access. A `VecDeque` gives O(1) eviction of the oldest entry instead of
+    /// the O(n) element shift a `Vec` incurs on `drain(..n)` (CODE-24).
+    store: Arc<Mutex<VecDeque<StoredMetric>>>,
     /// Maximum metrics to retain (ring buffer semantics).
     max_retained: usize,
 }
@@ -35,20 +38,29 @@ pub struct StoredMetric {
 impl MetricsBroker {
     pub fn new(max_retained: usize) -> Self {
         Self {
-            store: Arc::new(Mutex::new(Vec::new())),
+            store: Arc::new(Mutex::new(VecDeque::new())),
             max_retained,
         }
     }
 
+    /// Lock the store, recovering the guard if the mutex was poisoned by a
+    /// panic in another thread rather than propagating the panic (CODE-24).
+    /// The stored metrics are plain data, so a poisoned lock is safe to reuse.
+    fn lock_store(&self) -> MutexGuard<'_, VecDeque<StoredMetric>> {
+        self.store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Retrieve all stored metrics (for operator consumption).
     pub fn drain(&self) -> Vec<StoredMetric> {
-        let mut store = self.store.lock().unwrap();
-        std::mem::take(&mut *store)
+        let mut store = self.lock_store();
+        Vec::from(std::mem::take(&mut *store))
     }
 
     /// Current number of stored metrics.
     pub fn count(&self) -> usize {
-        self.store.lock().unwrap().len()
+        self.lock_store().len()
     }
 
     fn store_metric(&self, point: MetricPoint) {
@@ -70,13 +82,12 @@ impl MetricsBroker {
             capability_source: None,
         };
 
-        let mut store = self.store.lock().unwrap();
-        store.push(stored);
+        let mut store = self.lock_store();
+        store.push_back(stored);
 
-        // Ring buffer: drop oldest when full
-        if store.len() > self.max_retained {
-            let excess = store.len() - self.max_retained;
-            store.drain(..excess);
+        // Ring buffer: drop oldest entries when full — O(1) each via pop_front.
+        while store.len() > self.max_retained {
+            store.pop_front();
         }
     }
 }
@@ -233,6 +244,30 @@ mod tests {
         assert_eq!(broker.count(), 1);
         let _ = broker.drain();
         assert_eq!(broker.count(), 0);
+    }
+
+    #[test]
+    fn lock_recovers_from_poison() {
+        // CODE-24: a panic in another thread while holding the lock must not
+        // make every later access panic on a poisoned mutex.
+        let broker = MetricsBroker::new(10);
+        let store = broker.store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = store.lock().unwrap();
+            panic!("poison the mutex");
+        })
+        .join();
+
+        // These would panic if we used lock().unwrap().
+        assert_eq!(broker.count(), 0);
+        broker.store_metric(MetricPoint {
+            name: "x".into(),
+            value: 1.0,
+            unit: None,
+            tags: vec![],
+            timestamp_ms: 0,
+        });
+        assert_eq!(broker.count(), 1);
     }
 
     #[tokio::test]

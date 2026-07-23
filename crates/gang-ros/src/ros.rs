@@ -1,8 +1,9 @@
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tracing::warn;
 
 use gang_core::broker::{BrokerOperation, CapabilityBroker, CapabilityRequest, CapabilityResponse};
@@ -42,7 +43,19 @@ pub struct RosAccessRule {
 
 impl RosInterfaceBroker {
     pub fn new(allowed_patterns: Vec<RosAccessRule>) -> Self {
-        let ros2_available = check_ros2_available();
+        // The availability probe is async (tokio). Run it once, at
+        // construction, on a throwaway thread with its own current-thread
+        // runtime so this stays a synchronous constructor and never blocks
+        // (or panics inside) a caller's async executor.
+        let ros2_available = std::thread::spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map(|rt| rt.block_on(check_ros2_available()))
+                .unwrap_or(false)
+        })
+        .join()
+        .unwrap_or(false);
 
         Self {
             allowed_patterns,
@@ -108,9 +121,9 @@ impl CapabilityBroker for RosInterfaceBroker {
                 // filter each list to only resources matching the broker's
                 // allowed patterns so unprivileged components cannot
                 // enumerate the full ROS 2 graph.
-                let topics = self.filter_by_allowed_patterns(ros2_topic_list());
-                let services = self.filter_by_allowed_patterns(ros2_service_list());
-                let nodes = self.filter_by_allowed_patterns(ros2_node_list());
+                let topics = self.filter_by_allowed_patterns(ros2_topic_list().await);
+                let services = self.filter_by_allowed_patterns(ros2_service_list().await);
+                let nodes = self.filter_by_allowed_patterns(ros2_node_list().await);
 
                 let listing = RosListing {
                     topics,
@@ -143,7 +156,7 @@ impl CapabilityBroker for RosInterfaceBroker {
 
                 // In full implementation: subscribe via rosbridge WebSocket or
                 // rclrs and stream messages back. For now, return current topic info.
-                let info = ros2_topic_info(topic);
+                let info = ros2_topic_info(topic).await;
                 let data = serde_json::to_vec(&info).map_err(|e| BrokerError::Unavailable {
                     broker: "ros".into(),
                     reason: e.to_string(),
@@ -170,32 +183,14 @@ impl CapabilityBroker for RosInterfaceBroker {
                     });
                 }
 
-                // TODO: When WebSocket transport to rosbridge is wired up,
-                // send a `call_service` rosbridge op with a per-call timeout.
-                // Rosbridge protocol expects:
-                //   { "op": "call_service", "service": "<name>",
-                //     "args": <json>, "id": "<uuid>" }
-                // The response arrives asynchronously on the same socket.
-                // For now, format the request and return a placeholder response
-                // indicating the call was accepted by the broker.
-                let bytes_in = request.len() as u64;
-                let response = serde_json::json!({
-                    "op": "call_service",
-                    "service": service,
-                    "status": "accepted",
-                    "note": "rosbridge transport pending — request formatted but not dispatched",
-                });
-                let data = serde_json::to_vec(&response).map_err(|e| BrokerError::Unavailable {
+                // CODE-12: rosbridge WebSocket transport is not yet wired up,
+                // so this operation cannot actually be dispatched. Report it
+                // honestly as unavailable rather than returning a fake
+                // success that a caller would mistake for a completed call.
+                let _ = request;
+                Err(BrokerError::Unavailable {
                     broker: "ros".into(),
-                    reason: e.to_string(),
-                })?;
-                let bytes_out = data.len() as u64;
-                Ok(CapabilityResponse {
-                    success: true,
-                    data,
-                    error: None,
-                    bytes_in,
-                    bytes_out,
+                    reason: "service calls not implemented — rosbridge transport pending".into(),
                 })
             }
             BrokerOperation::ParamGet { ref name } => {
@@ -208,27 +203,11 @@ impl CapabilityBroker for RosInterfaceBroker {
                     });
                 }
 
-                // In full implementation: query the parameter via rosbridge
-                // using the `get_param` op or ros2 CLI fallback.
-                // For now, return a structured response confirming the
-                // broker accepted the request and the parameter name is valid.
-                let response = serde_json::json!({
-                    "op": "get_param",
-                    "name": name,
-                    "status": "accepted",
-                    "note": "rosbridge transport pending — request formatted but not dispatched",
-                });
-                let data = serde_json::to_vec(&response).map_err(|e| BrokerError::Unavailable {
+                // CODE-12: parameter reads over rosbridge are not implemented
+                // yet. Return unavailable instead of a fabricated success.
+                Err(BrokerError::Unavailable {
                     broker: "ros".into(),
-                    reason: e.to_string(),
-                })?;
-                let bytes_out = data.len() as u64;
-                Ok(CapabilityResponse {
-                    success: true,
-                    data,
-                    error: None,
-                    bytes_in: 0,
-                    bytes_out,
+                    reason: "parameter get not implemented — rosbridge transport pending".into(),
                 })
             }
             BrokerOperation::ParamSet {
@@ -244,29 +223,12 @@ impl CapabilityBroker for RosInterfaceBroker {
                     });
                 }
 
-                // In full implementation: set the parameter via rosbridge
-                // using the `set_param` op or ros2 CLI fallback.
-                // For now, return a structured response confirming the
-                // broker accepted the request.
-                let bytes_in = value.len() as u64;
-                let response = serde_json::json!({
-                    "op": "set_param",
-                    "name": name,
-                    "value_size": value.len(),
-                    "status": "accepted",
-                    "note": "rosbridge transport pending — request formatted but not dispatched",
-                });
-                let data = serde_json::to_vec(&response).map_err(|e| BrokerError::Unavailable {
+                // CODE-12: parameter writes over rosbridge are not implemented
+                // yet. Return unavailable instead of a fabricated success.
+                let _ = value;
+                Err(BrokerError::Unavailable {
                     broker: "ros".into(),
-                    reason: e.to_string(),
-                })?;
-                let bytes_out = data.len() as u64;
-                Ok(CapabilityResponse {
-                    success: true,
-                    data,
-                    error: None,
-                    bytes_in,
-                    bytes_out,
+                    reason: "parameter set not implemented — rosbridge transport pending".into(),
                 })
             }
             _ => Err(BrokerError::AccessDenied {
@@ -312,60 +274,82 @@ fn validate_ros_name(name: &str) -> Result<(), BrokerError> {
 /// Run a `ros2` CLI sub-command with a wall-clock timeout and output size
 /// limit.  Returns the trimmed stdout on success.
 ///
+/// Fully async: uses `tokio::process` + `tokio::time::timeout`, draining
+/// stdout/stderr concurrently to avoid pipe-buffer deadlock, so it never
+/// blocks the async executor. On timeout the child is explicitly killed and
+/// awaited (reaped) to avoid leaving a zombie.
+///
 /// On failure the stderr is logged at `warn!` level via `tracing`.
-fn ros2_command_with_timeout(args: &[&str], timeout: Duration) -> Result<String, String> {
-    let mut child = Command::new("ros2")
+async fn ros2_command_with_timeout(args: &[&str], timeout: Duration) -> Result<String, String> {
+    let mut child = tokio::process::Command::new("ros2")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Belt-and-suspenders reaping if this future is cancelled/dropped.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("failed to spawn ros2: {e}"))?;
 
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // Process has exited — collect output.
-                let output = child
-                    .wait_with_output()
-                    .map_err(|e| format!("failed to read output: {e}"))?;
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
 
-                if !status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    warn!(
-                        args = ?args,
-                        status = %status,
-                        stderr = %stderr,
-                        "ros2 command failed"
-                    );
-                    return Err(format!("ros2 exited with {status}: {stderr}"));
-                }
+    let collect = async {
+        // Drain both pipes concurrently while the process runs so a full
+        // pipe buffer can never deadlock the wait, then reap the child.
+        let (r_out, r_err) = tokio::join!(
+            stdout_pipe.read_to_end(&mut stdout_buf),
+            stderr_pipe.read_to_end(&mut stderr_buf),
+        );
+        r_out.map_err(|e| format!("failed to read stdout: {e}"))?;
+        r_err.map_err(|e| format!("failed to read stderr: {e}"))?;
+        child
+            .wait()
+            .await
+            .map_err(|e| format!("error waiting for ros2: {e}"))
+    };
 
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.len() > MAX_OUTPUT_BYTES {
-                    warn!(
-                        args = ?args,
-                        bytes = stdout.len(),
-                        limit = MAX_OUTPUT_BYTES,
-                        "ros2 output exceeded size limit"
-                    );
-                    return Err("ros2 output exceeded 1 MiB limit".into());
-                }
-                return Ok(stdout.to_string());
+    // Bind to a local first so the `collect` future (which mutably borrows
+    // `child` and the buffers) is dropped before the match arms run.
+    let result = tokio::time::timeout(timeout, collect).await;
+    match result {
+        Ok(Ok(status)) => {
+            if !status.success() {
+                let stderr = String::from_utf8_lossy(&stderr_buf);
+                warn!(
+                    args = ?args,
+                    status = %status,
+                    stderr = %stderr,
+                    "ros2 command failed"
+                );
+                return Err(format!("ros2 exited with {status}: {stderr}"));
             }
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    warn!(
-                        args = ?args,
-                        timeout = ?timeout,
-                        "ros2 command timed out — killing child process"
-                    );
-                    return Err(format!("ros2 command timed out after {timeout:?}"));
-                }
-                std::thread::sleep(Duration::from_millis(50));
+
+            if stdout_buf.len() > MAX_OUTPUT_BYTES {
+                warn!(
+                    args = ?args,
+                    bytes = stdout_buf.len(),
+                    limit = MAX_OUTPUT_BYTES,
+                    "ros2 output exceeded size limit"
+                );
+                return Err("ros2 output exceeded 1 MiB limit".into());
             }
-            Err(e) => return Err(format!("error waiting for ros2: {e}")),
+
+            Ok(String::from_utf8_lossy(&stdout_buf).to_string())
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            // Timeout: explicitly kill AND wait to reap the child so it does
+            // not become a zombie or outlive the reported timeout.
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            warn!(
+                args = ?args,
+                timeout = ?timeout,
+                "ros2 command timed out — killed child process"
+            );
+            Err(format!("ros2 command timed out after {timeout:?}"))
         }
     }
 }
@@ -378,8 +362,10 @@ fn ros2_command_with_timeout(args: &[&str], timeout: Duration) -> Result<String,
 ///
 /// NOTE: When WebSocket rosbridge transport is added, this should check
 /// port 9090 connectivity instead (or in addition).
-fn check_ros2_available() -> bool {
-    ros2_command_with_timeout(&["--version"], ROS2_PROBE_TIMEOUT).is_ok()
+async fn check_ros2_available() -> bool {
+    ros2_command_with_timeout(&["--version"], ROS2_PROBE_TIMEOUT)
+        .await
+        .is_ok()
 }
 
 /// Parse newline-delimited CLI output into a `Vec<String>`, skipping blanks.
@@ -396,8 +382,9 @@ fn lines_to_vec(output: &str) -> Vec<String> {
 /// Uses the ros2 CLI directly. This is intentional: the broker runs as a
 /// privileged Layer 3 host process. Rosbridge WebSocket transport is planned
 /// for future versions.
-fn ros2_topic_list() -> Vec<String> {
+async fn ros2_topic_list() -> Vec<String> {
     ros2_command_with_timeout(&["topic", "list"], ROS2_CMD_TIMEOUT)
+        .await
         .map(|s| lines_to_vec(&s))
         .unwrap_or_default()
 }
@@ -406,8 +393,9 @@ fn ros2_topic_list() -> Vec<String> {
 ///
 /// Uses the ros2 CLI directly. Rosbridge WebSocket transport is planned
 /// for future versions.
-fn ros2_service_list() -> Vec<String> {
+async fn ros2_service_list() -> Vec<String> {
     ros2_command_with_timeout(&["service", "list"], ROS2_CMD_TIMEOUT)
+        .await
         .map(|s| lines_to_vec(&s))
         .unwrap_or_default()
 }
@@ -416,8 +404,9 @@ fn ros2_service_list() -> Vec<String> {
 ///
 /// Uses the ros2 CLI directly. Rosbridge WebSocket transport is planned
 /// for future versions.
-fn ros2_node_list() -> Vec<String> {
+async fn ros2_node_list() -> Vec<String> {
     ros2_command_with_timeout(&["node", "list"], ROS2_CMD_TIMEOUT)
+        .await
         .map(|s| lines_to_vec(&s))
         .unwrap_or_default()
 }
@@ -430,8 +419,8 @@ fn ros2_node_list() -> Vec<String> {
 ///
 /// Uses the ros2 CLI directly. Rosbridge WebSocket transport is planned
 /// for future versions.
-fn ros2_topic_info(topic: &str) -> serde_json::Value {
-    match ros2_command_with_timeout(&["topic", "info", topic, "-v"], ROS2_CMD_TIMEOUT) {
+async fn ros2_topic_info(topic: &str) -> serde_json::Value {
+    match ros2_command_with_timeout(&["topic", "info", topic, "-v"], ROS2_CMD_TIMEOUT).await {
         Ok(text) => serde_json::json!({
             "topic": topic,
             "info": text,
@@ -482,17 +471,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn param_set_succeeds_with_write_access() {
+    async fn param_set_unimplemented_returns_unavailable() {
+        // CODE-12: ParamSet is not implemented (rosbridge pending). With write
+        // access and ros2 available, it must report Unavailable, not a fake
+        // success.
         let broker = rw_broker(true);
         let req = param_set_request("/params/max_speed", vec![0x42, 0x28, 0x00, 0x00]);
-        let resp = broker.handle_request(req).await.unwrap();
-        assert!(resp.success);
-        assert_eq!(resp.bytes_in, 4);
-        assert!(resp.bytes_out > 0);
-
-        let body: serde_json::Value = serde_json::from_slice(&resp.data).unwrap();
-        assert_eq!(body["name"], "/params/max_speed");
-        assert_eq!(body["status"], "accepted");
+        let err = broker.handle_request(req).await.unwrap_err();
+        match err {
+            BrokerError::Unavailable { reason, .. } => {
+                assert!(reason.contains("not implemented"), "reason: {reason}");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -527,7 +518,9 @@ mod tests {
     // --- ParamGet tests ---
 
     #[tokio::test]
-    async fn param_get_returns_data_when_ros2_available() {
+    async fn param_get_unimplemented_returns_unavailable() {
+        // CODE-12: ParamGet is not implemented; must report Unavailable rather
+        // than a fabricated success payload.
         let broker = rw_broker(true);
         let req = CapabilityRequest {
             capability_group: "ganglion:ros/interface".into(),
@@ -535,15 +528,13 @@ mod tests {
                 name: "/params/max_speed".into(),
             },
         };
-        let resp = broker.handle_request(req).await.unwrap();
-        assert!(resp.success);
-        assert!(resp.bytes_out > 0);
-        assert_eq!(resp.bytes_in, 0);
-
-        let value: serde_json::Value = serde_json::from_slice(&resp.data).unwrap();
-        assert_eq!(value["op"], "get_param");
-        assert_eq!(value["name"], "/params/max_speed");
-        assert_eq!(value["status"], "accepted");
+        let err = broker.handle_request(req).await.unwrap_err();
+        match err {
+            BrokerError::Unavailable { reason, .. } => {
+                assert!(reason.contains("not implemented"), "reason: {reason}");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -575,25 +566,24 @@ mod tests {
     // --- ServiceCall tests ---
 
     #[tokio::test]
-    async fn service_call_returns_data_when_ros2_available() {
+    async fn service_call_unimplemented_returns_unavailable() {
+        // CODE-12: ServiceCall is not implemented; must report Unavailable
+        // rather than a fabricated "accepted" success.
         let broker = rw_broker(true);
-        let request_payload = b"{}".to_vec();
         let req = CapabilityRequest {
             capability_group: "ganglion:ros/interface".into(),
             operation: BrokerOperation::ServiceCall {
                 service: "/params/set_bool".into(),
-                request: request_payload.clone(),
+                request: b"{}".to_vec(),
             },
         };
-        let resp = broker.handle_request(req).await.unwrap();
-        assert!(resp.success);
-        assert_eq!(resp.bytes_in, request_payload.len() as u64);
-        assert!(resp.bytes_out > 0);
-
-        let value: serde_json::Value = serde_json::from_slice(&resp.data).unwrap();
-        assert_eq!(value["op"], "call_service");
-        assert_eq!(value["service"], "/params/set_bool");
-        assert_eq!(value["status"], "accepted");
+        let err = broker.handle_request(req).await.unwrap_err();
+        match err {
+            BrokerError::Unavailable { reason, .. } => {
+                assert!(reason.contains("not implemented"), "reason: {reason}");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -907,13 +897,12 @@ mod tests {
     // ros2_command_with_timeout() tests
     // -------------------------------------------------------------------
 
-    #[test]
-    fn test_ros2_command_timeout() {
-        // Use `sleep` as a stand-in for a hanging ros2 process.
+    #[tokio::test]
+    async fn test_ros2_command_timeout() {
         // We cannot easily test ros2 itself without ROS 2 installed,
-        // but we can verify the timeout mechanism works by calling a
-        // known command that will exceed the timeout.
-        let result = ros2_command_with_timeout(&["--version"], Duration::from_millis(1));
+        // but we can verify the timeout mechanism works by calling with
+        // an effectively-zero timeout.
+        let result = ros2_command_with_timeout(&["--version"], Duration::from_millis(1)).await;
         // Either ros2 is not installed (spawn fails) or the timeout
         // fires before it finishes. Both are acceptable error cases.
         assert!(result.is_err());
