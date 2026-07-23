@@ -687,13 +687,24 @@ impl SwarmWorker {
 
                     let command_tx = self.command_tx.clone();
                     tokio::spawn(async move {
-                        let response = response_rx.await.unwrap_or_default();
-                        let _ = command_tx
-                            .send(SwarmCommand::SendResponse {
-                                channel,
-                                data: response,
-                            })
-                            .await;
+                        match response_rx.await {
+                            Ok(data) => {
+                                let _ = command_tx
+                                    .send(SwarmCommand::SendResponse { channel, data })
+                                    .await;
+                            }
+                            Err(_) => {
+                                // The handler failed to produce a response
+                                // (its task was dropped without sending).
+                                // Drop the channel instead of masking the
+                                // failure with an empty "success" response;
+                                // the peer then observes a genuine
+                                // InboundFailure::ResponseOmission.
+                                warn!(
+                                    "handler produced no response; omitting response so the peer sees a failure"
+                                );
+                            }
+                        }
                     });
                 } else {
                     debug!(peer = %peer, protocol = %protocol, "No handler registered for protocol, sending empty response");
@@ -936,14 +947,15 @@ impl TransportAdapter for Libp2pTransportAdapter {
 /// Uses the libp2p peer ID string as a deterministic input.
 fn libp2p_to_gang_peer_id(peer_id: &Libp2pPeerId) -> PeerId {
     let hash = blake3::hash(peer_id.to_bytes().as_slice());
-    // Re-derive using the same format as gang-core PeerId
+    // Re-derive using the same format as gang-core PeerId. Construct the
+    // PeerId directly instead of round-tripping through a JSON string literal.
     let hex = hex::encode(&hash.as_bytes()[..16]);
-    serde_json::from_str::<PeerId>(&format!("\"12D3-{hex}\"")).expect("valid peer id format")
+    PeerId::new(&format!("12D3-{hex}"))
 }
 
 /// Parse a gang peer ID string back into a PeerId.
 fn parse_gang_peer_id(id: &str) -> Option<PeerId> {
-    serde_json::from_str::<PeerId>(&format!("\"{id}\"")).ok()
+    Some(PeerId::new(id))
 }
 
 /// Merge a read half and a write half into a single AsyncRead + AsyncWrite stream.
