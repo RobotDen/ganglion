@@ -113,7 +113,6 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         "caps",
         "demo",
         "diagnose",
-        "transport-stats",
         "test-archetype",
         "push",
         "fetch",
@@ -124,14 +123,15 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         "registry publish",
         "registry list",
         "registry info",
-        "peer add/remove/list/show/rename",
+        "peer add/remove/list/show/rename/trust-reset",
         "config show/set/init/path",
         "completions",
         "relay",
         "status",
     ];
 
-    let wip = ["logs", "list", "connect"];
+    // WIP: require relay connectivity or produce only simulated output today.
+    let wip = ["logs", "list", "connect", "transport-stats (simulated data)"];
 
     match format {
         OutputFormat::Json => {
@@ -1832,10 +1832,6 @@ pub async fn transport_stats(robot: &str, format: &crate::OutputFormat) -> anyho
     // In full implementation, this queries the transport adapter for the
     // connected peer's stats.
 
-    println!("Transport statistics for: {robot}");
-    println!("(Requires active connection — showing example output)");
-    println!();
-
     let example_stats = gang_core::transport::TransportStats {
         transport: "quic".into(),
         via_relay: false,
@@ -1853,10 +1849,19 @@ pub async fn transport_stats(robot: &str, format: &crate::OutputFormat) -> anyho
 
     match format {
         crate::OutputFormat::Json => {
-            let json = serde_json::to_string_pretty(&example_stats)?;
-            println!("{json}");
+            // Mark the payload as simulated so machine consumers cannot mistake
+            // it for live data (CLI-03).
+            let mut json = serde_json::to_value(&example_stats)?;
+            if let Some(obj) = json.as_object_mut() {
+                obj.insert("simulated".into(), serde_json::json!(true));
+                obj.insert("peer".into(), serde_json::json!(robot));
+            }
+            println!("{}", serde_json::to_string_pretty(&json)?);
         }
         crate::OutputFormat::Text => {
+            println!("Transport statistics for: {robot}  [WIP]");
+            println!("(No live connection — showing SIMULATED example output.)");
+            println!();
             println!("  Transport:       {}", example_stats.transport);
             println!("  Via relay:       {}", example_stats.via_relay);
             println!("  Connect time:    {}ms", example_stats.connect_time_ms);

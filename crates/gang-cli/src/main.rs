@@ -139,7 +139,7 @@ enum Commands {
         robot: Option<String>,
     },
 
-    /// Show per-transport statistics for a connected peer.
+    /// Show per-transport statistics for a connected peer. [WIP: simulated data until relay lands]
     TransportStats {
         /// Robot name or peer ID.
         robot: String,
