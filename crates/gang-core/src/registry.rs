@@ -104,6 +104,36 @@ pub struct SearchResult {
     pub tags: Vec<String>,
 }
 
+/// Parse a version string into a comparable `(major, minor, patch)` tuple.
+///
+/// `semver` is not available in the workspace dependency table, so this does a
+/// lightweight parse of the `major.minor.patch` core, ignoring any
+/// pre-release/build suffix (after `-` or `+`). Missing or non-numeric
+/// components are treated as `0`, which keeps ordering total and predictable
+/// for malformed input.
+fn parse_semver(version: &str) -> (u64, u64, u64) {
+    // Drop build/pre-release metadata; compare only the numeric core.
+    let core = version
+        .split(['-', '+'])
+        .next()
+        .unwrap_or("");
+    let mut parts = core.split('.');
+    let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (major, minor, patch)
+}
+
+/// Select the entry with the highest semantic version, breaking ties by the
+/// later publish order (later insertion wins).
+fn latest_entry(versions: &[RegistryEntry]) -> Option<&RegistryEntry> {
+    versions
+        .iter()
+        .enumerate()
+        .max_by_key(|(idx, e)| (parse_semver(&e.version), *idx))
+        .map(|(_, e)| e)
+}
+
 impl Registry {
     /// Open or create a registry at the given directory.
     pub fn open(registry_dir: &Path) -> Result<Self, std::io::Error> {
@@ -169,7 +199,7 @@ impl Registry {
         let mut results = Vec::new();
 
         for (name, versions) in &self.entries {
-            if let Some(latest) = versions.last() {
+            if let Some(latest) = latest_entry(versions) {
                 let matches = name.to_lowercase().contains(&query_lower)
                     || latest.description.to_lowercase().contains(&query_lower)
                     || latest
@@ -199,16 +229,16 @@ impl Registry {
         self.entries.get(name).map(|v| v.as_slice())
     }
 
-    /// Get the latest version of a capability.
+    /// Get the latest version of a capability (highest semantic version).
     pub fn get_latest(&self, name: &str) -> Option<&RegistryEntry> {
-        self.entries.get(name).and_then(|v| v.last())
+        self.entries.get(name).and_then(|v| latest_entry(v))
     }
 
     /// List all capabilities in the registry.
     pub fn list(&self) -> Vec<SearchResult> {
         let mut results = Vec::new();
         for (name, versions) in &self.entries {
-            if let Some(latest) = versions.last() {
+            if let Some(latest) = latest_entry(versions) {
                 results.push(SearchResult {
                     name: name.clone(),
                     latest_version: latest.version.clone(),
@@ -436,6 +466,39 @@ mod tests {
         assert_eq!(reg.count(), 1);
         let entry = reg.get_latest("persistent-cap").unwrap();
         assert_eq!(entry.version, "1.0.0");
+    }
+
+    #[test]
+    fn get_latest_picks_highest_semver_out_of_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::open(dir.path()).unwrap();
+        let kp = Keypair::generate();
+
+        // Publish out of order; string ordering would mis-rank these.
+        publish_ok(&mut reg, &kp, "cap", "1.0.0");
+        publish_ok(&mut reg, &kp, "cap", "2.0.0");
+        publish_ok(&mut reg, &kp, "cap", "1.5.0");
+        publish_ok(&mut reg, &kp, "cap", "0.9.0");
+        publish_ok(&mut reg, &kp, "cap", "0.10.0");
+
+        // Highest semver is 2.0.0, not the last-published (0.10.0).
+        assert_eq!(reg.get_latest("cap").unwrap().version, "2.0.0");
+
+        // search() and list() report the same latest version.
+        let listed = reg.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].latest_version, "2.0.0");
+        let found = reg.search("cap");
+        assert_eq!(found[0].latest_version, "2.0.0");
+    }
+
+    #[test]
+    fn semver_parse_orders_numerically() {
+        // 0.10.0 must sort above 0.9.0 (numeric, not lexicographic).
+        assert!(parse_semver("0.10.0") > parse_semver("0.9.0"));
+        assert!(parse_semver("2.0.0") > parse_semver("1.99.99"));
+        // Pre-release suffix is ignored for the numeric core.
+        assert_eq!(parse_semver("1.2.3-rc1"), (1, 2, 3));
     }
 
     #[test]
