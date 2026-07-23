@@ -10,6 +10,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+EXIT_CODE=0
+
+# Always tear down, no matter how the script exits (mirrors run-scenario.sh).
+cleanup() {
+    echo
+    echo "--- Tearing down ---"
+    docker compose down -v --remove-orphans 2>/dev/null || true
+}
+trap cleanup EXIT
+
 echo "=== Ganglion E2E Dispatch Test ==="
 echo
 
@@ -58,15 +68,11 @@ echo "=== All operator tests passed ==="
 OPERATOR_SCRIPT
 chmod +x test-data/run-operator-test.sh
 
-# Step 3: Start containers
+# Step 3: Start containers. Under `set -e` a plain invocation would abort
+# the script before we can capture the exit code, so use `|| EXIT_CODE=$?`;
+# teardown happens in the EXIT trap regardless.
 echo "--- Starting e2e scenario ---"
-docker compose up --build --abort-on-container-exit --exit-code-from operator 2>&1
-EXIT_CODE=$?
-
-# Step 4: Tear down
-echo
-echo "--- Tearing down ---"
-docker compose down -v 2>/dev/null || true
+docker compose up --build --abort-on-container-exit --exit-code-from operator 2>&1 || EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
     echo
