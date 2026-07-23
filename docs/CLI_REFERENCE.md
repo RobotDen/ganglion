@@ -6,8 +6,11 @@ The `gang` CLI is the primary interface for operators to manage robot identities
 
 | Flag | Description |
 |------|-------------|
-| `--format <text\|json>` | Output format. Default: `text`. Use `json` for machine-readable output. |
-| `-v`, `-vv`, `-vvv` | Verbosity level. `-v` = debug, `-vv` = trace (all crates). |
+| `--format <text\|json>` | Output format. Default: `text`. Use `json` for machine-readable output. Text-only subcommands (e.g. `identity`, `sign`, `capability scaffold`, `registry install/publish`) reject `--format json` with an error rather than silently emitting text. |
+| `-v`, `-vv`, `-vvv` | Verbosity: `-v` = debug (`gang` crates), `-vv` = trace (`gang` crates), `-vvv` = trace (all crates). |
+| `-q`, `--quiet` | Errors only. Conflicts with `-v`. |
+
+`RUST_LOG`, when set, overrides the `-v`/`-q` flags for log filtering.
 
 ## Status
 
@@ -17,7 +20,7 @@ Show Ganglion version, identity status, available commands, and WIP commands.
 
 ```bash
 $ gang status
-Ganglion v0.6.0
+Ganglion v2.0.0
 
 Identity:   12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
 Key file:   /home/user/.gang/identity.key
@@ -30,10 +33,11 @@ Available commands:
   gang agent
   ...
 
-WIP commands (require relay connectivity):
-  gang logs  [WIP]
-  gang list  [WIP]
-  gang connect  [WIP]
+WIP commands:
+  logs
+  list
+  connect
+  transport-stats (simulated data)
 ```
 
 Supports `--format json` for structured output.
@@ -73,22 +77,35 @@ Peer ID: 12D3-...
 Sign a WASM component and produce a manifest file.
 
 ```bash
-$ gang sign my-diagnostics.wasm --name my-diagnostics --version 0.1.0
-Signed: my-diagnostics.manifest.cbor
-Component hash: bafy...
+$ gang sign my-diagnostics.wasm --name my-diagnostics \
+    --component-version 0.1.0 --capabilities diagnostics,logs
+Signed component: my-diagnostics.wasm
+  Name:     my-diagnostics
+  Version:  0.1.0
+  Manifest: my-diagnostics.manifest.cbor
+  Author:   12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
+  Hash:     4a2b3c...
+  Capabilities:
+    - ganglion:diagnostics/collect
+    - ganglion:logs/stream
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--key <path>` | Path to signing key. Default: `~/.gang/identity.key`. |
 | `--name <name>` | Component name. Default: derived from filename. |
-| `--version <ver>` | Component version. Default: `0.1.0`. |
+| `--component-version <ver>` (alias `--version`) | Component semantic version. Default: `0.1.0`. Distinct from the CLI's own `-V`/`--version`. |
+| `--capabilities <c1,c2,...>` | Declared capability groups (e.g. `diagnostics,logs,ros,fs,artifacts,process,network,metrics`). |
+
+If `--capabilities` is omitted, signing falls back to a permissive default set
+(`diagnostics` + `logs "**"`) and prints a loud warning — declare capabilities
+explicitly. (WIT-import auto-extraction is not yet wired.)
 
 The manifest includes:
 - Component name and version
 - Author peer ID
 - Blake3 hash of the `.wasm` binary
-- Declared capabilities (extracted from the component)
+- Declared capabilities (from `--capabilities`)
 - Ed25519 signature
 
 ## Robot agent
@@ -107,7 +124,7 @@ $ gang agent --data-dir /tmp/gang-agent -r /ip4/relay.example.com/tcp/4001/p2p/1
 
 | Flag | Description |
 |------|-------------|
-| `--config <path>` | Path to agent config file. |
+| `--config <path>` | Path to agent config file. (Loading is not yet supported — the flag prints a warning and the agent continues with built-in dev defaults.) |
 | `--data-dir <path>` | Directory for capabilities and state. Default: `/tmp/gang-agent`. |
 | `--relay <multiaddr>`, `-r` | Relay multiaddr to dial for remote connectivity. |
 
@@ -119,14 +136,16 @@ Deploy a signed WASM component to a robot.
 
 ```bash
 $ gang deploy robot-42 my-diagnostics.wasm
-Deploying my-diagnostics v0.1.0 to robot-42...
-Verifying manifest signature... OK
-Checking trust store... OK
-Evaluating policy... OK
-Deployed successfully.
+Deployed 'my-diagnostics' to robot 'robot-42'
 ```
 
 The `<robot>` argument resolves through: registered name → abbreviated peer ID prefix → full peer ID → local fallback.
+
+> **Remote dispatch is WIP.** If the target resolves to a *remote* peer, the
+> command exits non-zero with a "Remote deploy ... is not yet implemented
+> (ADR-020 Phase 32)" message. Only the local fallback path
+> (`/tmp/gang-agent-<robot>`) currently deploys and invokes. The same applies to
+> `gang run` and `gang caps`.
 
 | Flag | Description |
 |------|-------------|
@@ -173,7 +192,7 @@ $ gang logs robot-42 --follow
 |------|-------------|
 | `--follow` | Continuously stream new log entries (like `tail -f`). |
 
-> Note: Requires relay connectivity (not yet available in v0.5). Run `gang demo` for local testing or `gang status` for a summary of available commands.
+> Note: `[WIP]` — requires relay connectivity, which is not yet wired. The command exits non-zero with a WIP message (with `--format json` it first prints a `{"status":"unavailable",...}` object). Run `gang demo` for local testing or `gang status` for a summary of available commands.
 
 ## Diagnostics
 
@@ -183,17 +202,32 @@ Run a self-contained end-to-end demo. No Docker, no ROS 2, no external dependenc
 
 ```bash
 $ gang demo
-=== Ganglion Demo ===
-Generating identity...
-Starting local agent...
-Deploying diagnostics capability...
-Invoking diagnostics...
+=== Ganglion v2.0.0 Demo ===
 
+Operator identity: 12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
+Robot agent:       12D3-b2c3d4e5f67890a1b2c3d4e5f67890a1
+
+--- Signing diagnostics capability ---
+  Component signed by 12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
+
+--- Deploying to robot ---
+  Deployed: diagnostics
+
+--- Installed capabilities ---
+  diagnostics v0.1.0 (12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890)
+
+--- Invoking diagnostics ---
 System Info:
   OS: Linux 6.1.0
   Hostname: robot-dev
-  Uptime: 34521s
   ...
+
+--- Audit log ---
+  12D3-a1b2... invoked 'diagnostics' v0.1.0 at 10:00:00 -> Success
+
+=== Demo complete ===
+Data stored at: /tmp/gang-demo
+Clean up when done: rm -rf /tmp/gang-demo
 ```
 
 ### `gang diagnose [robot]`
@@ -220,21 +254,26 @@ Recommendations:
 
 If `robot` is specified, probes are run on the remote robot. If omitted, probes the local network.
 
-### `gang transport-stats <robot>`
+### `gang transport-stats <robot>` [WIP: simulated]
 
-Show per-transport connection statistics for a connected peer.
+Show per-transport connection statistics for a connected peer. There is no live
+connection yet, so the command prints a clearly-labeled SIMULATED example. With
+`--format json` the payload includes `"simulated": true`.
 
 ```bash
 $ gang transport-stats robot-42
-Transport: quic
-  Via relay: false
-  RTT: 12ms
-  Messages sent: 142
-  Messages received: 138
-  Bytes sent: 48.2 KB
-  Bytes received: 1.2 MB
-  DCUtR: upgraded
-  Uptime: 3421s
+Transport statistics for: robot-42  [WIP]
+(No live connection — showing SIMULATED example output.)
+
+  Transport:       quic
+  Via relay:       false
+  Connect time:    145ms
+  Messages:        42 sent, 38 received
+  Bytes:           12.2 KB sent, 152.7 KB received
+  Last RTT:        23ms
+  DCUtR:           attempted=true, succeeded=true
+  Uptime:          1h 0m
+  Reconnections:   0
 ```
 
 ### `gang test-archetype <archetype>`
@@ -271,9 +310,12 @@ Retrieve an artifact by its content identifier.
 
 ```bash
 $ gang fetch bafya1b2c3d4... -o /tmp/bundle.tar.gz
-Retrieved: 4.2 MB
-Verified: hash matches CID
+Wrote 4404019 bytes to /tmp/bundle.tar.gz
 ```
+
+The retrieved bytes are verified against the CID during retrieval. If the CID is
+not in the local store, the command fails ("Remote fetch from peers is not yet
+implemented"). Supports `--format json` (`{"cid","path","bytes"}`).
 
 | Flag | Description |
 |------|-------------|
@@ -298,13 +340,16 @@ Generate a capability project skeleton.
 
 ```bash
 $ gang capability scaffold my-diagnostics --language rust
-Created my-diagnostics/
-  ├── Cargo.toml
-  ├── src/lib.rs
-  ├── wit/
-  │   └── ganglion.wit
-  └── Makefile
+Scaffolded rust capability at ./my-diagnostics
+
+Next steps:
+  1. Implement your capability logic (WIT is in my-diagnostics/wit/ganglion.wit)
+  2. Build: see docs/CAPABILITY_AUTHOR_GUIDE.md
+  3. Sign: gang sign my-diagnostics.component.wasm --name my-diagnostics --version 0.1.0
 ```
+
+The generated project includes a ready-to-use `wit/ganglion.wit` embedded from
+the canonical in-repo WIT — you do not copy it by hand.
 
 | Flag | Description |
 |------|-------------|
@@ -330,9 +375,17 @@ Install a capability from the registry.
 
 ```bash
 $ gang registry install gang-capability-diagnostics
-Installing gang-capability-diagnostics v0.1.0...
-Installed to ~/.gang/capabilities/
+Installing gang-capability-diagnostics v0.1.0 ...
+  Component CID: bafy...
+  Manifest CID:  bafy...
+  Language:       rust
+
+Note: network fetch not yet implemented.
+Use `gang fetch bafy...` to retrieve the component.
 ```
+
+> Registry lookup is local; the network fetch step is a stub (WIP). Install
+> resolves the entry and points you at `gang fetch` for the component bytes.
 
 | Flag | Description |
 |------|-------------|
@@ -340,17 +393,25 @@ Installed to ~/.gang/capabilities/
 
 ### `gang registry publish <wasm-path>`
 
-Publish a signed capability to the local registry.
+Publish a signed capability to the local registry. **A signed manifest is
+required** (SEC-15): the adjacent `<name>.manifest.cbor` is verified and its
+authenticated contents (name, version, language, capabilities, min-version) are
+the source of truth. Publishing without a signed manifest fails — sign the
+component first with `gang sign`.
 
 ```bash
 $ gang registry publish my-diagnostics.wasm --description "Custom diagnostics" --tags diagnostics,system
-Published: my-diagnostics v0.1.0
+Published my-diagnostics v0.1.0 to local registry.
+  Component CID: bafy...
+  Registry path: /home/user/.gang/registry
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--description <text>` | Short description. |
+| `--description <text>` | Short description (overrides manifest). |
 | `--tags <t1,t2,...>` | Comma-separated tags. |
+| `--version <ver>` | Version to publish (overrides the signed manifest). |
+| `--language <lang>` | Language override: `rust`, `cpp`, `python`, `go`. |
 
 ### `gang registry list`
 
@@ -389,6 +450,7 @@ Relay is running. Press Ctrl+C to stop.
 | `--listen-addr <ADDR>` | Multiaddr to listen on. Can be specified multiple times. Default: TCP and QUIC on port 4001. |
 | `--port <PORT>` | Port shorthand (sets both TCP and QUIC). Default: `4001`. |
 | `--metrics-port <PORT>` | Metrics HTTP port (placeholder). Default: `9090`. |
+| `--data-dir <PATH>` | Directory for the relay's persisted identity key (sets `GANG_KEY_PATH`). Default: `~/.gang/identity.key`. |
 
 The relay generates or loads an identity from `~/.gang/identity.key` and
 prints the full relay multiaddr that clients should put in their `relay_addrs`
@@ -478,7 +540,7 @@ Supported shells: bash, zsh, fish, elvish, powershell.
 
 List reachable robots in the fleet.
 
-> Note: Requires relay connectivity (not yet available in v0.5). Run `gang demo` for local testing or `gang status` for a summary of available commands.
+> Note: `[WIP]` — requires relay connectivity, which is not yet wired. The command exits non-zero with a WIP message (`--format json` prints `{"status":"unavailable",...}` first). Run `gang demo` for local testing or `gang status` for a summary of available commands.
 
 ### `gang connect <robot>` [WIP]
 
@@ -492,7 +554,7 @@ $ gang connect robot-42 --prefer-transport quic,tcp
 |------|-------------|
 | `--prefer-transport <t1,t2>` | Preferred transport order for happy-eyeballs selection. |
 
-> Note: Requires relay connectivity (not yet available in v0.5). Run `gang demo` for local testing or `gang status` for a summary of available commands.
+> Note: `[WIP]` — requires relay connectivity, which is not yet wired. The command exits non-zero with a WIP message (`--format json` prints `{"status":"unavailable",...}` first). Run `gang demo` for local testing or `gang status` for a summary of available commands.
 
 ## Exit codes
 
