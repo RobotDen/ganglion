@@ -17,7 +17,7 @@ Three layers:
 ## Quick start
 
 ```bash
-# Install the CLI from crates.io (Rust 1.85+)
+# Install the CLI from crates.io (Rust 1.88+)
 cargo install gang
 
 # ...or build from source (see CONTRIBUTING.md):
@@ -187,7 +187,7 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 ## Building
 
 ```bash
-# Prerequisites: Rust 1.85+, cargo
+# Prerequisites: Rust 1.88+, cargo
 # System deps (Debian/Ubuntu): sudo apt-get install pkg-config libssl-dev
 cargo build --release
 

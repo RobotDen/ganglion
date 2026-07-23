@@ -4,7 +4,7 @@ Get from zero to running Ganglion in under 5 minutes.
 
 ## Prerequisites
 
-- Rust 1.85+ (`rustup update stable`)
+- Rust 1.88+ (`rustup update stable`)
 - System libraries (Debian/Ubuntu): `sudo apt-get install pkg-config libssl-dev`
 - Docker (only for test-archetype scenarios)
 

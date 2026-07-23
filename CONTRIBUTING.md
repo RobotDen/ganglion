@@ -9,7 +9,7 @@ Contributions are welcome. This document covers the development workflow, code s
 git clone https://github.com/TafyLabs/ganglion.git
 cd ganglion
 
-# Prerequisites: Rust 1.85+
+# Prerequisites: Rust 1.88+ (the workspace MSRV; CI checks 1.88)
 rustup update stable
 
 # Set up git hooks

@@ -6,7 +6,7 @@ Test results and validation status for Ganglion v2.0.0.
 
 - **Host:** macOS / Linux
 - **Ganglion version:** v2.0.0
-- **Rust:** 1.85+
+- **Rust:** 1.88+ (workspace MSRV)
 - **CI:** GitHub Actions (ubuntu-latest + macos-latest matrix)
 
 ## Unit test summary

@@ -722,7 +722,7 @@ Track decisions made during implementation that deviate from or clarify the spec
 | 011 | [Manifest schema v2](adr/ADR-011-manifest-schema-v2.md) | Backward-compatible schema evolution via serde defaults | v0.3 |
 | 012 | [Network archetype detection](adr/ADR-012-network-archetype-detection.md) | Automated transport recommendation from probe results | v0.4 |
 | 013 | [Rosbridge over rclrs](adr/ADR-013-rosbridge-over-rclrs.md) | No build-time ROS 2 dependency; works with any distro; CI-friendly | v0.1 |
-| 014 | [Rust edition 2024](adr/ADR-014-rust-edition-2024.md) | Newest stable edition, project targets Rust 1.85+ | v0.4 |
+| 014 | [Rust edition 2024](adr/ADR-014-rust-edition-2024.md) | Newest stable edition, project targets Rust 1.88+ | v0.4 |
 | 015 | [Fix symlink jail writes](adr/ADR-015-fix-symlink-jail-writes.md) | Canonicalize parent for new-file writes to close traversal gap | v0.5 |
 | 016 | [Implement ROS stubs](adr/ADR-016-implement-ros-stubs.md) | Complete service-call and param-get via rosbridge | v0.5 |
 | 017 | [WIT param-set](adr/ADR-017-wit-param-set.md) | Add write symmetry for parameters; enable field tuning capabilities | v0.5 |
