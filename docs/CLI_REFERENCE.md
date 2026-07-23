@@ -12,6 +12,20 @@ The `gang` CLI is the primary interface for operators to manage robot identities
 
 `RUST_LOG`, when set, overrides the `-v`/`-q` flags for log filtering.
 
+### Subcommand aliases
+
+Three frequently-typed subcommands have short aliases:
+
+| Alias | Expands to |
+|-------|-----------|
+| `gang id` | `gang identity` |
+| `gang cap` | `gang capability` |
+| `gang dx` | `gang diagnose` |
+
+`gang --help` prints a long description of what `gang` is for and ends with a
+pointer to the self-contained demo: `Run 'gang demo' for a self-contained
+end-to-end demo. Docs: docs/QUICKSTART.md`.
+
 ## Status
 
 ### `gang status`
@@ -25,6 +39,10 @@ Ganglion v2.0.0
 Identity:   12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
 Key file:   /home/user/.gang/identity.key
 Registry:   2 capability(ies) registered
+  dir:      /home/user/.local/share/gang/registry
+Artifacts:  /home/user/.local/share/gang/artifacts
+Peers:      0 registered
+Config:     (not initialized — run `gang config init`)
 
 Available commands:
   gang identity show
@@ -33,11 +51,11 @@ Available commands:
   gang agent
   ...
 
-WIP commands:
-  logs
-  list
-  connect
-  transport-stats (simulated data)
+WIP commands (require relay connectivity):
+  gang logs  [WIP]
+  gang list  [WIP]
+  gang connect  [WIP]
+  gang transport-stats (simulated data)  [WIP]
 ```
 
 Supports `--format json` for structured output.
@@ -86,8 +104,8 @@ Signed component: my-diagnostics.wasm
   Author:   12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
   Hash:     4a2b3c...
   Capabilities:
-    - ganglion:diagnostics/collect
-    - ganglion:logs/stream
+    - ganglion:diagnostics/collect@1.0
+    - ganglion:logs/stream@1.0
 ```
 
 | Flag | Description |
@@ -128,6 +146,10 @@ $ gang agent --data-dir /tmp/gang-agent -r /ip4/relay.example.com/tcp/4001/p2p/1
 | `--data-dir <path>` | Directory for capabilities and state. Default: `/tmp/gang-agent`. |
 | `--relay <multiaddr>`, `-r` | Relay multiaddr to dial for remote connectivity. |
 
+If the relay is unreachable, the agent does **not** hang or exit: it logs a
+warning, keeps serving on its listen addresses, and retries the relay dial
+every 5 seconds until it succeeds.
+
 ## Capability deployment and invocation
 
 ### `gang deploy <robot> <wasm-path>`
@@ -136,6 +158,7 @@ Deploy a signed WASM component to a robot.
 
 ```bash
 $ gang deploy robot-42 my-diagnostics.wasm
+[log lines]
 Deployed 'my-diagnostics' to robot 'robot-42'
 ```
 
@@ -144,8 +167,11 @@ The `<robot>` argument resolves through: registered name → abbreviated peer ID
 > **Remote dispatch is WIP.** If the target resolves to a *remote* peer, the
 > command exits non-zero with a "Remote deploy ... is not yet implemented
 > (ADR-020 Phase 32)" message. Only the local fallback path
-> (`/tmp/gang-agent-<robot>`) currently deploys and invokes. The same applies to
-> `gang run` and `gang caps`.
+> (`/tmp/gang-agent-<robot>`) currently deploys and invokes: deploy/run/caps
+> run an in-process local agent over that directory (a separately started
+> `gang agent` process is not consulted). The directory must exist for the
+> name to resolve locally — `mkdir -p /tmp/gang-agent-<robot>` first. The same
+> applies to `gang run` and `gang caps`.
 
 | Flag | Description |
 |------|-------------|
@@ -158,14 +184,26 @@ The `<robot>` argument resolves through: registered name → abbreviated peer ID
 Invoke an installed capability on a robot.
 
 ```bash
-$ gang run robot-42 diagnostics
-Running diagnostics on robot-42...
-{
-  "system_info": { ... },
-  "processes": [ ... ],
-  "network_state": { ... }
-}
+$ gang run robot-42 my-diagnostics
+[log lines]
+System Information:
+  Hostname:  robot-42
+  OS:        linux 6.18.5
+  Arch:      x86_64
+  CPUs:      2
+  Memory:    7 GB
+  Uptime:    0h 57m
+  Ganglion:  v2.0.0
+
+Network Interfaces:
+  ...
+
+Processes: 68 running
+  ...
 ```
+
+With `--format json`, the raw JSON result is printed instead of the
+human-readable rendering.
 
 ### `gang caps <robot>`
 
@@ -173,9 +211,10 @@ List capabilities installed on a robot.
 
 ```bash
 $ gang caps robot-42
-NAME              VERSION  AUTHOR              INSTALLED
-diagnostics       0.1.0    12D3-a1b2c3d4...   2026-04-23T10:00:00Z
-param-inspect     0.1.0    12D3-a1b2c3d4...   2026-04-23T10:05:00Z
+[log lines]
+Capabilities on 'robot-42':
+  my-diagnostics v0.1.0 (by 12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890)
+    - ganglion:diagnostics/collect@1.0
 ```
 
 ## Log streaming
@@ -286,7 +325,9 @@ $ gang test-archetype open-warehouse
 
 Available archetypes: `open-warehouse`, `nat-office`, `enterprise-dmz`, `mobile-cgnat`.
 
-Requires Docker and Docker Compose.
+Requires Docker and Docker Compose. After starting the scenario, the command
+polls container state until the services are up (rather than sleeping for a
+fixed interval) before running its connectivity checks.
 
 ## Content store
 
@@ -403,15 +444,24 @@ component first with `gang sign`.
 $ gang registry publish my-diagnostics.wasm --description "Custom diagnostics" --tags diagnostics,system
 Published my-diagnostics v0.1.0 to local registry.
   Component CID: bafy...
-  Registry path: /home/user/.gang/registry
+  Registry path: /home/user/.local/share/gang/registry
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--description <text>` | Short description (overrides manifest). |
 | `--tags <t1,t2,...>` | Comma-separated tags. |
-| `--version <ver>` | Version to publish (overrides the signed manifest). |
+| `--version <ver>` | Version to publish. Must match the signed manifest — a contradicting value is rejected. |
 | `--language <lang>` | Language override: `rust`, `cpp`, `python`, `go`. |
+
+The registry validates every entry field against the signed manifest (name,
+version, capabilities, component CID). A `--version` that contradicts the
+manifest fails:
+
+```bash
+$ gang registry publish my-diagnostics.wasm --version 9.9.9
+Error: version mismatch: entry claims "9.9.9", signed manifest says "0.1.0"
+```
 
 ### `gang registry list`
 
@@ -450,7 +500,7 @@ Relay is running. Press Ctrl+C to stop.
 | `--listen-addr <ADDR>` | Multiaddr to listen on. Can be specified multiple times. Default: TCP and QUIC on port 4001. |
 | `--port <PORT>` | Port shorthand (sets both TCP and QUIC). Default: `4001`. |
 | `--metrics-port <PORT>` | Metrics HTTP port (placeholder). Default: `9090`. |
-| `--data-dir <PATH>` | Directory for the relay's persisted identity key (sets `GANG_KEY_PATH`). Default: `~/.gang/identity.key`. |
+| `--data-dir <PATH>` | Directory for the relay's persisted identity key. The key path is passed directly to the relay — no environment variable is set or read at relay runtime. Default: `~/.gang/identity.key`. (`GANG_KEY_PATH` is still honored by the default key-path resolution used by other commands.) |
 
 The relay generates or loads an identity from `~/.gang/identity.key` and
 prints the full relay multiaddr that clients should put in their `relay_addrs`
@@ -464,6 +514,13 @@ Register a known peer (robot, relay, or operator).
 
 ```bash
 $ gang peer add warehouse-bot 12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890 --relay /ip4/relay.example.com/tcp/4001/p2p/12D3-relay
+```
+
+A malformed peer id is rejected with a clean error (exit code 1):
+
+```bash
+$ gang peer add badbot not-a-peer-id
+Error: Invalid peer ID 'not-a-peer-id': invalid peer id: missing `12D3-` prefix: not-a-peer-id. Expected format: 12D3-<32 hex chars>
 ```
 
 | Flag | Description |
@@ -561,7 +618,8 @@ $ gang connect robot-42 --prefer-transport quic,tcp
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | General error |
-| 2 | Policy denied |
-| 3 | Trust store verification failed |
-| 4 | Component signature invalid |
+| 1 | Any error (policy denial, trust/signature failure, I/O, WIP command, …) |
+| 2 | Command-line usage error (unknown flag, missing argument — reported by clap) |
+
+Finer-grained exit codes (distinguishing policy denials, trust-store failures,
+and signature failures) are planned but not yet implemented.
