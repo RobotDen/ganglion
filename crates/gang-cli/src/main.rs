@@ -136,7 +136,7 @@ enum Commands {
         relay: Option<String>,
     },
 
-    /// Stream robot logs.
+    /// Stream robot logs. [WIP: requires relay]
     Logs {
         /// Robot name or peer ID.
         robot: String,
@@ -214,10 +214,10 @@ enum Commands {
     /// Show Ganglion status: version, identity, available and WIP capabilities.
     Status,
 
-    /// List reachable robots in the fleet.
+    /// List reachable robots in the fleet. [WIP: requires relay]
     List,
 
-    /// Establish a session with a robot via relay.
+    /// Establish a session with a robot via relay. [WIP: requires relay]
     Connect {
         /// Robot name or peer ID.
         robot: String,
@@ -479,12 +479,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Logs {
             robot: _,
             follow: _,
-        } => {
-            eprintln!("This command requires relay connectivity (not yet available in v0.6).");
-            eprintln!(
-                "Run `gang demo` to see current capabilities, or `gang status` for a summary."
-            );
-        }
+        } => commands::wip_stub("logs", &cli.format)?,
         Commands::TestArchetype { archetype } => commands::test_archetype(&archetype).await?,
         Commands::Diagnose { robot } => commands::diagnose(robot.as_deref(), &cli.format).await?,
         Commands::TransportStats { robot } => {

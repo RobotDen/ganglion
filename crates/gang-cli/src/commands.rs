@@ -1,8 +1,31 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::OutputFormat;
+
+/// Emit the standard notice for a command that is not yet available because it
+/// requires relay connectivity, honoring `--format`, then fail with a non-zero
+/// exit. Absent-relay stubs must not exit 0 (ADR-018).
+pub fn wip_stub(command: &str, format: &OutputFormat) -> anyhow::Result<()> {
+    if let OutputFormat::Json = format {
+        // Clean JSON on stdout for machine consumers; the error still exits 1.
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "unavailable",
+                "command": command,
+                "wip": true,
+                "reason": "requires relay connectivity",
+            })
+        );
+    }
+    anyhow::bail!(
+        "`gang {command}` requires relay connectivity [WIP]. \
+         Run `gang demo` to see current capabilities, or `gang status` for a summary."
+    );
+}
 
 // --- Operator config ---
 
