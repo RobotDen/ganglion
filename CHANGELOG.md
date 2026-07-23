@@ -2,7 +2,7 @@
 
 All notable changes to Ganglion will be documented in this file.
 
-## [2.0.0] - YYYY-MM-DD
+## [2.0.0] - 2026-07-23
 
 A security- and quality-hardening release. Every change below reflects code that
 has landed. See [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) for upgrade steps.
