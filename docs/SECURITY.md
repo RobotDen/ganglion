@@ -25,7 +25,7 @@ Ganglion operates in a specific threat environment: robots deployed on customer 
 5. **Filesystem traversal** — The filesystem broker enforces a symlink jail. Paths that resolve outside the jail root are rejected.
 6. **Arbitrary command execution** — The process broker enforces a command allowlist with glob patterns. Commands not on the list are rejected.
 7. **Resource exhaustion** — Fuel metering limits CPU consumption. Epoch-based deadlines limit wall-clock time. Process broker enforces wall-clock timeouts on subprocesses.
-8. **Audit evasion** — Every invocation produces an append-only audit record with operator identity, component hash, capabilities used, and I/O statistics.
+8. **Audit evasion** — Every invocation produces an append-only, Blake3-hash-chained audit record with operator identity, component hash, capabilities used, and I/O statistics; `verify_chain()` detects reordering or deletion.
 
 ### What we do NOT defend against
 
@@ -41,11 +41,21 @@ Ganglion operates in a specific threat environment: robots deployed on customer 
 
 Every peer (robot agent, operator, relay) has an Ed25519 keypair:
 
-- **Private key**: 32 bytes, stored at `~/.gang/identity.key` (file permissions should be `0600`)
+- **Private key**: 32 bytes, stored at `~/.gang/identity.key`. Permissions are enforced: a key file with a mode looser than `0600` is repaired to `0600` (with a warning) before it is used, and new key files are created `0600`.
 - **Public key**: Derived from the private key
 - **Peer ID**: `12D3-` prefix + hex-encoded first 16 bytes of Blake3 hash of the public key
 
 Key generation uses `OsRng` via the `rand` crate (OS-level CSPRNG).
+
+### Unified peer-id derivation (SEC-03)
+
+Both a peer's own id and the id derived for a *remote* peer by the libp2p
+transport now use the same canonical scheme: the raw Ed25519 public key →
+`PeerId::from_ed25519_bytes`. Previously the transport derived remote ids from
+the libp2p multihash, which never matched the core derivation — so trust-store
+`peer_rules` keyed on a remote id were silently ineffective. With derivation
+unified, `peer_rules` are enforceable. This is a breaking change for any
+recorded remote id (see [MIGRATION-v2.md](MIGRATION-v2.md)).
 
 ```bash
 gang identity generate        # Creates ~/.gang/identity.key
@@ -57,6 +67,8 @@ gang identity show            # Displays peer ID and public key hex
 The trust store (`~/.gang/trusted_peers.json`) lists public keys that are authorized to deploy capabilities. The robot agent checks the trust store during manifest verification.
 
 Adding a peer to the trust store is an explicit operator action — there is no automatic trust establishment.
+
+**Fail closed:** a malformed or unreadable trust store aborts agent startup. The agent never starts with an empty/permissive trust store as a fallback.
 
 ## Manifest signing
 
@@ -126,6 +138,13 @@ peer_id = "*"
 can_deploy = true
 ```
 
+### Fail-closed loading
+
+A malformed or unreadable policy file aborts agent startup. The agent refuses to
+fall back to a permissive policy that would allow everything — a broken policy
+is a hard error, not a silent downgrade. (An *absent* policy in local/dev mode
+is a separate, explicit code path.)
+
 ### Policy evaluation
 
 Policy is evaluated at two points:
@@ -145,9 +164,10 @@ Capability patterns use glob matching (via the `glob_match` crate):
 
 ### Resource limits
 
-- **Fuel metering**: Each component invocation gets a configurable fuel budget. One WASM instruction consumes one unit of fuel. When fuel is exhausted, execution traps.
+- **Fuel metering**: Each component invocation gets a fuel budget derived from the manifest and bounded by a hard cap. One WASM instruction consumes one unit of fuel. When fuel is exhausted, execution traps.
 - **Epoch-based deadlines**: The runtime checks wall-clock time at epoch boundaries. Components that exceed their wall-clock deadline are interrupted.
-- **Memory limits**: Wasmtime's built-in memory limits prevent unbounded allocation.
+- **Memory limits**: A linear-memory ceiling derived from the manifest (bounded by a hard cap) is enforced via Wasmtime's `StoreLimits`; growing memory past the cap traps.
+- **Integrity re-check**: Component bytes are re-hashed (Blake3) immediately before execution and compared against the manifest hash. A mismatch refuses execution. There is no silent fallback to direct broker invocation — a WASM execution failure is terminal.
 
 ### Capability enforcement
 
@@ -168,20 +188,22 @@ WASM components have:
 
 ### Filesystem broker
 
-- **Symlink jail**: All paths are resolved (canonicalized) and checked against the jail root. If the resolved path is outside the jail, the request is rejected.
+- **Canonicalized symlink jail (TOCTOU-closed, SEC-10)**: Paths are canonicalized before use; for writes to new files, the *parent* directory is canonicalized. The canonicalized path is checked against the jail root, and callers operate on the returned canonical path — closing the time-of-check/time-of-use window where an attacker swaps in a symlink after the check. Paths that resolve outside the jail are rejected.
 - **Pattern matching**: Only paths matching the declared `FsAccessPattern` patterns are accessible.
 - **Permission flags**: Each pattern has explicit `read`, `write`, `execute` flags.
 
 ### Process broker
 
-- **Command allowlist**: The `allowed_commands` field on `ProcessSpawn` capabilities lists which commands can run, with glob support.
+- **Absolute, allowlisted commands**: A command must be an absolute path and, after canonicalization (resolving symlinks and `..`), must match the allowlist. Relative commands and non-allowlisted paths are rejected.
+- **Scrubbed environment**: The child environment is cleared (`env_clear`) before spawn; the broker sets the only `PATH` the child ever sees. The subprocess does not inherit the agent's environment.
 - **Wall-clock timeout**: Each subprocess has a configurable timeout. The broker enforces the minimum of the per-request timeout and the broker's maximum timeout.
 - **Captured stdio**: Subprocess stdout/stderr are piped and returned as data. stdin is `/dev/null`. The subprocess never inherits the agent's terminal.
 
 ### Network probe broker
 
 - Provides structured probing primitives (ping, DNS, port check, traceroute) rather than raw socket access.
-- Userspace implementations: ping uses TCP connect to port 80, DNS uses standard library resolution, traceroute is a stub in userspace contexts.
+- **SSRF hardening**: Every probe target is checked against a configured host/CIDR allowlist. Sensitive ranges — IPv4 loopback (`127.0.0.0/8`), link-local/cloud-metadata (`169.254.0.0/16`, including `169.254.169.254`), and IPv6 ULA — are blocked *unconditionally*, regardless of the allowlist, to prevent SSRF and cloud-metadata exfiltration. An empty allowlist denies all targets.
+- Userspace implementations: ping uses TCP connect, DNS uses standard library resolution, traceroute is a stub in userspace contexts.
 
 ## Audit logging
 
@@ -201,9 +223,23 @@ pub struct AuditRecord {
 }
 ```
 
-Records are written as length-prefixed CBOR to an append-only log at `/var/lib/gang/audit.log`. The log rotates by size (configurable, default 10 MB).
+Records are written as length-prefixed CBOR to an append-only log. Each record
+is linked into a **Blake3 hash chain** — the stored hash for record *n* is
+`blake3(prev_hash || seq || cbor(record))` — so any reordering, deletion, or
+in-place edit breaks the chain. `AuditLog::verify_chain()` walks the log and
+detects tampering. The log file is created with `0600` permissions and rotates
+by size (configurable).
 
-The audit log is designed to be forensically useful: it records not just what ran, but who ran it, what capabilities were used, how much data was read/written, and whether execution succeeded or failed.
+The audit log is designed to be forensically useful: it records not just what ran, but who ran it, what capabilities were used, how much data was read/written, and whether execution succeeded or failed — and now whether the record sequence is intact.
+
+## Replay protection (control plane)
+
+Control requests carry a per-request nonce and a timestamp. The agent rejects
+requests whose timestamp is outside the freshness window or whose nonce has
+already been seen, defeating replay of a captured control message. Because the
+nonce/timestamp are required, a pre-2.0 operator that omits them is rejected —
+all agents and operators must run compatible versions (see
+[MIGRATION-v2.md](MIGRATION-v2.md)).
 
 ## Transport encryption
 
@@ -215,7 +251,7 @@ QUIC connections provide their own TLS 1.3 encryption in addition to the Noise l
 
 1. **Restrict the trust store** — only add operator keys that need to deploy to specific robots.
 2. **Use restrictive policies** — start with deny-all and add only the capabilities each component needs.
-3. **Protect identity keys** — set file permissions to `0600` on `identity.key` files.
+3. **Protect identity keys** — the agent enforces `0600` on `identity.key`, but keep the containing directory and backups equally restricted.
 4. **Monitor audit logs** — forward audit logs to a central monitoring system for anomaly detection.
 5. **Pin component hashes** — after verifying a component, record its Blake3 hash and verify on subsequent deploys.
 6. **Run your own relay** — don't rely on third-party relays for production traffic.
