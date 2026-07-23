@@ -1,6 +1,6 @@
 # Base image for Ganglion test harness nodes.
 # Provides networking tools for simulating hostile network conditions.
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.88-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y \
     pkg-config \

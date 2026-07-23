@@ -1,6 +1,6 @@
 # TODO: pin by digest in CI where docker is available
-# (e.g. docker buildx imagetools inspect rust:1.85-slim-bookworm)
-FROM rust:1.85-slim-bookworm AS builder
+# (e.g. docker buildx imagetools inspect rust:1.88-slim-bookworm)
+FROM rust:1.88-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY . .
