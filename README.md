@@ -2,6 +2,9 @@
 
 Hostile-network reachability and sandboxed field tooling for ROS 2 robot fleets.
 
+![status: usable](https://img.shields.io/badge/status-usable-green) [![crates.io](https://img.shields.io/crates/v/gang.svg)](https://crates.io/crates/gang) [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+![gang demo](docs/assets/ganglion-demo.gif)
 Ganglion is the connectivity and tool-execution substrate for reaching robots deployed inside customer networks you don't own and can't configure. It is not a fleet management platform, not a robot autonomy framework, and not a SaaS product.
 
 ## Architecture
@@ -21,7 +24,7 @@ Three layers:
 cargo install gang
 
 # ...or build from source (see CONTRIBUTING.md):
-#   git clone https://github.com/TafyLabs/ganglion.git
+#   git clone https://github.com/RobotDen/ganglion.git
 #   cd ganglion && cargo install --path crates/gang-cli
 
 # Run the self-contained demo — no Docker, no ROS 2, no external dependencies

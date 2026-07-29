@@ -21,7 +21,7 @@ This puts `gang` on your PATH.
 ### From source (contributors)
 
 ```bash
-git clone https://github.com/TafyLabs/ganglion.git
+git clone https://github.com/RobotDen/ganglion.git
 cd ganglion
 
 # Set up git hooks (recommended for development)

@@ -150,7 +150,7 @@ has landed. See [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) for upgrade steps.
 
 - Documentation truth pass: corrected test counts (now **337** across 13
   crates, plus 1 ignored live-network test), the crate dependency graph, the standard-library table (adds
-  rosbag-slice), the canonical repository URL (`TafyLabs/ganglion`), and CLI
+  rosbag-slice), the canonical repository URL (`RobotDen/ganglion`), and CLI
   reference transcripts/flags to match real output.
 - Added [docs/MIGRATION-v2.md](docs/MIGRATION-v2.md) and a
   [docs/README.md](docs/README.md) documentation index.

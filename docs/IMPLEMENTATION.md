@@ -139,9 +139,9 @@ Four independent repos, each a Cargo workspace (or single crate where appropriat
 
 | Repo | Contents | Primary crate(s) |
 |------|----------|-------------------|
-| `TafyLabs/ganglion` | Core library, spec, docs, test harness | `gang-core`, `gang-wasm-host` |
-| `TafyLabs/ganglion-libp2p` | libp2p transport adapter | `gang-libp2p` |
-| `TafyLabs/ganglion-ros` | ROS 2 integration broker | `gang-ros` |
+| `RobotDen/ganglion` | Core library, spec, docs, test harness | `gang-core`, `gang-wasm-host` |
+| `RobotDen/ganglion-libp2p` | libp2p transport adapter | `gang-libp2p` |
+| `RobotDen/ganglion-ros` | ROS 2 integration broker | `gang-ros` |
 | `TafyLabs/gang` | CLI binary | `gang` |
 
 **Rationale for keeping `gang-wasm-host` in the core repo:** the WASM host is tightly coupled to `gang-core`'s policy engine and audit logger. Separate repo adds cross-repo version coordination pain with no independence benefit.
@@ -207,7 +207,7 @@ These are the recommended starting points. Pin exact versions in `Cargo.lock`; u
 
 Set up all four repos with CI, licensing, and the foundational type system.
 
-**1.1 — `TafyLabs/ganglion` repo init**
+**1.1 — `RobotDen/ganglion` repo init**
 - [ ] Create repo with Apache-2.0 license, README, `.gitignore`
 - [ ] Cargo workspace with two members: `gang-core`, `gang-wasm-host`
 - [ ] Copy `docs/DesignSpec.md` into repo
@@ -236,13 +236,13 @@ Set up all four repos with CI, licensing, and the foundational type system.
 - [ ] Error types: `GanglionError`, `TransportError`, `PolicyError`, `AuditError`
 - [ ] Unit tests for all type construction and validation
 
-**1.3 — `TafyLabs/ganglion-libp2p` repo init**
+**1.3 — `RobotDen/ganglion-libp2p` repo init**
 - [ ] Create repo with Apache-2.0 license
 - [ ] Single crate, depends on `gang-core` (git dependency initially)
 - [ ] GitHub Actions CI mirroring core repo
 - [ ] Stub `TransportAdapter` impl that compiles but panics
 
-**1.4 — `TafyLabs/ganglion-ros` repo init**
+**1.4 — `RobotDen/ganglion-ros` repo init**
 - [ ] Create repo with Apache-2.0 license
 - [ ] Single crate, depends on `gang-core` and `gang-libp2p`
 - [ ] CI with ROS 2 Jazzy container for testing

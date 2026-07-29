@@ -6,7 +6,7 @@
 > [IMPLEMENTATION.md](IMPLEMENTATION.md) for implementation status. Where this
 > document and the current docs disagree, the current docs win.
 
-**Status:** Draft for v0.1 release (historical) **Repository:** `TafyLabs/ganglion` **License:** Apache-2.0 **Authors:** Tafy Labs **Last updated:** April 23, 2026
+**Status:** Draft for v0.1 release (historical) **Repository:** `RobotDen/ganglion` **License:** Apache-2.0 **Authors:** Tafy Labs **Last updated:** April 23, 2026
 
 ---
 
