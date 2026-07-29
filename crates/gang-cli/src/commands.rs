@@ -2262,8 +2262,10 @@ pub async fn capability_scaffold(
     }
 
     // Write the real WIT interface into the project. Embedded at build time
-    // from the in-repo canonical copy so scaffolds are usable out of the box.
-    const GANGLION_WIT: &str = include_str!("../../gang-wasm-host/wit/ganglion.wit");
+    // from this crate's vendored copy (canonical copy lives in gang-wasm-host;
+    // the sync test below keeps them identical). A path outside the crate would
+    // break `cargo package` verification.
+    const GANGLION_WIT: &str = include_str!("../wit/ganglion.wit");
     let wit_dir = project_dir.join("wit");
     std::fs::create_dir_all(&wit_dir)?;
     std::fs::write(wit_dir.join("ganglion.wit"), GANGLION_WIT)?;
@@ -2974,5 +2976,22 @@ fn format_duration(secs: u64) -> String {
         format!("{m}m {s}s")
     } else {
         format!("{secs}s")
+    }
+}
+
+#[cfg(test)]
+mod wit_sync_tests {
+    /// The vendored WIT copy in this crate must stay identical to the
+    /// canonical one in gang-wasm-host. Runtime read (not include_str!) so
+    /// packaged builds outside the workspace skip it gracefully.
+    #[test]
+    fn vendored_wit_matches_canonical() {
+        let vendored = include_str!("../wit/ganglion.wit");
+        let canonical_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../gang-wasm-host/wit/ganglion.wit");
+        if canonical_path.exists() {
+            let canonical = std::fs::read_to_string(canonical_path).unwrap();
+            assert_eq!(vendored, canonical, "run: cp crates/gang-wasm-host/wit/ganglion.wit crates/gang-cli/wit/");
+        }
     }
 }
