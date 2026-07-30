@@ -208,6 +208,12 @@ cargo doc --no-deps --open
 ./scripts/setup-hooks.sh
 ```
 
+## Using Ganglion in production?
+
+Ganglion is Apache-2.0 — run it, fork it, no strings. If it saves you a truck roll, [sponsoring the den](https://github.com/sponsors/karma0) is a welcome thanks.
+
+When one engineer's setup becomes a fleet with auditors, SLAs, and many sites, that's the line where the open core ends and [FleetLink](https://tafylabs.io) begins: the enterprise layer built on this substrate (multi-tenant gateway, hosted/HA relay, SSO and RBAC, compliance reporting, fleet-scale OTA) plus fixed-scope architecture reviews and implementations by the people who wrote Ganglion. Start at [tafylabs.io](https://tafylabs.io) or email bobby@tafy.ai.
+
 ## License
 
 Apache-2.0
