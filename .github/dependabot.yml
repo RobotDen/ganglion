@@ -7,6 +7,17 @@ updates:
     groups:
       cargo-minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # rand is pinned to 0.8: ed25519-dalek 2.x requires rand_core 0.6.
+      # Bump only in lockstep with an ed25519-dalek upgrade (see Cargo.toml).
+      - dependency-name: "rand"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # wasmtime tracks the 36 LTS train deliberately (security backports).
+      # Major-train jumps are made on our own schedule, not per-release.
+      - dependency-name: "wasmtime"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "wasmtime-wasi"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"

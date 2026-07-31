@@ -107,7 +107,16 @@ jobs:
             gang-capability-topic-echo
             gang
           )
+          version="${GITHUB_REF_NAME#v}"
           for crate in "${crates[@]}"; do
+            # Idempotent: skip crates whose version already exists on
+            # crates.io (e.g. after a manual publish), so re-running a
+            # release never fails on duplicates.
+            if curl -fsSL "https://crates.io/api/v1/crates/${crate}/${version}" \
+                 -H 'User-Agent: ganglion-release-ci' -o /dev/null 2>/dev/null; then
+              echo "=== ${crate} ${version} already on crates.io — skipping ==="
+              continue
+            fi
             echo "=== Publishing ${crate} ==="
             cargo publish -p "${crate}" --locked
             if [ "${crate}" != "gang" ]; then

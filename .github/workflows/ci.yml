@@ -49,7 +49,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo test
+      # On failure, surface the failing test names in the step summary so the
+      # cause is visible without downloading raw logs.
+      - name: Run cargo test
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo test 2>&1 | tee /tmp/test-out.log; then
+            {
+              echo "### Failing tests (${{ matrix.os }})"
+              echo '```'
+              grep -E "^test .* \.\.\. FAILED|panicked at|---- .* stdout ----" /tmp/test-out.log | head -60
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
   msrv:
     name: MSRV (1.88)
@@ -91,17 +105,39 @@ jobs:
       - name: Install cargo-component (builds the e2e test component)
         run: cargo install cargo-component --locked
       - name: Open warehouse scenario
-        run: ./test-harness/run-tests.sh --scenario open-warehouse
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! ./test-harness/run-tests.sh --scenario open-warehouse 2>&1 | tee /tmp/harness.log; then
+            {
+              echo "### open-warehouse failure (last 120 lines)"
+              echo '```'
+              tail -120 /tmp/harness.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
       - name: E2E dispatch smoke test
-        run: ./test-harness/e2e-dispatch/run-test.sh
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! ./test-harness/e2e-dispatch/run-test.sh 2>&1 | tee /tmp/e2e.log; then
+            {
+              echo "### e2e smoke failure (last 120 lines)"
+              echo '```'
+              tail -120 /tmp/e2e.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
   harness-nat:
     name: Docker Test Harness (NAT scenarios)
-    # topology validated statically; promote to blocking once green in CI
+    # Promoted to blocking 2026-07-31: all three scenarios green in CI.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
+    continue-on-error: false
     strategy:
       fail-fast: false
       matrix:
@@ -110,7 +146,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: ./test-harness/run-tests.sh --scenario ${{ matrix.scenario }}
+      - name: Run NAT scenario
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! ./test-harness/run-tests.sh --scenario ${{ matrix.scenario }} 2>&1 | tee /tmp/harness.log; then
+            {
+              echo "### ${{ matrix.scenario }} failure (last 120 lines)"
+              echo '```'
+              tail -120 /tmp/harness.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
   doc:
     name: Documentation
