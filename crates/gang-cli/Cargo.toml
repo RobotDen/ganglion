@@ -1,6 +1,6 @@
 [package]
 name = "gang"
-description = "CLI for Ganglion — reach, observe, and act on ROS 2 robots behind hostile networks"
+description = "CLI for Ganglion — secure connectivity and auditable tool execution for ROS 2 robot fleets on hostile networks: outbound-only reachability, signed WASM tooling, default-deny policy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
