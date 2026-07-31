@@ -19,25 +19,90 @@ Three layers:
 
 ## Quick start
 
+Five steps: install, prove the pipeline locally, stand up a relay, connect a robot, run tooling from your workstation.
+
+### 1. Install (workstation and robot)
+
 ```bash
-# Install the CLI from crates.io (Rust 1.88+)
+# From crates.io (Rust 1.88+; Debian/Ubuntu system deps: pkg-config libssl-dev)
 cargo install gang
 
 # ...or build from source (see CONTRIBUTING.md):
 #   git clone https://github.com/RobotDen/ganglion.git
 #   cd ganglion && cargo install --path crates/gang-cli
-
-# Run the self-contained demo — no Docker, no ROS 2, no external dependencies
-gang demo
-
-# Diagnose local network archetype
-gang diagnose
-
-# Or run a network archetype test scenario (requires Docker)
-gang test-archetype open-warehouse
 ```
 
-See [docs/QUICKSTART.md](docs/QUICKSTART.md) for a detailed walkthrough.
+### 2. 60-second proof
+
+```bash
+gang demo
+```
+
+Runs the whole pipeline on your machine — keygen, manifest signing, deploy, policy check, sandboxed invoke, audit log — with no Docker, no ROS 2, no network. Real (trimmed) output:
+
+```console
+$ gang demo
+=== Ganglion v2.0.0 Demo ===
+
+Operator identity: 12D3-c2ace1a32fd67c0c8c66976336bceead
+Robot agent:       12D3-44f2a6a68b5e33b7086ec7e183b26d05
+[log lines]
+--- Invoking diagnostics ---
+System Information:
+  Hostname:  vm
+  OS:        linux 6.18.5
+  Arch:      x86_64
+  ...
+--- Audit log ---
+  12D3-c2ace1a32fd67c0c8c66976336bceead invoked 'diagnostics' v0.1.0 at 18:47:54 -> Success
+```
+
+### 3. Set up a relay (server)
+
+Robots are reached through a circuit relay, never by DNS name or inbound port. On any host both your workstation and the robots can dial:
+
+```bash
+gang relay --port 4001 --data-dir /var/lib/gang-relay
+```
+
+The startup log prints the relay's libp2p peer ID (`local_peer_id=12D3KooW...`). The dialable relay multiaddr is `/ip4/<server-ip>/tcp/4001/p2p/<that-id>`, for example:
+
+```
+/ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
+```
+
+### 4. Connect a robot
+
+Install `gang` on the robot too, then run the agent pointing at the relay. The robot dials out; nothing dials in:
+
+```bash
+gang agent --data-dir /var/lib/gang-agent \
+    -r /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
+```
+
+The agent retries the relay every 5 seconds until it logs `Connected to relay. Waiting for operator connections...`, and prints the exact `gang peer add` line to run on your workstation.
+
+### 5. Register, deploy, run (workstation)
+
+```bash
+gang identity show   # created on first use — `gang demo` in step 2 already made one
+gang peer add robot-a 12D3-f721be4d302e7da31bebf3b89e2b9f53 \
+    --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk \
+    --role robot-agent
+
+gang deploy robot-a my-tool.wasm   # remote dispatch: in progress — see Fleet status below
+gang run robot-a my-tool
+```
+
+`robot-a` is a **local alias** stored in `~/.gang/peers.json`, mapped to the robot's Ed25519-derived peer ID — name resolution never touches DNS.
+
+### Fleet status: what works today
+
+> **Built and verified:** everything local plus the connectivity layer — `gang demo`, identity, component signing, the policy/audit pipeline, local deploy/run against an on-machine agent, the relay server, robot agents that dial out and stay connected (with retry), the peer registry, and the TOFU host-key machinery.
+>
+> **In progress:** the operator-side dispatch hop — sending `deploy`/`run`/`caps` over the relay circuit and returning results. Today those commands against a *remote* peer exit with a clear "not yet implemented (ADR-020 Phase 32)" error; `logs`, `list`, `connect`, and `transport-stats` depend on the same hop and are stubs. Local deploy/run exercises the identical signing/policy/audit path, so tools built now run unchanged when the hop lands. Tracked in [ADR-020](docs/adr/ADR-020-remote-dispatch-and-e2e-test.md) and the roadmap issues.
+
+See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full walkthrough with real transcripts, including how peer IDs, relays, and multiaddrs fit together.
 
 ## Workspace structure
 
@@ -131,7 +196,7 @@ gang list                             List reachable robots in the fleet [WIP]
 gang connect <robot>                  Establish a session via relay [WIP]
 ```
 
-See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full details, flags, and examples.
+Commands tagged `[WIP]` wait on the operator remote-dispatch hop — see [Fleet status](#fleet-status-what-works-today) above. See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full details, flags, and examples.
 
 ## Capability groups
 
@@ -224,6 +289,10 @@ cargo doc --no-deps --open
 # Set up git hooks
 ./scripts/setup-hooks.sh
 ```
+
+### Testing
+
+`cargo test` covers the workspace. For integration testing of gang itself across simulated hostile networks (NAT, DMZ, CGNAT), use the Docker-based test harness — `gang test-archetype <archetype>` with the scenarios under [test-harness/](test-harness/); results and measurements are in [docs/VALIDATION.md](docs/VALIDATION.md).
 
 ## Using Ganglion in production?
 
