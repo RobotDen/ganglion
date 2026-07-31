@@ -514,12 +514,12 @@ Relay is running. Press Ctrl+C to stop.
 | `--data-dir <PATH>` | Directory for the relay's persisted identity key. The key path is passed directly to the relay — no environment variable is set or read at relay runtime. Default: `~/.gang/identity.key`. (`GANG_KEY_PATH` is still honored by the default key-path resolution used by other commands.) |
 
 The relay generates or loads an identity from `~/.gang/identity.key` (or
-`--data-dir`). Build the multiaddr clients dial from the server's address plus
-the **libp2p-format** peer ID from the `local_peer_id=` log line — the
-`Relay multiaddrs (for client config)` lines currently embed the
-Ganglion-native `12D3-<hex>` ID, which multiaddr parsing does not accept
-(known gap; the printed lines will switch to the dialable form). See
-`deploy/relay/README.md` for production deployment with Docker.
+`--data-dir`). It prints both of its identities, labeled: the Ganglion-native
+`12D3-<hex>` ID (used in trust stores and policy rules) and the
+**libp2p-format** `12D3KooW…` ID (the dialable form). The
+`Relay multiaddrs (for client config)` lines carry the dialable form —
+copy one of those directly into `gang agent -r` / `gang peer add --relay`.
+See `deploy/relay/README.md` for production deployment with Docker.
 
 ## Peer management
 
