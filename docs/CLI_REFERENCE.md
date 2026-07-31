@@ -137,8 +137,14 @@ Start a robot agent. Without `--relay`, runs in local-only mode for development.
 $ gang agent --data-dir /tmp/gang-agent
 
 # Remote mode (connects to relay, accepts operator connections)
-$ gang agent --data-dir /tmp/gang-agent -r /ip4/relay.example.com/tcp/4001/p2p/12D3-relay
+$ gang agent --data-dir /tmp/gang-agent \
+    -r /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 ```
+
+The `/p2p/` component of the relay multiaddr must be the relay's
+**libp2p-format** peer ID (base58, `12D3KooW...`) — the Ganglion-native
+`12D3-<hex>` form does not parse in a multiaddr. `gang relay` logs the correct
+value as `local_peer_id=` at startup.
 
 | Flag | Description |
 |------|-------------|
@@ -479,12 +485,12 @@ Run a circuit relay v2 server for NAT traversal. This is the bootstrap relay
 described in the design spec (`relay.gang.tafy.dev`). Robot agents behind NAT
 connect to the relay so operators can reach them.
 
-```bash
+```console
 $ gang relay
 Ganglion Relay Server
 ====================
 
-Peer ID:      12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
+Peer ID:      12D3-782c28d3bf62449667fa35b25bf7fdae
 Relay mode:   server
 Metrics port: 9090 (not yet active)
 
@@ -492,6 +498,11 @@ Listen addresses:
   /ip4/0.0.0.0/tcp/4001
   /ip4/0.0.0.0/udp/4001/quic-v1
 
+Relay multiaddrs (for client config):
+  /ip4/0.0.0.0/tcp/4001/p2p/12D3-782c28d3bf62449667fa35b25bf7fdae
+  /ip4/0.0.0.0/udp/4001/quic-v1/p2p/12D3-782c28d3bf62449667fa35b25bf7fdae
+
+[log lines] Building Ganglion swarm local_peer_id=12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk relay_server=true
 Relay is running. Press Ctrl+C to stop.
 ```
 
@@ -502,9 +513,13 @@ Relay is running. Press Ctrl+C to stop.
 | `--metrics-port <PORT>` | Metrics HTTP port (placeholder). Default: `9090`. |
 | `--data-dir <PATH>` | Directory for the relay's persisted identity key. The key path is passed directly to the relay — no environment variable is set or read at relay runtime. Default: `~/.gang/identity.key`. (`GANG_KEY_PATH` is still honored by the default key-path resolution used by other commands.) |
 
-The relay generates or loads an identity from `~/.gang/identity.key` and
-prints the full relay multiaddr that clients should put in their `relay_addrs`
-config. See `deploy/relay/README.md` for production deployment with Docker.
+The relay generates or loads an identity from `~/.gang/identity.key` (or
+`--data-dir`). Build the multiaddr clients dial from the server's address plus
+the **libp2p-format** peer ID from the `local_peer_id=` log line — the
+`Relay multiaddrs (for client config)` lines currently embed the
+Ganglion-native `12D3-<hex>` ID, which multiaddr parsing does not accept
+(known gap; the printed lines will switch to the dialable form). See
+`deploy/relay/README.md` for production deployment with Docker.
 
 ## Peer management
 
@@ -513,7 +528,8 @@ config. See `deploy/relay/README.md` for production deployment with Docker.
 Register a known peer (robot, relay, or operator).
 
 ```bash
-$ gang peer add warehouse-bot 12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890 --relay /ip4/relay.example.com/tcp/4001/p2p/12D3-relay
+$ gang peer add warehouse-bot 12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890 \
+    --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 ```
 
 A malformed peer id is rejected with a clean error (exit code 1):
@@ -559,7 +575,7 @@ Show current configuration from `~/.gang/config.toml`.
 Set a configuration value.
 
 ```bash
-$ gang config set default_relay /ip4/relay.example.com/tcp/4001/p2p/12D3-relay
+$ gang config set default_relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 $ gang config set host_key_policy tofu
 ```
 
