@@ -2924,10 +2924,19 @@ pub async fn relay(
         ..Default::default()
     };
 
+    // Create the transport adapter first so the printed client-config
+    // multiaddrs can carry the LIBP2P (base58 `12D3KooW…`) peer id — the only
+    // form that is dialable in a `/p2p/` multiaddr component. The gang peer id
+    // (`12D3-<hex>`) identifies this relay in trust stores and policy, but a
+    // multiaddr built with it will not parse.
+    let adapter = gang_libp2p::Libp2pTransportAdapter::new(config).await?;
+    let libp2p_peer_id = *adapter.libp2p_peer_id();
+
     println!("Ganglion Relay Server");
     println!("====================");
     println!();
-    println!("Peer ID:      {peer_id}");
+    println!("Peer ID (gang identity): {peer_id}");
+    println!("Peer ID (libp2p/dial):   {libp2p_peer_id}");
     println!("Relay mode:   server");
     println!("Metrics port: {metrics_port} (not yet active)");
     println!();
@@ -2937,15 +2946,12 @@ pub async fn relay(
     }
     println!();
 
-    // Print the relay multiaddr that clients should use
+    // Print the relay multiaddr that clients should use (dialable form).
     println!("Relay multiaddrs (for client config):");
     for addr in &addrs {
-        println!("  {addr}/p2p/{peer_id}");
+        println!("  {addr}/p2p/{libp2p_peer_id}");
     }
     println!();
-
-    // Create the transport adapter and run
-    let adapter = gang_libp2p::Libp2pTransportAdapter::new(config).await?;
 
     println!("Relay is running. Press Ctrl+C to stop.");
     println!();
