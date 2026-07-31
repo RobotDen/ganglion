@@ -18,6 +18,9 @@ Index of the Ganglion documentation set. Start with the
 - [NETWORK_ARCHETYPES.md](NETWORK_ARCHETYPES.md) — the five network archetypes,
   detection probes, and transport recommendations. See also the one-page
   [decision flowchart](decision-flowchart.svg).
+- [COMPARISON.md](COMPARISON.md) — when to use Ganglion vs. (or with) VPNs,
+  Zenoh, DDS, and the commercial platforms, plus an honest "not for you if…"
+  list and a decision guide.
 
 ## Building capabilities
 
