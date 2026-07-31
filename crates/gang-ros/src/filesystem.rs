@@ -23,7 +23,76 @@ pub struct FsRule {
 
 impl FsBroker {
     pub fn new(allowed_patterns: Vec<FsRule>) -> Self {
+        // Canonicalize the static (pre-glob) prefix of every pattern so that
+        // rules match the canonicalized request paths produced by
+        // `check_access`. Without this, a jail root that is itself reached
+        // through a symlink (e.g. macOS's `/tmp` -> `/private/tmp`, or
+        // `/var/folders/...` tempdirs) would never match its own rule: the
+        // request canonicalizes to `/private/...` while the raw pattern still
+        // says `/tmp/...`, denying all access inside the jail.
+        let allowed_patterns = allowed_patterns
+            .into_iter()
+            .map(|mut rule| {
+                rule.pattern = Self::canonicalize_pattern(&rule.pattern);
+                rule
+            })
+            .collect();
         Self { allowed_patterns }
+    }
+
+    /// Rewrite `pattern` so its static prefix (everything before the first
+    /// glob metacharacter) is canonicalized against the live filesystem.
+    ///
+    /// The deepest *existing* ancestor of the static prefix is resolved with
+    /// `std::fs::canonicalize`; the non-existing remainder and the glob tail
+    /// are re-appended verbatim. If nothing on the prefix exists yet the
+    /// pattern is returned unchanged.
+    fn canonicalize_pattern(pattern: &str) -> String {
+        // Split at the first glob metacharacter.
+        let split_at = pattern.find(['*', '?', '[', '{']).unwrap_or(pattern.len());
+        let (static_part, glob_tail) = pattern.split_at(split_at);
+
+        // The static part may end mid-component (e.g. "/tmp/gang-*"): only
+        // the directory portion up to the last separator is a real path.
+        let (dir_part, partial) = match static_part.rfind('/') {
+            Some(i) => static_part.split_at(i + 1),
+            None => return pattern.to_string(),
+        };
+
+        // Walk up to the deepest existing ancestor of the directory portion.
+        let dir = Path::new(dir_part);
+        let mut existing = dir;
+        let mut remainder = PathBuf::new();
+        loop {
+            if existing.exists() {
+                break;
+            }
+            match existing.parent() {
+                Some(parent) => {
+                    if let Some(name) = existing.file_name() {
+                        remainder = Path::new(name).join(&remainder);
+                    }
+                    existing = parent;
+                }
+                None => return pattern.to_string(),
+            }
+        }
+
+        let Ok(canonical) = std::fs::canonicalize(existing) else {
+            return pattern.to_string();
+        };
+
+        let mut rebuilt = canonical;
+        if remainder.as_os_str() != "" {
+            rebuilt = rebuilt.join(remainder);
+        }
+        let mut s = rebuilt.to_string_lossy().to_string();
+        if !s.ends_with('/') {
+            s.push('/');
+        }
+        s.push_str(partial);
+        s.push_str(glob_tail);
+        s
     }
 
     /// Check if a path is permitted under the current rules.
@@ -553,5 +622,45 @@ mod tests {
             result.is_ok(),
             "read of existing file in allowed dir must succeed"
         );
+    }
+
+    /// A jail root reached through a symlink (macOS: `/tmp` -> `/private/tmp`,
+    /// `/var/folders` tempdirs) must still match its own rule: the request is
+    /// canonicalized, so the pattern's static prefix must be canonicalized
+    /// too. Reproduces the macOS failure mode on any platform.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_jail_root_still_matches_rules() {
+        let outer = TempDir::new().unwrap();
+        let real_root = outer.path().join("real-root");
+        std::fs::create_dir(&real_root).unwrap();
+        let link_root = outer.path().join("link-root");
+        std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+
+        // Configure the broker via the SYMLINK path, exactly as a user who
+        // writes `/tmp/gang/**` on macOS does.
+        let broker = FsBroker::new(vec![FsRule {
+            pattern: format!("{}/**", link_root.to_string_lossy()),
+            read: true,
+            write: true,
+        }]);
+
+        // New-file write through the symlink path must be allowed (the
+        // request canonicalizes to the real root).
+        let target = link_root.join("out.txt");
+        let allowed = broker.check_access(&target.to_string_lossy(), true);
+        assert!(
+            allowed.is_ok(),
+            "write inside a symlinked jail root must be allowed: {allowed:?}"
+        );
+
+        // And reads of an existing file through the symlink path too.
+        std::fs::write(real_root.join("in.txt"), b"x").unwrap();
+        let read = broker.check_access(&link_root.join("in.txt").to_string_lossy(), false);
+        assert!(read.is_ok(), "read inside a symlinked jail root: {read:?}");
+
+        // The jail still holds: outside paths remain denied.
+        let deny = broker.check_access(&outer.path().join("escape.txt").to_string_lossy(), true);
+        assert!(deny.is_err(), "outside the jail must still be denied");
     }
 }

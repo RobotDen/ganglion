@@ -2991,7 +2991,10 @@ mod wit_sync_tests {
             .join("../gang-wasm-host/wit/ganglion.wit");
         if canonical_path.exists() {
             let canonical = std::fs::read_to_string(canonical_path).unwrap();
-            assert_eq!(vendored, canonical, "run: cp crates/gang-wasm-host/wit/ganglion.wit crates/gang-cli/wit/");
+            assert_eq!(
+                vendored, canonical,
+                "run: cp crates/gang-wasm-host/wit/ganglion.wit crates/gang-cli/wit/"
+            );
         }
     }
 }
