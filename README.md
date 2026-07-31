@@ -1,21 +1,21 @@
 # Ganglion
 
-Hostile-network reachability and sandboxed field tooling for ROS 2 robot fleets.
+Secure connectivity and auditable tool execution for ROS 2 robot fleets on hostile networks — outbound-only reachability, signed WASM tooling, default-deny policy.
 
 ![status: usable](https://img.shields.io/badge/status-usable-green) [![crates.io](https://img.shields.io/crates/v/gang.svg)](https://crates.io/crates/gang) [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 ![gang demo](docs/assets/ganglion-demo.gif)
-Ganglion is the connectivity and tool-execution substrate for reaching robots deployed inside customer networks you don't own and can't configure. It is not a fleet management platform, not a robot autonomy framework, and not a SaaS product.
+Ganglion is the secure connectivity and auditable tool-execution substrate for reaching robots deployed inside customer networks you don't own and can't configure. It is not a fleet management platform, not a robot autonomy framework, and not a SaaS product.
 
 ## Architecture
 
 Three layers:
 
-1. **Connectivity (Layer 1)** — libp2p peer identity, secure channels, transports (TCP + QUIC), circuit relay v2, NAT traversal (DCUtR hole-punching). Robots dial out; operators reach robots via a shared relay. Inbound connectivity is never assumed.
+1. **Connectivity (Layer 1)** — libp2p peer identity, secure channels, transports (TCP + QUIC), circuit relay v2, NAT traversal ([DCUtR hole-punching](https://bford.info/pub/net/p2pnat/#3.2%20Establishing%20Peer-to-Peer%20Sessions)). Robots dial out; operators reach robots via a shared relay. Inbound connectivity is never assumed.
 
 2. **Tool Execution (Layer 2)** — WASM component runtime (Wasmtime). Signed, sandboxed, versioned tools with explicit capability declarations. No ambient authority. Memory limits, CPU budgets, and wall-clock deadlines enforced per-component.
 
-3. **Native Brokers (Layer 3)** — Privileged host processes that mediate WASM capability access to ROS 2 topics/services/parameters, filesystem, system logs, diagnostics, subprocess execution, network probing, and metrics. Pattern-based access gating with default-deny policy.
+3. **Native Brokers (Layer 3)** — Privileged host processes that mediate WASM capability access to ROS 2 topics/services/parameters, filesystem, system logs, diagnostics, subprocess execution, network probing, and metrics. **Pattern-based access gating with a default-deny policy.**
 
 ## Quick start
 
@@ -186,6 +186,23 @@ See [docs/NETWORK_ARCHETYPES.md](docs/NETWORK_ARCHETYPES.md) for a deep dive.
 - Fuel metering, manifest-derived memory limits, and epoch-based wall-clock deadlines for WASM execution (component bytes re-hashed before execution)
 
 See [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
+
+## Why gang and not X?
+
+Connectivity tools solve "can I reach the robot?" Ganglion solves "can I reach it **and** run only signed, sandboxed, policy-bounded, audited tooling on it?" — transports and VPNs are data/network planes; gang is a governed execution substrate that brings its own hostile-network connectivity and composes with DDS/Zenoh on the robot.
+
+| Tool | What it solves | What it doesn't | Use gang when |
+|------|----------------|-----------------|---------------|
+| SSH + VPN (Tailscale/WireGuard) | Machine-level network reachability | Anyone connected has ambient shell authority | "Who ran what on the robot?" must have a provable answer |
+| Husarnet | ROS-friendly P2P VPN across sites | Governance of what executes once connected | You need per-tool grants, not network membership |
+| OpenZiti | Zero-trust overlay for service access | No opinion on code that runs after connect | The unit to authorize is a tool run, not a network flow |
+| Zenoh | Scalable pub/sub/query data plane, DDS-over-WAN | Signed, sandboxed, audited execution | You need governed actions, not (just) data flow |
+| DDS (Fast DDS/Cyclone) | In-robot and LAN real-time pub/sub | NAT/CGNAT traversal; any execution model | Robots sit behind networks DDS discovery can't cross |
+| PyZeROS | Python ROS 2 clients over Zenoh, no ROS install | Security, policy, audit (not its goal) | Someone else's laptop must run bounded tooling remotely |
+| Foxglove | Robotics observability and visualization | Executing tooling on the robot | You need to act, not only observe (they compose) |
+| Viam / Transitive | Platform to build robot apps on | Default-deny signed tooling for existing ROS 2 stacks | You keep ROS 2 and add governance, not re-platform |
+
+Depth, "use both" patterns, and an honest "gang is not for you if…" list: [docs/COMPARISON.md](docs/COMPARISON.md).
 
 ## Building
 
