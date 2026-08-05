@@ -195,8 +195,9 @@ async fn connect_operator_via_circuit(
 
     let robot_gang_id = robot.local_peer_id_for_test();
     let mut via_relay = false;
-    wait_until("operator connection to the robot via circuit", async || {
-        match operator
+    wait_until(
+        "operator connection to the robot via circuit",
+        async || match operator
             .connected_peers()
             .await
             .iter()
@@ -207,8 +208,8 @@ async fn connect_operator_via_circuit(
                 true
             }
             None => false,
-        }
-    })
+        },
+    )
     .await;
 
     (operator, keypair, via_relay)
@@ -455,8 +456,9 @@ async fn direct_dispatch_deploy_and_invoke() {
 
     let robot_id = robot_transport.local_peer_id_for_test();
     let mut via_relay = true;
-    wait_until("operator's direct connection to the robot", async || {
-        match operator
+    wait_until(
+        "operator's direct connection to the robot",
+        async || match operator
             .connected_peers()
             .await
             .iter()
@@ -467,8 +469,8 @@ async fn direct_dispatch_deploy_and_invoke() {
                 true
             }
             None => false,
-        }
-    })
+        },
+    )
     .await;
     assert!(!via_relay, "direct dial must not be relayed");
 

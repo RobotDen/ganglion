@@ -432,20 +432,20 @@ pub async fn peer_add(
 ) -> anyhow::Result<()> {
     use gang_core::identity::{PeerEntry, PeerId, PeerRegistry, Role, default_registry_path};
 
-    let (peer_id, libp2p_id) = if let Some(ident) = gang_libp2p::identity_from_libp2p_str(peer_id_str)
-    {
-        // Dialable libp2p form: derive the canonical gang id from the
-        // embedded Ed25519 key and keep both.
-        (ident.gang_id, Some(ident.libp2p_id))
-    } else if let Ok(id) = PeerId::parse(peer_id_str) {
-        (id, None)
-    } else {
-        anyhow::bail!(
-            "Invalid peer ID '{peer_id_str}'. Expected either the dialable libp2p id \
+    let (peer_id, libp2p_id) =
+        if let Some(ident) = gang_libp2p::identity_from_libp2p_str(peer_id_str) {
+            // Dialable libp2p form: derive the canonical gang id from the
+            // embedded Ed25519 key and keep both.
+            (ident.gang_id, Some(ident.libp2p_id))
+        } else if let Ok(id) = PeerId::parse(peer_id_str) {
+            (id, None)
+        } else {
+            anyhow::bail!(
+                "Invalid peer ID '{peer_id_str}'. Expected either the dialable libp2p id \
              (base58 `12D3KooW…`, printed by `gang agent`/`gang relay` at startup) \
              or a gang id (`12D3-` + 32 hex chars)."
-        );
-    };
+            );
+        };
 
     let role = match role_str {
         "robot-agent" | "robot" => Role::RobotAgent,
@@ -624,7 +624,9 @@ pub async fn peer_show(name: &str, format: &OutputFormat) -> anyhow::Result<()> 
             println!("  Peer ID:  {}", entry.peer_id);
             match &entry.libp2p_id {
                 Some(id) => println!("  Dial ID:  {id}"),
-                None => println!("  Dial ID:  (none — re-add with the libp2p id for remote dispatch)"),
+                None => {
+                    println!("  Dial ID:  (none — re-add with the libp2p id for remote dispatch)")
+                }
             }
             println!("  Role:     {}", entry.role);
             if entry.relay_addrs.is_empty() {
@@ -863,8 +865,7 @@ pub fn verify_host_key(
             // was previously trusted with a different identity.
             if let Some(name) = peer_name
                 && let Some(existing) = trust_store.find_by_name(name)
-                && (existing.peer_id != *peer_id
-                    || existing.public_key != remote_public_key)
+                && (existing.peer_id != *peer_id || existing.public_key != remote_public_key)
             {
                 let idx = trust_store.index_of(&existing.peer_id).unwrap_or(0);
                 eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
@@ -1157,9 +1158,7 @@ async fn remote_dispatch_inner(
         transport
             .dial_multiaddr(&target.relay_addr)
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("cannot reach relay {}: {e}", target.relay_addr)
-            })?;
+            .map_err(|e| anyhow::anyhow!("cannot reach relay {}: {e}", target.relay_addr))?;
         loop {
             if !transport.connected_peers().await.is_empty() {
                 break;
@@ -1582,8 +1581,7 @@ pub async fn deploy(
             timestamp_ms: gang_core::message::unix_millis_now(),
         };
 
-        let timeout =
-            std::time::Duration::from_secs(timeout_secs.unwrap_or(DEPLOY_TIMEOUT_SECS));
+        let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(DEPLOY_TIMEOUT_SECS));
         let response = remote_dispatch(&remote, message, timeout).await?;
 
         return match response {
@@ -1612,9 +1610,7 @@ pub async fn deploy(
             ControlMessage::Error { code, message, .. } => {
                 anyhow::bail!("deploy to '{display}' rejected by robot ({code}): {message}")
             }
-            other => anyhow::bail!(
-                "unexpected response from robot '{display}': {other:?}"
-            ),
+            other => anyhow::bail!("unexpected response from robot '{display}': {other:?}"),
         };
     }
 
@@ -1695,8 +1691,7 @@ pub async fn run(
             timestamp_ms: gang_core::message::unix_millis_now(),
         };
 
-        let timeout =
-            std::time::Duration::from_secs(timeout_secs.unwrap_or(CONTROL_TIMEOUT_SECS));
+        let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(CONTROL_TIMEOUT_SECS));
         let response = remote_dispatch(&remote, message, timeout).await?;
 
         return match response {
@@ -1713,7 +1708,9 @@ pub async fn run(
                 }
             }
             ControlMessage::Error { code, message, .. } => {
-                anyhow::bail!("invocation of '{cap_name}' on '{display}' failed ({code}): {message}")
+                anyhow::bail!(
+                    "invocation of '{cap_name}' on '{display}' failed ({code}): {message}"
+                )
             }
             other => anyhow::bail!("unexpected response from robot '{display}': {other:?}"),
         };
@@ -1784,8 +1781,7 @@ pub async fn caps(
         let remote = prepare_remote(&target)?;
         let display = remote.display();
 
-        let timeout =
-            std::time::Duration::from_secs(timeout_secs.unwrap_or(CONTROL_TIMEOUT_SECS));
+        let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(CONTROL_TIMEOUT_SECS));
         let response = remote_dispatch(&remote, ControlMessage::ListCapabilities, timeout).await?;
 
         return match response {

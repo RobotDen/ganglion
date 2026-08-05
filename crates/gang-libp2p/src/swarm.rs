@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use libp2p::{
     Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder, connection_limits,
-    core::transport::ListenerId, dcutr, identify, kad, noise, ping, relay, request_response,
+    core::transport::ListenerId,
+    dcutr, identify, kad, noise, ping, relay, request_response,
     swarm::{NetworkBehaviour, behaviour::toggle::Toggle},
     tcp, yamux,
 };
@@ -277,8 +278,7 @@ pub async fn build_swarm(
             let ganglion_rpc = request_response::Behaviour::with_codec(
                 GanglionCodec,
                 ganglion_protocols(),
-                request_response::Config::default()
-                    .with_request_timeout(Duration::from_secs(120)),
+                request_response::Config::default().with_request_timeout(Duration::from_secs(120)),
             );
 
             Ok(GanglionBehaviour {
