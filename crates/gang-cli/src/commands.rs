@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::OutputFormat;
 
 /// Emit the standard notice for a command that is not yet available because it
-/// requires relay connectivity, honoring `--format`, then fail with a non-zero
-/// exit. Absent-relay stubs must not exit 0 (ADR-018).
+/// needs the presence/streaming layer (fleet discovery and long-lived robot
+/// sessions), honoring `--format`, then fail with a non-zero exit. Stubs must
+/// not exit 0 (ADR-018).
 pub fn wip_stub(command: &str, format: &OutputFormat) -> anyhow::Result<()> {
     if let OutputFormat::Json = format {
         // Clean JSON on stdout for machine consumers; the error still exits 1.
@@ -17,13 +18,13 @@ pub fn wip_stub(command: &str, format: &OutputFormat) -> anyhow::Result<()> {
                 "status": "unavailable",
                 "command": command,
                 "wip": true,
-                "reason": "requires relay connectivity",
+                "reason": "requires the presence/streaming layer (not yet implemented)",
             })
         );
     }
     anyhow::bail!(
-        "`gang {command}` requires relay connectivity [WIP]. \
-         Run `gang demo` to see current capabilities, or `gang status` for a summary."
+        "`gang {command}` requires the presence/streaming layer, which is not yet \
+         implemented [WIP]. Remote deploy/run/caps work today; see `gang status`."
     );
 }
 
@@ -156,7 +157,9 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         "status",
     ];
 
-    // WIP: require relay connectivity or produce only simulated output today.
+    // WIP: need the presence/streaming layer (fleet discovery, long-lived
+    // sessions) or produce only simulated output today. Remote deploy/run/caps
+    // over a relay circuit are implemented (ADR-020 Phase 32).
     let wip = [
         "logs",
         "list",
@@ -208,7 +211,7 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
                 println!("  gang {cmd}");
             }
             println!();
-            println!("WIP commands (require relay connectivity):");
+            println!("WIP commands (need the presence/streaming layer):");
             for cmd in &wip {
                 println!("  gang {cmd}  [WIP]");
             }
@@ -260,10 +263,12 @@ pub async fn identity_generate(force: bool) -> anyhow::Result<()> {
 // --- Target resolution ---
 
 /// Resolved target for a robot command.
-#[allow(dead_code)] // relay_addr used when remote dispatch is wired (ADR-020 Phase 32)
 pub struct ResolvedTarget {
     /// The full peer ID (if remote).
     pub peer_id: Option<gang_core::identity::PeerId>,
+    /// The dialable libp2p peer id (base58), if known. Remote dispatch
+    /// requires it — a `/p2p/` multiaddr component only accepts this form.
+    pub libp2p_id: Option<String>,
     /// Relay multiaddr (if remote).
     pub relay_addr: Option<String>,
     /// Human-readable name (if registered).
@@ -297,15 +302,24 @@ pub fn resolve_target(
                 .or_else(|| config.default_relay.clone())
         };
 
-    // 1. Explicit --peer flag
+    // 1. Explicit --peer flag (accepts either the dialable libp2p id or a
+    //    legacy gang id; only the former enables remote dispatch).
     if let Some(peer_str) = explicit_peer {
-        let peer_id = PeerId::parse(peer_str).map_err(|e| {
-            anyhow::anyhow!(
-                "Invalid peer ID '{peer_str}': {e}. Expected format: 12D3-<32 hex chars>"
-            )
-        })?;
+        let (peer_id, libp2p_id) =
+            if let Some(ident) = gang_libp2p::identity_from_libp2p_str(peer_str) {
+                (ident.gang_id, Some(ident.libp2p_id))
+            } else {
+                let id = PeerId::parse(peer_str).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Invalid peer ID '{peer_str}': {e}. Expected the dialable libp2p id \
+                         (12D3KooW…) or a gang id (12D3-<32 hex chars>)."
+                    )
+                })?;
+                (id, None)
+            };
         return Ok(ResolvedTarget {
             peer_id: Some(peer_id),
+            libp2p_id,
             relay_addr: resolve_relay(explicit_relay, None),
             name: None,
             is_local: false,
@@ -320,6 +334,7 @@ pub fn resolve_target(
     if let Some(entry) = registry.lookup(robot) {
         return Ok(ResolvedTarget {
             peer_id: Some(entry.peer_id.clone()),
+            libp2p_id: entry.libp2p_id.clone(),
             relay_addr: resolve_relay(explicit_relay, Some(&entry.relay_addrs)),
             name: Some(robot.to_string()),
             is_local: false,
@@ -337,6 +352,7 @@ pub fn resolve_target(
                 let (name, entry) = matches[0];
                 return Ok(ResolvedTarget {
                     peer_id: Some(entry.peer_id.clone()),
+                    libp2p_id: entry.libp2p_id.clone(),
                     relay_addr: resolve_relay(explicit_relay, Some(&entry.relay_addrs)),
                     name: Some(name.to_string()),
                     is_local: false,
@@ -360,6 +376,18 @@ pub fn resolve_target(
         })?;
         return Ok(ResolvedTarget {
             peer_id: Some(peer_id),
+            libp2p_id: None,
+            relay_addr: resolve_relay(explicit_relay, None),
+            name: None,
+            is_local: false,
+        });
+    }
+
+    // 4b. Full dialable libp2p id (base58 `12D3KooW…`) given directly.
+    if let Some(ident) = gang_libp2p::identity_from_libp2p_str(robot) {
+        return Ok(ResolvedTarget {
+            peer_id: Some(ident.gang_id),
+            libp2p_id: Some(ident.libp2p_id),
             relay_addr: resolve_relay(explicit_relay, None),
             name: None,
             is_local: false,
@@ -371,6 +399,7 @@ pub fn resolve_target(
     if local_path.exists() {
         return Ok(ResolvedTarget {
             peer_id: None,
+            libp2p_id: None,
             relay_addr: None,
             name: Some(robot.to_string()),
             is_local: true,
@@ -387,6 +416,13 @@ pub fn resolve_target(
 // --- Peer registry commands ---
 
 /// `gang peer add`
+///
+/// Accepts either id form:
+/// - the dialable base58 libp2p id (`12D3KooW…`, printed by `gang agent` /
+///   `gang relay`) — the gang trust id is derived from the Ed25519 key it
+///   embeds, and BOTH ids are stored;
+/// - a legacy gang id (`12D3-<32 hex>`) — stored without a dialable id, which
+///   is enough for trust/policy references but NOT for remote dispatch.
 pub async fn peer_add(
     name: &str,
     peer_id_str: &str,
@@ -396,13 +432,20 @@ pub async fn peer_add(
 ) -> anyhow::Result<()> {
     use gang_core::identity::{PeerEntry, PeerId, PeerRegistry, Role, default_registry_path};
 
-    // `PeerId::parse` validates the full shape: the "12D3-" prefix followed by
-    // exactly 32 hex characters.
-    let peer_id = PeerId::parse(peer_id_str).map_err(|e| {
-        anyhow::anyhow!(
-            "Invalid peer ID '{peer_id_str}': {e}. Expected format: 12D3-<32 hex chars>"
-        )
-    })?;
+    let (peer_id, libp2p_id) = if let Some(ident) = gang_libp2p::identity_from_libp2p_str(peer_id_str)
+    {
+        // Dialable libp2p form: derive the canonical gang id from the
+        // embedded Ed25519 key and keep both.
+        (ident.gang_id, Some(ident.libp2p_id))
+    } else if let Ok(id) = PeerId::parse(peer_id_str) {
+        (id, None)
+    } else {
+        anyhow::bail!(
+            "Invalid peer ID '{peer_id_str}'. Expected either the dialable libp2p id \
+             (base58 `12D3KooW…`, printed by `gang agent`/`gang relay` at startup) \
+             or a gang id (`12D3-` + 32 hex chars)."
+        );
+    };
 
     let role = match role_str {
         "robot-agent" | "robot" => Role::RobotAgent,
@@ -421,6 +464,7 @@ pub async fn peer_add(
         peer_id: peer_id.clone(),
         role,
         relay_addrs: relay.into_iter().map(String::from).collect(),
+        libp2p_id: libp2p_id.clone(),
     };
 
     registry.register(name.to_string(), entry);
@@ -434,16 +478,30 @@ pub async fn peer_add(
                     "status": "registered",
                     "name": name,
                     "peer_id": peer_id.as_str(),
+                    "libp2p_id": libp2p_id,
                     "role": role_str,
                 })
             );
         }
         OutputFormat::Text => {
             println!("Registered peer '{name}':");
-            println!("  Peer ID: {peer_id}");
+            println!("  Peer ID (gang identity): {peer_id}");
+            match &libp2p_id {
+                Some(id) => println!("  Peer ID (libp2p/dial):   {id}"),
+                None => println!("  Peer ID (libp2p/dial):   (none)"),
+            }
             println!("  Role:    {role_str}");
             if let Some(r) = relay {
                 println!("  Relay:   {r}");
+            }
+            if libp2p_id.is_none() {
+                println!();
+                println!(
+                    "note: registered with a legacy gang id only — remote dispatch \
+                     (deploy/run/caps over a relay) needs the dialable libp2p id. \
+                     Re-add with the `12D3KooW…` id printed by the agent/relay:\n\
+                     \n  gang peer add {name} <libp2p-id> --relay <relay-multiaddr>"
+                );
             }
         }
     }
@@ -492,6 +550,7 @@ pub async fn peer_list(format: &OutputFormat) -> anyhow::Result<()> {
                     serde_json::json!({
                         "name": name,
                         "peer_id": entry.peer_id.as_str(),
+                        "libp2p_id": entry.libp2p_id,
                         "role": format!("{}", entry.role),
                         "relay_addrs": entry.relay_addrs,
                     })
@@ -506,8 +565,8 @@ pub async fn peer_list(format: &OutputFormat) -> anyhow::Result<()> {
             }
 
             let header = format!(
-                "{:<16} {:<16} {:<14} {}",
-                "NAME", "PEER ID", "ROLE", "RELAY"
+                "{:<16} {:<16} {:<16} {:<14} {}",
+                "NAME", "PEER ID", "DIAL ID", "ROLE", "RELAY"
             );
             println!("{header}");
             for (name, entry) in &peers {
@@ -516,12 +575,20 @@ pub async fn peer_list(format: &OutputFormat) -> anyhow::Result<()> {
                 } else {
                     entry.peer_id.as_str()
                 };
+                let dial = entry
+                    .libp2p_id
+                    .as_deref()
+                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
+                    .unwrap_or("(none)");
                 let relay = entry
                     .relay_addrs
                     .first()
                     .map(|s| s.as_str())
                     .unwrap_or("(none)");
-                println!("{:<16} {:<16} {:<14} {}", name, abbrev, entry.role, relay);
+                println!(
+                    "{:<16} {:<16} {:<16} {:<14} {}",
+                    name, abbrev, dial, entry.role, relay
+                );
             }
         }
     }
@@ -546,6 +613,7 @@ pub async fn peer_show(name: &str, format: &OutputFormat) -> anyhow::Result<()> 
                 serde_json::json!({
                     "name": name,
                     "peer_id": entry.peer_id.as_str(),
+                    "libp2p_id": entry.libp2p_id,
                     "role": format!("{}", entry.role),
                     "relay_addrs": entry.relay_addrs,
                 })
@@ -554,6 +622,10 @@ pub async fn peer_show(name: &str, format: &OutputFormat) -> anyhow::Result<()> 
         OutputFormat::Text => {
             println!("Peer '{name}':");
             println!("  Peer ID:  {}", entry.peer_id);
+            match &entry.libp2p_id {
+                Some(id) => println!("  Dial ID:  {id}"),
+                None => println!("  Dial ID:  (none — re-add with the libp2p id for remote dispatch)"),
+            }
             println!("  Role:     {}", entry.role);
             if entry.relay_addrs.is_empty() {
                 println!("  Relay:    (none)");
@@ -653,8 +725,10 @@ pub async fn config_show(format: &OutputFormat) -> anyhow::Result<()> {
             println!("host_key_policy  = {}", config.host_key_policy);
             println!();
             println!(
-                "note: host_key_policy is stored but not yet enforced; it takes effect \
-                 once remote connections land."
+                "host_key_policy is enforced on remote connections (deploy/run/caps): \
+                 strict = prompt on first connect, tofu = auto-accept first key, \
+                 none = no verification (insecure). All policies except `none` \
+                 hard-fail when a known robot's key changes."
             );
         }
     }
@@ -694,12 +768,6 @@ pub async fn config_set(key: &str, value: &str, format: &OutputFormat) -> anyhow
         }
         OutputFormat::Text => {
             println!("Set {key} = {value}");
-            if key == "host_key_policy" {
-                println!(
-                    "note: host_key_policy is stored but not yet enforced; it takes effect \
-                     once remote connections land."
-                );
-            }
         }
     }
     Ok(())
@@ -745,7 +813,6 @@ pub async fn config_path() -> anyhow::Result<()> {
 // --- Identity verification (SSH-style TOFU) ---
 
 /// Result of verifying a remote peer's identity.
-#[allow(dead_code)] // Called by remote dispatch when connections are wired (ADR-020 Phase 32)
 pub enum HostKeyVerification {
     /// Peer is already trusted and key matches.
     Trusted,
@@ -766,7 +833,11 @@ fn key_fingerprint(public_key: &[u8]) -> String {
 /// - `strict`: TOFU on first connect (prompts interactively), hard fail on key change.
 /// - `tofu`: auto-accept new keys without prompting, hard fail on key change.
 /// - `none`: no verification (prints warning).
-#[allow(dead_code)]
+///
+/// A robot's Ed25519 public key is embedded in its dialable libp2p id, so the
+/// key being verified here is exactly the identity the Noise handshake will
+/// enforce on the wire: libp2p refuses the connection if the peer at the
+/// other end cannot prove possession of this key.
 pub fn verify_host_key(
     peer_id: &gang_core::identity::PeerId,
     remote_public_key: &[u8],
@@ -786,6 +857,40 @@ pub fn verify_host_key(
             Ok(HostKeyVerification::Skipped)
         }
         policy @ ("strict" | "tofu") => {
+            // A changed key implies a changed (key-derived) peer id, so the
+            // per-peer-id lookup below can never see a mismatch. The real
+            // "host key changed" signal is the NAME binding: this robot name
+            // was previously trusted with a different identity.
+            if let Some(name) = peer_name
+                && let Some(existing) = trust_store.find_by_name(name)
+                && (existing.peer_id != *peer_id
+                    || existing.public_key != remote_public_key)
+            {
+                let idx = trust_store.index_of(&existing.peer_id).unwrap_or(0);
+                eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+                eprintln!("@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!    @");
+                eprintln!("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+                eprintln!("IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!");
+                eprintln!("The Ed25519 host key for robot '{name}' has changed.");
+                eprintln!("Previously trusted identity: {}", existing.peer_id);
+                eprintln!("Identity now presented:      {peer_id}");
+                eprintln!(
+                    "Fingerprint for the new key: {}",
+                    key_fingerprint(remote_public_key)
+                );
+                eprintln!(
+                    "Add correct host key in {} to get rid of this message.",
+                    trust_path.display()
+                );
+                eprintln!("Offending key stored at index {idx}.");
+                eprintln!("Robot key verification failed.");
+                anyhow::bail!(
+                    "Host key verification failed for '{name}'. If this change is expected \
+                     (e.g. the robot was re-imaged), run `gang peer trust-reset {name}` to \
+                     clear the old key, then reconnect."
+                );
+            }
+
             if let Some(stored_key) = trust_store.get_public_key(peer_id) {
                 // Known peer — verify key matches
                 if stored_key == remote_public_key {
@@ -839,6 +944,18 @@ pub fn verify_host_key(
                 );
                 eprintln!("Ed25519 key fingerprint is {fingerprint}.");
 
+                // The strict policy needs a human at the terminal. Fail with
+                // guidance instead of silently reading EOF from a pipe.
+                if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    anyhow::bail!(
+                        "host_key_policy is \"strict\" but stdin is not a terminal, so the \
+                         first-connect confirmation cannot be asked. For non-interactive use, \
+                         run `gang config set host_key_policy tofu` (auto-accept first key, \
+                         hard-fail on change) or pre-provision the robot's key in the trust \
+                         store."
+                    );
+                }
+
                 // Read from stdin for interactive prompt
                 eprint!("Are you sure you want to continue connecting (yes/no)? ");
                 let mut input = String::new();
@@ -881,6 +998,237 @@ pub fn verify_host_key(
 }
 
 // --- End identity verification ---
+
+// --- Remote dispatch (ADR-020 Phase 32) ---
+
+/// Default whole-dispatch timeout for `gang deploy`: component bytes can be
+/// megabytes travelling over a relay circuit.
+const DEPLOY_TIMEOUT_SECS: u64 = 60;
+/// Default whole-dispatch timeout for `gang run` / `gang caps`.
+const CONTROL_TIMEOUT_SECS: u64 = 30;
+
+/// A fully-resolved remote robot target, ready to dial through its relay.
+struct RemoteTarget {
+    /// Canonical gang identity (trust store / policy / audit key).
+    gang_id: gang_core::identity::PeerId,
+    /// Dialable base58 libp2p id (embeds the same Ed25519 key).
+    libp2p_id: String,
+    /// The relay to route through (must end in `/p2p/<relay-libp2p-id>`).
+    relay_addr: String,
+    /// Registered name, when the target was resolved by name.
+    name: Option<String>,
+}
+
+impl RemoteTarget {
+    fn display(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.gang_id.to_string())
+    }
+}
+
+/// Validate a resolved (non-local) target for remote dispatch and run the
+/// SSH-style host-key verification gate before any connection is attempted.
+fn prepare_remote(target: &ResolvedTarget) -> anyhow::Result<RemoteTarget> {
+    let gang_id = target
+        .peer_id
+        .clone()
+        .expect("remote target always carries a peer id");
+    let display = target.name.clone().unwrap_or_else(|| gang_id.to_string());
+    let readd_name = target.name.as_deref().unwrap_or("<name>");
+
+    let Some(libp2p_id) = target.libp2p_id.clone() else {
+        anyhow::bail!(
+            "Remote dispatch to '{display}' needs the robot's dialable libp2p id \
+             (base58 `12D3KooW…`), but only a legacy gang id is registered.\n\
+             Re-register the robot with the ids the agent prints at startup:\n\
+             \n    gang peer add {readd_name} <libp2p-id> --relay <relay-multiaddr>\n\
+             \n(`gang agent` and `gang relay` print the libp2p id as \"Peer ID (libp2p/dial)\".)"
+        );
+    };
+
+    let Some(relay_addr) = target.relay_addr.clone() else {
+        anyhow::bail!(
+            "No relay address known for '{display}'. Pass --relay <multiaddr>, store one \
+             (`gang peer add {readd_name} {libp2p_id} --relay <multiaddr>`), or set a default \
+             (`gang config set default_relay <multiaddr>`)."
+        );
+    };
+
+    // Recover the Ed25519 key embedded in the dialable id; this is the exact
+    // key libp2p's Noise handshake will hold the remote end to.
+    let ident = gang_libp2p::identity_from_libp2p_str(&libp2p_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Registered libp2p id '{libp2p_id}' for '{display}' is not a valid Ed25519 libp2p \
+             peer id. Re-add the peer with the id printed by the agent/relay."
+        )
+    })?;
+    if ident.gang_id != gang_id {
+        anyhow::bail!(
+            "Registry entry for '{display}' is inconsistent: its gang id is {gang_id} but the \
+             identity embedded in its libp2p id derives to {}. Re-add the peer with \
+             `gang peer add`.",
+            ident.gang_id
+        );
+    }
+
+    verify_host_key(&gang_id, &ident.ed25519_pubkey, target.name.as_deref())?;
+
+    Ok(RemoteTarget {
+        gang_id,
+        libp2p_id,
+        relay_addr,
+        name: target.name.clone(),
+    })
+}
+
+/// Build the circuit multiaddr for reaching `robot_libp2p_id` through
+/// `relay_addr`.
+///
+/// The stored relay address already ends in `/p2p/<relay-libp2p-id>` (the
+/// dialable form printed by `gang relay`); the circuit form appends
+/// `/p2p-circuit/p2p/<robot-libp2p-id>`. Defensively strips a trailing
+/// `/p2p/<robot-id>` or `/p2p-circuit` a user may have stored so the suffix
+/// is never duplicated.
+fn circuit_addr(relay_addr: &str, robot_libp2p_id: &str) -> String {
+    let mut base = relay_addr.trim_end_matches('/').to_string();
+    let robot_suffix = format!("/p2p/{robot_libp2p_id}");
+    if let Some(stripped) = base.strip_suffix(&robot_suffix) {
+        base = stripped.to_string();
+    }
+    if let Some(stripped) = base.strip_suffix("/p2p-circuit") {
+        base = stripped.to_string();
+    }
+    format!("{base}/p2p-circuit/p2p/{robot_libp2p_id}")
+}
+
+/// Send one control message to a remote robot over the relay circuit and
+/// return the decoded response. The entire exchange — transport construction,
+/// relay dial, circuit dial, RPC — is bounded by `timeout`; a remote failure
+/// is an error (non-zero exit), never a silent success.
+async fn remote_dispatch(
+    target: &RemoteTarget,
+    message: gang_core::message::ControlMessage,
+    timeout: std::time::Duration,
+) -> anyhow::Result<gang_core::message::ControlMessage> {
+    match tokio::time::timeout(timeout, remote_dispatch_inner(target, message, timeout)).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "timed out after {}s: robot '{}' not reachable via relay {} (is the agent \
+             running, and did it connect to that relay?)",
+            timeout.as_secs(),
+            target.display(),
+            target.relay_addr
+        ),
+    }
+}
+
+async fn remote_dispatch_inner(
+    target: &RemoteTarget,
+    message: gang_core::message::ControlMessage,
+    rpc_timeout: std::time::Duration,
+) -> anyhow::Result<gang_core::message::ControlMessage> {
+    use gang_core::message::{ControlMessage, decode_message, encode_message};
+    use std::sync::Arc;
+
+    let display = target.display();
+
+    // Operator identity: same key the rest of the CLI uses. The robot's trust
+    // store and policy see the gang id derived from this key.
+    let transport_config = gang_libp2p::Libp2pConfig {
+        key_path: gang_core::identity::default_key_path(),
+        // Outbound-only: the operator dials; it accepts no inbound connections
+        // and requests no relay reservation.
+        listen_addrs: vec![],
+        ..Default::default()
+    };
+    let transport = Arc::new(gang_libp2p::Libp2pTransportAdapter::new(transport_config).await?);
+
+    // The swarm worker must run before any dial can make progress.
+    let loop_transport = Arc::clone(&transport);
+    let event_loop = tokio::spawn(async move { loop_transport.run_event_loop().await });
+
+    // Everything below must release the transport on exit; run in a block and
+    // shut down afterwards.
+    let result = async {
+        // Dial the relay itself first, for a clear error when the relay is down.
+        transport
+            .dial_multiaddr(&target.relay_addr)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("cannot reach relay {}: {e}", target.relay_addr)
+            })?;
+
+        // Dial the robot through the relay circuit, then wait for the
+        // authenticated connection. The dial itself only queues; the poll below
+        // (bounded by the caller's overall timeout) observes the outcome.
+        let circuit = circuit_addr(&target.relay_addr, &target.libp2p_id);
+        transport.dial_multiaddr(&circuit).await.map_err(|e| {
+            anyhow::anyhow!("failed to dial '{display}' via relay circuit {circuit}: {e}")
+        })?;
+
+        loop {
+            let connected = transport.connected_peers().await;
+            if connected.iter().any(|(id, _)| *id == target.gang_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let request = encode_message(&message)
+            .map_err(|e| anyhow::anyhow!("failed to encode control message: {e}"))?;
+        let response_bytes = transport
+            .send_rpc_with_timeout(&target.gang_id, request, rpc_timeout)
+            .await
+            .map_err(|e| anyhow::anyhow!("control request to '{display}' failed: {e}"))?;
+
+        if response_bytes.is_empty() {
+            anyhow::bail!(
+                "robot '{display}' sent no response on /ganglion/control/1.0 — is the agent \
+                 actually serving (started with `gang agent -r <relay>`)?"
+            );
+        }
+        let (response, _) = decode_message::<ControlMessage>(&response_bytes)
+            .map_err(|e| anyhow::anyhow!("could not decode response from '{display}': {e}"))?;
+        Ok(response)
+    }
+    .await;
+
+    let _ = gang_core::transport::TransportAdapter::shutdown(transport.as_ref()).await;
+    event_loop.abort();
+    result
+}
+
+/// Print a capability's output bytes honestly: JSON is pretty-printed (with
+/// the diagnostics renderer for recognizably diagnostics-shaped output in
+/// text mode); anything else is printed as (lossy) text.
+fn print_capability_output(output: &[u8], format: &OutputFormat) {
+    match serde_json::from_slice::<serde_json::Value>(output) {
+        Ok(val) => match format {
+            OutputFormat::Json => match serde_json::to_string_pretty(&val) {
+                Ok(pretty) => println!("{pretty}"),
+                Err(_) => println!("{}", String::from_utf8_lossy(output)),
+            },
+            OutputFormat::Text => {
+                let diagnostics_shaped = ["system_info", "network", "processes", "log_sources"]
+                    .iter()
+                    .any(|k| val.get(k).is_some());
+                if diagnostics_shaped {
+                    print_diagnostics(&val);
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&val)
+                            .unwrap_or_else(|_| String::from_utf8_lossy(output).into_owned())
+                    );
+                }
+            }
+        },
+        Err(_) => println!("{}", String::from_utf8_lossy(output)),
+    }
+}
+
+// --- End remote dispatch ---
 
 /// Parse a capability group short name (or fully-qualified name) into a
 /// `CapabilityGroup` with permissive defaults for any pattern/allowlist fields.
@@ -1065,12 +1413,10 @@ pub async fn agent(
         println!("  Relay:    {relay_addr}");
         println!("  Mode:     remote (listening on /ganglion/control/1.0)");
         println!();
-        println!("Register on operator machine:");
-        println!("  gang peer add my-robot {peer_id} --relay {relay_addr}");
-        println!();
-        println!("Starting transport...");
 
-        // Create libp2p transport with agent identity
+        // Create libp2p transport with agent identity. This also requests the
+        // circuit reservation on the relay (once the event loop runs), which
+        // is what makes this robot reachable *through* the relay.
         let transport_config = gang_libp2p::Libp2pConfig {
             key_path: data_dir.join("identity.key"),
             relay_addrs: vec![relay_addr.to_string()],
@@ -1078,6 +1424,17 @@ pub async fn agent(
         };
 
         let transport = Arc::new(gang_libp2p::Libp2pTransportAdapter::new(transport_config).await?);
+        let libp2p_id = *transport.libp2p_peer_id();
+
+        // The dialable (base58) id is what operators must register: only this
+        // form can appear in a /p2p/ multiaddr component. The gang id above
+        // identifies the robot in trust stores and policies.
+        println!("Peer ID (libp2p/dial): {libp2p_id}");
+        println!();
+        println!("Register on operator machine:");
+        println!("  gang peer add my-robot {libp2p_id} --relay {relay_addr}");
+        println!();
+        println!("Starting transport...");
 
         // Register the control protocol handler
         agent.serve(transport.as_ref()).await?;
@@ -1158,14 +1515,17 @@ pub async fn agent(
 }
 
 /// `gang deploy` — deploy a capability to a robot.
+#[allow(clippy::too_many_arguments)] // CLI surface: each arg mirrors one flag
 pub async fn deploy(
     robot: &str,
     wasm_path: &str,
     manifest_path: Option<&str>,
     explicit_peer: Option<&str>,
     explicit_relay: Option<&str>,
+    timeout_secs: Option<u64>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
+    use gang_core::message::{ControlMessage, InvokeStatus};
     use gang_ros::agent::{AgentConfig, RobotAgent};
     use gang_ros::filesystem::FsRule;
 
@@ -1193,17 +1553,61 @@ pub async fn deploy(
     let target = resolve_target(robot, explicit_peer, explicit_relay)?;
 
     if !target.is_local {
-        // Remote dispatch — will be implemented when agent serve loop is ready (Phase 32).
-        let peer_id = target.peer_id.as_ref().unwrap();
-        let display_name = target.name.as_deref().unwrap_or(peer_id.as_str());
-        anyhow::bail!(
-            "Remote deploy to '{display_name}' ({peer_id}) is not yet implemented.\n\
-             The transport infrastructure is ready but the agent serve loop (ADR-020 Phase 32) \n\
-             must be completed first. Use local mode for now:\n\
-             \n\
-             gang deploy {robot} {}",
-            wasm_path.display()
-        );
+        // Remote dispatch over the relay circuit (ADR-020 Phase 32).
+        let remote = prepare_remote(&target)?;
+        let display = remote.display();
+
+        // Decode the signed manifest locally for the message envelope (and to
+        // fail fast on a malformed bundle before shipping megabytes).
+        let signed = gang_core::manifest::SignedManifest::from_cbor(&manifest_cbor)
+            .with_context(|| format!("decoding manifest {}", manifest_path.display()))?;
+        let manifest = signed
+            .verify_and_decode()
+            .with_context(|| format!("verifying manifest {}", manifest_path.display()))?;
+
+        let message = ControlMessage::DeployCapability {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            manifest_cbor,
+            component_bytes,
+            nonce: gang_core::message::fresh_nonce(),
+            timestamp_ms: gang_core::message::unix_millis_now(),
+        };
+
+        let timeout =
+            std::time::Duration::from_secs(timeout_secs.unwrap_or(DEPLOY_TIMEOUT_SECS));
+        let response = remote_dispatch(&remote, message, timeout).await?;
+
+        return match response {
+            ControlMessage::InvokeResult {
+                status: InvokeStatus::Success,
+                output,
+                ..
+            } => {
+                let deployed = String::from_utf8_lossy(&output).into_owned();
+                match format {
+                    OutputFormat::Json => println!(
+                        "{}",
+                        serde_json::json!({
+                            "status": "deployed",
+                            "name": deployed,
+                            "robot": display,
+                            "remote": true,
+                        })
+                    ),
+                    OutputFormat::Text => {
+                        println!("Deployed '{deployed}' to robot '{display}' (via relay)");
+                    }
+                }
+                Ok(())
+            }
+            ControlMessage::Error { code, message, .. } => {
+                anyhow::bail!("deploy to '{display}' rejected by robot ({code}): {message}")
+            }
+            other => anyhow::bail!(
+                "unexpected response from robot '{display}': {other:?}"
+            ),
+        };
     }
 
     // Local agent path
@@ -1253,29 +1657,58 @@ pub async fn deploy(
 }
 
 /// `gang run` — invoke a capability on a robot.
+#[allow(clippy::too_many_arguments)] // CLI surface: each arg mirrors one flag
 pub async fn run(
     robot: &str,
     cap_name: &str,
     args: &[String],
     explicit_peer: Option<&str>,
     explicit_relay: Option<&str>,
+    timeout_secs: Option<u64>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
+    use gang_core::message::{ControlMessage, InvokeStatus};
     use gang_ros::agent::{AgentConfig, RobotAgent};
     use gang_ros::filesystem::FsRule;
 
     let target = resolve_target(robot, explicit_peer, explicit_relay)?;
 
     if !target.is_local {
-        let peer_id = target.peer_id.as_ref().unwrap();
-        let display_name = target.name.as_deref().unwrap_or(peer_id.as_str());
-        anyhow::bail!(
-            "Remote run on '{display_name}' ({peer_id}) is not yet implemented.\n\
-             The transport infrastructure is ready but the agent serve loop (ADR-020 Phase 32) \n\
-             must be completed first. Use local mode for now:\n\
-             \n\
-             gang run {robot} {cap_name}"
-        );
+        // Remote dispatch over the relay circuit (ADR-020 Phase 32).
+        let remote = prepare_remote(&target)?;
+        let display = remote.display();
+
+        let request_id = gang_core::message::fresh_nonce();
+        let message = ControlMessage::InvokeCapability {
+            name: cap_name.to_string(),
+            args: args.to_vec(),
+            request_id: request_id.clone(),
+            nonce: gang_core::message::fresh_nonce(),
+            timestamp_ms: gang_core::message::unix_millis_now(),
+        };
+
+        let timeout =
+            std::time::Duration::from_secs(timeout_secs.unwrap_or(CONTROL_TIMEOUT_SECS));
+        let response = remote_dispatch(&remote, message, timeout).await?;
+
+        return match response {
+            ControlMessage::InvokeResult { status, output, .. } => {
+                if matches!(status, InvokeStatus::Success) {
+                    print_capability_output(&output, format);
+                    Ok(())
+                } else {
+                    anyhow::bail!(
+                        "invocation of '{cap_name}' on '{display}' finished with status \
+                         {status:?}: {}",
+                        String::from_utf8_lossy(&output)
+                    )
+                }
+            }
+            ControlMessage::Error { code, message, .. } => {
+                anyhow::bail!("invocation of '{cap_name}' on '{display}' failed ({code}): {message}")
+            }
+            other => anyhow::bail!("unexpected response from robot '{display}': {other:?}"),
+        };
     }
 
     let data_dir = PathBuf::from(format!("/tmp/gang-agent-{robot}"));
@@ -1330,19 +1763,61 @@ pub async fn caps(
     robot: &str,
     explicit_peer: Option<&str>,
     explicit_relay: Option<&str>,
+    timeout_secs: Option<u64>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
+    use gang_core::message::ControlMessage;
     use gang_ros::agent::{AgentConfig, RobotAgent};
 
     let target = resolve_target(robot, explicit_peer, explicit_relay)?;
 
     if !target.is_local {
-        let peer_id = target.peer_id.as_ref().unwrap();
-        let display_name = target.name.as_deref().unwrap_or(peer_id.as_str());
-        anyhow::bail!(
-            "Remote caps on '{display_name}' ({peer_id}) is not yet implemented.\n\
-             The agent serve loop (ADR-020 Phase 32) must be completed first."
-        );
+        // Remote dispatch over the relay circuit (ADR-020 Phase 32).
+        let remote = prepare_remote(&target)?;
+        let display = remote.display();
+
+        let timeout =
+            std::time::Duration::from_secs(timeout_secs.unwrap_or(CONTROL_TIMEOUT_SECS));
+        let response = remote_dispatch(&remote, ControlMessage::ListCapabilities, timeout).await?;
+
+        return match response {
+            ControlMessage::CapabilityList { capabilities } => {
+                match format {
+                    OutputFormat::Json => {
+                        let list: Vec<serde_json::Value> = capabilities
+                            .iter()
+                            .map(|c| {
+                                serde_json::json!({
+                                    "name": c.name,
+                                    "version": c.version,
+                                    "author": c.author.as_str(),
+                                    "capabilities": c.declared_capabilities,
+                                })
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&list)?);
+                    }
+                    OutputFormat::Text => {
+                        if capabilities.is_empty() {
+                            println!("No capabilities installed on '{display}'");
+                        } else {
+                            println!("Capabilities on '{display}':");
+                            for cap in &capabilities {
+                                println!("  {} v{} (by {})", cap.name, cap.version, cap.author);
+                                for group in &cap.declared_capabilities {
+                                    println!("    - {group}");
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            ControlMessage::Error { code, message, .. } => {
+                anyhow::bail!("listing capabilities on '{display}' failed ({code}): {message}")
+            }
+            other => anyhow::bail!("unexpected response from robot '{display}': {other:?}"),
+        };
     }
 
     let data_dir = PathBuf::from(format!("/tmp/gang-agent-{robot}"));

@@ -118,6 +118,9 @@ enum Commands {
         /// Relay multiaddr (overrides registry and config defaults).
         #[arg(long, short = 'r')]
         relay: Option<String>,
+        /// Overall timeout in seconds for a remote deploy (default: 60).
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
 
     /// Invoke an installed capability on a robot.
@@ -135,6 +138,9 @@ enum Commands {
         /// Relay multiaddr (overrides registry and config defaults).
         #[arg(long, short = 'r')]
         relay: Option<String>,
+        /// Overall timeout in seconds for a remote invocation (default: 30).
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
 
     /// List capabilities installed on a robot.
@@ -148,6 +154,9 @@ enum Commands {
         /// Relay multiaddr (overrides registry and config defaults).
         #[arg(long, short = 'r')]
         relay: Option<String>,
+        /// Overall timeout in seconds for a remote listing (default: 30).
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
 
     /// Stream robot logs. [WIP: requires relay]
@@ -476,6 +485,7 @@ async fn main() -> anyhow::Result<()> {
             manifest,
             peer,
             relay,
+            timeout,
         } => {
             commands::deploy(
                 &robot,
@@ -483,6 +493,7 @@ async fn main() -> anyhow::Result<()> {
                 manifest.as_deref(),
                 peer.as_deref(),
                 relay.as_deref(),
+                timeout,
                 &cli.format,
             )
             .await?
@@ -493,6 +504,7 @@ async fn main() -> anyhow::Result<()> {
             args,
             peer,
             relay,
+            timeout,
         } => {
             commands::run(
                 &robot,
@@ -500,12 +512,25 @@ async fn main() -> anyhow::Result<()> {
                 &args,
                 peer.as_deref(),
                 relay.as_deref(),
+                timeout,
                 &cli.format,
             )
             .await?
         }
-        Commands::Caps { robot, peer, relay } => {
-            commands::caps(&robot, peer.as_deref(), relay.as_deref(), &cli.format).await?
+        Commands::Caps {
+            robot,
+            peer,
+            relay,
+            timeout,
+        } => {
+            commands::caps(
+                &robot,
+                peer.as_deref(),
+                relay.as_deref(),
+                timeout,
+                &cli.format,
+            )
+            .await?
         }
         Commands::Demo => commands::demo(&cli.format).await?,
         Commands::Logs {
