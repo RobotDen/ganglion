@@ -1,10 +1,8 @@
-# E2E connectivity smoke test: relay + robot + operator on a flat bridge
-# network. Validates that the robot agent connects to the relay and that the
-# operator can register the robot's peer ID (published via /test-data).
-#
-# TODO(dispatch-workstream): upgrade to a real deploy→invoke→result round-trip
-# once ADR-020 Phase 32 lands — `gang deploy <remote>` currently bails because
-# operator remote dispatch is not implemented in the CLI.
+# E2E dispatch test: relay + robot + operator on a flat bridge network.
+# Validates the full ADR-020 Phase 32 flow — the robot agent connects to the
+# relay and holds a circuit reservation; the operator registers the robot by
+# its dialable libp2p id and performs a REAL deploy → invoke → list round-trip
+# over the relay circuit with the signed test WASM component.
 #
 # Usage:
 #   ./run-test.sh          # builds, runs, validates, tears down
@@ -12,38 +10,44 @@
 #   docker compose logs -f # manual: watch logs
 
 services:
+  # Fixed test identity (TEST KEY — DO NOT USE); the entrypoint wrapper
+  # publishes the relay's dialable multiaddr (with its libp2p peer id) to the
+  # shared volume for the robot and operator.
   relay:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    # Dockerfile.base sets ENTRYPOINT ["gang"], so the command must NOT
-    # repeat the binary name.
-    command: ["relay", "--port", "4001"]
+    entrypoint: ["/bin/bash", "/harness/relay-entrypoint.sh"]
+    environment:
+      GANG_KEY_PATH: /keys/relay.key
+      RELAY_IP: 172.28.0.10
+      RELAY_PORT: "4001"
+    volumes:
+      - relay-data:/data
+      - ../scripts:/harness:ro
+      - ../keys/e2e-dispatch-relay.key:/keys/relay.key:ro
+      - relay-shared:/shared
     networks:
       ganglion-e2e:
         ipv4_address: 172.28.0.10
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "4001"]
-      interval: 2s
-      timeout: 5s
-      retries: 10
 
   robot:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
-    # Wrapper starts `gang agent -r <relay>` and publishes the robot's peer ID
-    # and agent log to /test-data for the operator to assert against.
+    # Wrapper waits for the relay's published multiaddr, starts
+    # `gang agent -r <relay>`, and publishes the robot's dialable libp2p id
+    # and agent log to /test-data for the operator.
     entrypoint: ["/bin/bash", "/test-data/run-robot.sh"]
     depends_on:
-      relay:
-        condition: service_healthy
+      - relay
     networks:
       ganglion-e2e:
         ipv4_address: 172.28.0.20
     volumes:
       - robot-data:/data
       - ./test-data:/test-data
+      - relay-shared:/shared:ro
 
   operator:
     build:
@@ -51,18 +55,20 @@ services:
       dockerfile: test-harness/Dockerfile.base
     entrypoint: ["/bin/bash", "/test-data/run-operator-test.sh"]
     depends_on:
-      relay:
-        condition: service_healthy
-      robot:
-        condition: service_started
+      - relay
+      - robot
     networks:
       ganglion-e2e:
         ipv4_address: 172.28.0.30
     volumes:
-      - ./test-data:/test-data:ro
+      - ./test-data:/test-data
+      - relay-shared:/shared:ro
 
 volumes:
   robot-data:
+  relay-data:
+  # Shared volume for the relay's published multiaddr.
+  relay-shared:
 
 networks:
   ganglion-e2e:
