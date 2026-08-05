@@ -456,6 +456,13 @@ impl SwarmWorker {
                         }
                         Some(SwarmEvent::NewListenAddr { address, .. }) => {
                             info!("Listening on {address}");
+                            // A relay server must advertise its listen
+                            // addresses as external, or the reservations it
+                            // grants carry no addresses and every client
+                            // rejects them (NoAddressesInReservation).
+                            if self.config.relay_server {
+                                self.swarm.add_external_address(address.clone());
+                            }
                             let mut addrs = self.listen_addrs.write().await;
                             let addr = address.to_string();
                             if !addrs.contains(&addr) {

@@ -1151,13 +1151,21 @@ async fn remote_dispatch_inner(
     // Everything below must release the transport on exit; run in a block and
     // shut down afterwards.
     let result = async {
-        // Dial the relay itself first, for a clear error when the relay is down.
+        // Dial the relay itself first, for a clear error when the relay is
+        // down, and wait for that connection before requesting the circuit —
+        // a circuit dial racing the in-flight relay dial can fail spuriously.
         transport
             .dial_multiaddr(&target.relay_addr)
             .await
             .map_err(|e| {
                 anyhow::anyhow!("cannot reach relay {}: {e}", target.relay_addr)
             })?;
+        loop {
+            if !transport.connected_peers().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
 
         // Dial the robot through the relay circuit, then wait for the
         // authenticated connection. The dial itself only queues; the poll below
