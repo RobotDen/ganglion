@@ -235,6 +235,16 @@ impl TrustStore {
             .iter()
             .position(|p| &p.peer_id == peer_id)
     }
+
+    /// Find a trusted peer by its recorded human-readable name.
+    ///
+    /// Used by SSH-style host-key verification: a robot *name* that was
+    /// previously bound to one identity but now presents another is the
+    /// "REMOTE HOST IDENTIFICATION HAS CHANGED" case (the peer id itself is
+    /// key-derived, so a changed key always means a changed peer id).
+    pub fn find_by_name(&self, name: &str) -> Option<&TrustedPeer> {
+        self.trusted_peers.iter().find(|p| p.name == name)
+    }
 }
 
 #[cfg(test)]

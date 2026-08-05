@@ -21,7 +21,9 @@ use gang_core::transport::{
 use crate::config::Libp2pConfig;
 use crate::swarm::{self, GanglionBehaviour};
 
-/// How long a caller waits for an RPC or dial reply before timing out.
+/// How long a caller waits for an RPC or dial reply before timing out unless
+/// an explicit per-request timeout is supplied (see
+/// [`Libp2pTransportAdapter::send_rpc_with_timeout`]).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Upper bound on the number of concurrently pending outbound requests. New
 /// requests beyond this are rejected rather than allowed to grow the map
@@ -54,6 +56,9 @@ enum SwarmCommand {
         libp2p_peer: Libp2pPeerId,
         protocol: ProtocolId,
         request: Vec<u8>,
+        /// How long the worker keeps the request pending before sweeping it
+        /// out with a timeout error.
+        timeout: Duration,
         reply: oneshot::Sender<Result<Vec<u8>, TransportError>>,
     },
     /// Send a response for an inbound request back over its channel.
@@ -75,6 +80,8 @@ struct PendingRequest {
     /// After this instant the request is considered timed out and its entry
     /// is swept from the pending map.
     deadline: Instant,
+    /// The timeout this request was issued with (for the error report).
+    timeout: Duration,
 }
 
 /// Fan-out of transport events to every live subscriber.
@@ -139,6 +146,9 @@ pub struct Libp2pTransportAdapter {
     connected_peers: Arc<RwLock<HashMap<String, PeerConnection>>>,
     /// Registered protocol handlers for incoming streams.
     protocol_handlers: Arc<RwLock<HashMap<String, StreamHandler>>>,
+    /// Addresses the swarm is actually listening on (populated by the worker
+    /// from `NewListenAddr` events; ephemeral ports appear here resolved).
+    listen_addrs: Arc<RwLock<Vec<String>>>,
     /// The swarm-owning worker, taken by `run_event_loop`.
     worker: Mutex<Option<SwarmWorker>>,
 }
@@ -190,12 +200,19 @@ impl Libp2pTransportAdapter {
         swarm::add_bootstrap_peers(&mut swarm, &config)
             .map_err(|e| crate::TransportError::SwarmBuild(e.to_string()))?;
 
+        // Request circuit reservations on configured relays so this node is
+        // reachable *through* them, not merely connected to them. The worker
+        // re-establishes a reservation whose listener closes.
+        let circuit_listeners = swarm::listen_on_relay_circuits(&mut swarm, &config)
+            .map_err(|e| crate::TransportError::Relay(e.to_string()))?;
+
         // Command channel to the single swarm-owning task. This same channel
         // carries the shutdown signal (`SwarmCommand::Shutdown`).
         let (command_tx, command_rx) = mpsc::channel(256);
         let events = EventBus::default();
         let connected_peers = Arc::new(RwLock::new(HashMap::new()));
         let protocol_handlers = Arc::new(RwLock::new(HashMap::new()));
+        let listen_addrs = Arc::new(RwLock::new(Vec::new()));
 
         let worker = SwarmWorker {
             swarm,
@@ -204,7 +221,10 @@ impl Libp2pTransportAdapter {
             events: events.clone(),
             connected_peers: connected_peers.clone(),
             protocol_handlers: protocol_handlers.clone(),
+            listen_addrs: listen_addrs.clone(),
             pending_requests: HashMap::new(),
+            circuit_listeners,
+            circuit_relisten: Vec::new(),
             config: config.clone(),
         };
 
@@ -217,6 +237,7 @@ impl Libp2pTransportAdapter {
             events,
             connected_peers,
             protocol_handlers,
+            listen_addrs,
             worker: Mutex::new(Some(worker)),
         })
     }
@@ -280,6 +301,14 @@ impl Libp2pTransportAdapter {
         }
     }
 
+    /// Addresses the swarm is actually listening on. Ephemeral (`/tcp/0`)
+    /// listen addresses appear here with their resolved ports once the swarm
+    /// reports them; the list is empty until the event loop has processed the
+    /// first `NewListenAddr` event.
+    pub async fn listen_addrs(&self) -> Vec<String> {
+        self.listen_addrs.read().await.clone()
+    }
+
     /// Get the list of currently connected peers.
     pub async fn connected_peers(&self) -> Vec<(PeerId, bool)> {
         self.connected_peers
@@ -302,12 +331,30 @@ impl Libp2pTransportAdapter {
         &self.keypair
     }
 
-    /// Send an RPC request with a payload and wait for the response.
+    /// Send an RPC request with a payload and wait for the response, using
+    /// the default 30-second request timeout.
     /// This is the primary method for operator→robot control messages.
     pub async fn send_rpc(
         &self,
         peer: &PeerId,
         request_bytes: Vec<u8>,
+    ) -> Result<Vec<u8>, TransportError> {
+        self.send_rpc_with_timeout(peer, request_bytes, REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// Like [`Libp2pTransportAdapter::send_rpc`] with an explicit timeout.
+    ///
+    /// Used for requests whose expected duration differs from the default —
+    /// e.g. a capability deploy shipping megabytes of component bytes over a
+    /// relay circuit. The timeout bounds both the local wait and the worker's
+    /// pending-request entry; it cannot exceed the protocol-level ceiling
+    /// configured on the request-response behaviour (120 s).
+    pub async fn send_rpc_with_timeout(
+        &self,
+        peer: &PeerId,
+        request_bytes: Vec<u8>,
+        timeout: Duration,
     ) -> Result<Vec<u8>, TransportError> {
         let libp2p_peer_id = self.resolve_peer(peer).await?;
 
@@ -318,12 +365,13 @@ impl Libp2pTransportAdapter {
                 libp2p_peer: libp2p_peer_id,
                 protocol: ProtocolId::control(),
                 request: request_bytes,
+                timeout,
                 reply: reply_tx,
             })
             .await
             .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))?;
 
-        await_reply(peer, reply_rx).await
+        await_reply_within(peer, reply_rx, timeout).await
     }
 
     /// Look up the libp2p peer id for a connected gang peer.
@@ -355,7 +403,15 @@ struct SwarmWorker {
     events: EventBus,
     connected_peers: Arc<RwLock<HashMap<String, PeerConnection>>>,
     protocol_handlers: Arc<RwLock<HashMap<String, StreamHandler>>>,
+    /// Shared view of the swarm's current listen addresses.
+    listen_addrs: Arc<RwLock<Vec<String>>>,
     pending_requests: HashMap<OutboundRequestId, PendingRequest>,
+    /// Relay circuit reservation listeners (listener id → circuit multiaddr),
+    /// tracked so a closed reservation listener can be re-established.
+    circuit_listeners: HashMap<libp2p::core::transport::ListenerId, Multiaddr>,
+    /// Circuit addresses whose listener closed; re-listened on the next sweep
+    /// tick (giving the relay a few seconds to come back).
+    circuit_relisten: Vec<Multiaddr>,
     config: Libp2pConfig,
 }
 
@@ -373,6 +429,7 @@ impl SwarmWorker {
             tokio::select! {
                 _ = sweep.tick() => {
                     self.sweep_pending_requests();
+                    self.relisten_closed_circuits();
                 }
                 command = self.command_rx.recv() => {
                     match command {
@@ -399,6 +456,25 @@ impl SwarmWorker {
                         }
                         Some(SwarmEvent::NewListenAddr { address, .. }) => {
                             info!("Listening on {address}");
+                            let mut addrs = self.listen_addrs.write().await;
+                            let addr = address.to_string();
+                            if !addrs.contains(&addr) {
+                                addrs.push(addr);
+                            }
+                        }
+                        Some(SwarmEvent::ExpiredListenAddr { address, .. }) => {
+                            let addr = address.to_string();
+                            self.listen_addrs.write().await.retain(|a| *a != addr);
+                        }
+                        Some(SwarmEvent::ListenerClosed { listener_id, reason, .. }) => {
+                            if let Some(circuit) = self.circuit_listeners.remove(&listener_id) {
+                                warn!(
+                                    %circuit,
+                                    ?reason,
+                                    "Relay circuit reservation listener closed; will re-establish"
+                                );
+                                self.circuit_relisten.push(circuit);
+                            }
                         }
                         Some(SwarmEvent::Behaviour(event)) => {
                             self.handle_behaviour_event(event).await;
@@ -430,9 +506,25 @@ impl SwarmWorker {
         for id in expired {
             if let Some(req) = self.pending_requests.remove(&id) {
                 warn!(peer = %req.peer_id, protocol = %req.protocol, "RPC request timed out");
-                let _ = req
-                    .reply
-                    .send(Err(TransportError::Timeout(REQUEST_TIMEOUT)));
+                let _ = req.reply.send(Err(TransportError::Timeout(req.timeout)));
+            }
+        }
+    }
+
+    /// Re-establish relay circuit reservations whose listener closed (e.g.
+    /// the relay was unreachable). Runs on the periodic sweep tick, so a
+    /// closed reservation is retried roughly every [`PENDING_SWEEP_INTERVAL`].
+    fn relisten_closed_circuits(&mut self) {
+        for circuit in std::mem::take(&mut self.circuit_relisten) {
+            match self.swarm.listen_on(circuit.clone()) {
+                Ok(id) => {
+                    info!(%circuit, "Re-requesting relay circuit reservation");
+                    self.circuit_listeners.insert(id, circuit);
+                }
+                Err(e) => {
+                    warn!(%circuit, error = %e, "Failed to re-listen on relay circuit; will retry");
+                    self.circuit_relisten.push(circuit);
+                }
             }
         }
     }
@@ -458,6 +550,7 @@ impl SwarmWorker {
                 libp2p_peer,
                 protocol,
                 request,
+                timeout,
                 reply,
             } => {
                 // Bound the pending map: reject rather than grow without limit.
@@ -484,7 +577,8 @@ impl SwarmWorker {
                         peer_id: peer.clone(),
                         protocol,
                         reply,
-                        deadline: Instant::now() + REQUEST_TIMEOUT,
+                        deadline: Instant::now() + timeout,
+                        timeout,
                     },
                 );
                 let mut peers = self.connected_peers.write().await;
@@ -763,13 +857,22 @@ async fn await_reply(
     peer: &PeerId,
     reply_rx: oneshot::Receiver<Result<Vec<u8>, TransportError>>,
 ) -> Result<Vec<u8>, TransportError> {
-    match tokio::time::timeout(REQUEST_TIMEOUT, reply_rx).await {
+    await_reply_within(peer, reply_rx, REQUEST_TIMEOUT).await
+}
+
+/// Await a reply from the swarm task, bounded by an explicit timeout.
+async fn await_reply_within(
+    peer: &PeerId,
+    reply_rx: oneshot::Receiver<Result<Vec<u8>, TransportError>>,
+    timeout: Duration,
+) -> Result<Vec<u8>, TransportError> {
+    match tokio::time::timeout(timeout, reply_rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err(TransportError::DialFailed {
             peer: peer.to_string(),
             reason: "response channel closed".into(),
         }),
-        Err(_) => Err(TransportError::Timeout(REQUEST_TIMEOUT)),
+        Err(_) => Err(TransportError::Timeout(timeout)),
     }
 }
 
@@ -831,6 +934,7 @@ impl TransportAdapter for Libp2pTransportAdapter {
                 libp2p_peer: libp2p_peer_id,
                 protocol: protocol.clone(),
                 request: Vec::new(),
+                timeout: REQUEST_TIMEOUT,
                 reply: reply_tx,
             })
             .await
@@ -966,9 +1070,39 @@ impl TransportAdapter for Libp2pTransportAdapter {
 /// `peer_rules` are keyed on. If the key cannot be recovered (a non-Ed25519 or
 /// non-inlined peer id, which Ganglion never issues), this returns `None` and
 /// the caller treats the peer as unauthenticated.
-fn libp2p_to_gang_peer_id(peer_id: &Libp2pPeerId) -> Option<PeerId> {
+pub fn libp2p_to_gang_peer_id(peer_id: &Libp2pPeerId) -> Option<PeerId> {
     let key = ed25519_pubkey_from_libp2p(peer_id)?;
     Some(PeerId::from_ed25519_bytes(&key))
+}
+
+/// Identity material recovered from a dialable base58 libp2p peer id
+/// (`12D3KooW…`). See [`identity_from_libp2p_str`].
+#[derive(Debug, Clone)]
+pub struct DialableIdentity {
+    /// The libp2p peer id in its canonical base58 form.
+    pub libp2p_id: String,
+    /// The canonical gang peer id derived from the embedded Ed25519 key
+    /// (SEC-03 derivation — matches trust stores, manifests, and policy).
+    pub gang_id: PeerId,
+    /// The raw 32-byte Ed25519 public key embedded in the libp2p id.
+    pub ed25519_pubkey: [u8; 32],
+}
+
+/// Parse a base58 libp2p peer id string (`12D3KooW…`) and recover the
+/// embedded Ed25519 identity.
+///
+/// A libp2p Ed25519 peer id *is* the public key (inlined via the identity
+/// multihash), so the gang trust identity is derivable from it — never the
+/// reverse. Returns `None` if the string is not a libp2p peer id or does not
+/// embed an Ed25519 key (Ganglion never issues such ids).
+pub fn identity_from_libp2p_str(s: &str) -> Option<DialableIdentity> {
+    let libp2p_id: Libp2pPeerId = s.parse().ok()?;
+    let ed25519_pubkey = ed25519_pubkey_from_libp2p(&libp2p_id)?;
+    Some(DialableIdentity {
+        libp2p_id: libp2p_id.to_string(),
+        gang_id: PeerId::from_ed25519_bytes(&ed25519_pubkey),
+        ed25519_pubkey,
+    })
 }
 
 /// Recover the raw 32-byte Ed25519 public key inlined in a libp2p peer id.

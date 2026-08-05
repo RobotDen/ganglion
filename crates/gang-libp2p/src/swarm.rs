@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use libp2p::{
-    Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder, connection_limits, dcutr, identify,
-    kad, noise, ping, relay, request_response,
+    Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder, connection_limits,
+    core::transport::ListenerId, dcutr, identify, kad, noise, ping, relay, request_response,
     swarm::{NetworkBehaviour, behaviour::toggle::Toggle},
     tcp, yamux,
 };
@@ -243,10 +243,21 @@ pub async fn build_swarm(
             // Relay server: circuit relay v2 for other peers. Only enabled when
             // this node is explicitly configured as a relay; otherwise a
             // disabled Toggle is installed so we never relay for arbitrary peers.
+            //
+            // The libp2p defaults (128 KiB / 2 minutes per circuit) are tuned
+            // for incidental relaying, not for Ganglion's control plane: a
+            // `DeployCapability` carries whole WASM components (megabytes), so
+            // the byte limit is lifted (0 = unlimited) and the duration limit
+            // raised to an hour. Reservation/circuit *count* limits keep their
+            // defaults, bounding resource use per peer.
             let relay_server: Toggle<relay::Behaviour> = if config.relay_server {
                 Toggle::from(Some(relay::Behaviour::new(
                     local_peer_id,
-                    relay::Config::default(),
+                    relay::Config {
+                        max_circuit_duration: Duration::from_secs(60 * 60),
+                        max_circuit_bytes: 0, // 0 = unlimited
+                        ..relay::Config::default()
+                    },
                 )))
             } else {
                 Toggle::from(None)
@@ -258,11 +269,16 @@ pub async fn build_swarm(
                     .with_max_established_incoming(Some(config.max_inbound_connections)),
             );
 
-            // Ganglion request/response protocols
+            // Ganglion request/response protocols. The library default request
+            // timeout (10 s) is too tight for the control plane: a deploy ships
+            // component bytes over a relay circuit and then waits for the robot
+            // to verify + install before the response comes back. Callers apply
+            // their own (shorter) per-request deadlines on top of this ceiling.
             let ganglion_rpc = request_response::Behaviour::with_codec(
                 GanglionCodec,
                 ganglion_protocols(),
-                request_response::Config::default(),
+                request_response::Config::default()
+                    .with_request_timeout(Duration::from_secs(120)),
             );
 
             Ok(GanglionBehaviour {
@@ -310,6 +326,49 @@ pub fn start_listening(
         info!("Listening on {addr_str}");
     }
     Ok(())
+}
+
+/// Request circuit-relay v2 reservations on every configured relay.
+///
+/// A client node (robot agent) is only reachable through a relay if it holds a
+/// *reservation* there — merely dialing the relay is not enough. Listening on
+/// `<relay-multiaddr>/p2p-circuit` makes the relay client establish (and renew)
+/// that reservation; the relay connection itself is dialed automatically.
+///
+/// Returns the listener ids and their circuit addresses so the swarm worker
+/// can re-establish a reservation whose listener closes (e.g. the relay was
+/// down when the node started). No-op for relay servers and for nodes with no
+/// configured relays.
+///
+/// The relay multiaddr must carry the relay's dialable `/p2p/<libp2p-id>`
+/// suffix (the form `gang relay` prints); without it the relay client cannot
+/// address the reservation and every attempt would fail, so this errors
+/// loudly instead.
+pub(crate) fn listen_on_relay_circuits(
+    swarm: &mut Swarm<GanglionBehaviour>,
+    config: &Libp2pConfig,
+) -> anyhow::Result<std::collections::HashMap<ListenerId, Multiaddr>> {
+    use libp2p::multiaddr::Protocol;
+
+    let mut listeners = std::collections::HashMap::new();
+    if config.relay_server {
+        return Ok(listeners);
+    }
+    for addr_str in &config.relay_addrs {
+        let addr: Multiaddr = addr_str.parse()?;
+        if !addr.iter().any(|p| matches!(p, Protocol::P2p(_))) {
+            anyhow::bail!(
+                "relay address {addr_str} is missing its /p2p/<relay-libp2p-id> suffix; \
+                 circuit reservations require the dialable form printed by `gang relay` \
+                 (e.g. /ip4/1.2.3.4/tcp/4001/p2p/12D3KooW...)"
+            );
+        }
+        let circuit = addr.with(Protocol::P2pCircuit);
+        let id = swarm.listen_on(circuit.clone())?;
+        info!("Requesting relay circuit reservation on {circuit}");
+        listeners.insert(id, circuit);
+    }
+    Ok(listeners)
 }
 
 /// Connect to configured relay nodes.

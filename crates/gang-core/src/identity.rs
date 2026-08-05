@@ -273,6 +273,15 @@ pub struct PeerEntry {
     /// Known relay multiaddresses for reaching this peer.
     #[serde(default)]
     pub relay_addrs: Vec<String>,
+    /// The peer's dialable libp2p peer id (base58 `12D3KooW…`), when known.
+    ///
+    /// The gang `peer_id` above identifies the peer in trust stores and
+    /// policies, but only the libp2p form can appear in a `/p2p/` multiaddr
+    /// component — remote dispatch requires it. Registry files written before
+    /// this field existed load with `None`; re-register the peer with the
+    /// libp2p id (printed by `gang agent`/`gang relay`) to populate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub libp2p_id: Option<String>,
 }
 
 impl PeerRegistry {
@@ -469,6 +478,7 @@ mod tests {
             peer_id: kp.peer_id(),
             role: Role::RobotAgent,
             relay_addrs: vec!["/ip4/1.2.3.4/tcp/4001".into()],
+            libp2p_id: Some("12D3KooWExampleDialableId".into()),
         };
 
         registry.register("robot-42".into(), entry.clone());
@@ -479,10 +489,32 @@ mod tests {
         registry.save(&path).unwrap();
         let loaded = PeerRegistry::load(&path).unwrap();
         assert!(loaded.lookup("robot-42").is_some());
+        assert_eq!(
+            loaded.lookup("robot-42").unwrap().libp2p_id.as_deref(),
+            Some("12D3KooWExampleDialableId")
+        );
 
         // Lookup by peer ID
         let (name, _) = loaded.lookup_by_peer_id(&kp.peer_id()).unwrap();
         assert_eq!(name, "robot-42");
+    }
+
+    #[test]
+    fn peer_registry_loads_pre_libp2p_id_files() {
+        // Registry files written before the `libp2p_id` field existed must
+        // still load (back-compat), with `libp2p_id: None`.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("peers.json");
+        std::fs::write(
+            &path,
+            r#"{"entries":{"old-bot":{"peer_id":"12D3-0123456789abcdef0123456789abcdef","role":"robot_agent","relay_addrs":["/ip4/1.2.3.4/tcp/4001"]}}}"#,
+        )
+        .unwrap();
+
+        let loaded = PeerRegistry::load(&path).unwrap();
+        let entry = loaded.lookup("old-bot").expect("legacy entry loads");
+        assert!(entry.libp2p_id.is_none());
+        assert_eq!(entry.relay_addrs.len(), 1);
     }
 
     #[test]
