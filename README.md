@@ -65,7 +65,7 @@ Robots are reached through a circuit relay, never by DNS name or inbound port. O
 gang relay --port 4001 --data-dir /var/lib/gang-relay
 ```
 
-The startup log prints the relay's libp2p peer ID (`local_peer_id=12D3KooW...`). The dialable relay multiaddr is `/ip4/<server-ip>/tcp/4001/p2p/<that-id>`, for example:
+The relay prints both of its ids, labeled — the gang identity and `Peer ID (libp2p/dial)` — plus ready-to-paste client multiaddrs. The dialable relay multiaddr is `/ip4/<server-ip>/tcp/4001/p2p/<libp2p-id>`, for example:
 
 ```
 /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
@@ -80,27 +80,28 @@ gang agent --data-dir /var/lib/gang-agent \
     -r /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 ```
 
-The agent retries the relay every 5 seconds until it logs `Connected to relay. Waiting for operator connections...`, and prints the exact `gang peer add` line to run on your workstation.
+The agent requests a circuit reservation on the relay (that reservation is what makes the robot reachable), retries the relay every 5 seconds until it logs `Connected to relay. Waiting for operator connections...`, and prints its dialable id (`Peer ID (libp2p/dial): 12D3KooW…`) plus the exact `gang peer add` line to run on your workstation.
 
 ### 5. Register, deploy, run (workstation)
 
 ```bash
 gang identity show   # created on first use — `gang demo` in step 2 already made one
-gang peer add robot-a 12D3-f721be4d302e7da31bebf3b89e2b9f53 \
+gang peer add robot-a 12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2 \
     --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk \
     --role robot-agent
 
-gang deploy robot-a my-tool.wasm   # remote dispatch: in progress — see Fleet status below
-gang run robot-a my-tool
+gang deploy robot-a my-tool.wasm   # DeployCapability over the relay circuit
+gang run robot-a my-tool           # InvokeCapability; prints the tool's output
+gang caps robot-a                  # ListCapabilities
 ```
 
-`robot-a` is a **local alias** stored in `~/.gang/peers.json`, mapped to the robot's Ed25519-derived peer ID — name resolution never touches DNS.
+`robot-a` is a **local alias** stored in `~/.gang/peers.json`. Register the robot with the **dialable libp2p id** (`12D3KooW…`) the agent prints at startup — the Ed25519-derived gang trust id is embedded in it and stored alongside. Name resolution never touches DNS.
 
 ### Fleet status: what works today
 
-> **Built and verified:** everything local plus the connectivity layer — `gang demo`, identity, component signing, the policy/audit pipeline, local deploy/run against an on-machine agent, the relay server, robot agents that dial out and stay connected (with retry), the peer registry, and the TOFU host-key machinery.
+> **Built and verified:** everything local plus the connectivity layer AND the dispatch hop — `gang demo`, identity, component signing, the policy/audit pipeline, the relay server, robot agents that dial out, hold a circuit reservation, and stay connected (with retry), the peer registry, and **remote `deploy`/`run`/`caps` over the relay circuit** with SSH-style TOFU host-key verification, replay-protected control messages, and honest non-zero exits on failure. In-process integration tests drive the full Deploy→Invoke→List round-trip through a real relay circuit.
 >
-> **In progress:** the operator-side dispatch hop — sending `deploy`/`run`/`caps` over the relay circuit and returning results. Today those commands against a *remote* peer exit with a clear "not yet implemented (ADR-020 Phase 32)" error; `logs`, `list`, `connect`, and `transport-stats` depend on the same hop and are stubs. Local deploy/run exercises the identical signing/policy/audit path, so tools built now run unchanged when the hop lands. Tracked in [ADR-020](docs/adr/ADR-020-remote-dispatch-and-e2e-test.md) and the roadmap issues.
+> **In progress:** the presence/streaming layer — fleet discovery and long-lived robot sessions. `logs`, `list`, `connect`, and `transport-stats` depend on it and remain stubs (they exit non-zero with a `[WIP]` message; `transport-stats` prints clearly-labeled simulated data). Tracked in [ADR-020](docs/adr/ADR-020-remote-dispatch-and-e2e-test.md) and the roadmap issues.
 
 See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full walkthrough with real transcripts, including how peer IDs, relays, and multiaddrs fit together.
 
@@ -196,7 +197,7 @@ gang list                             List reachable robots in the fleet [WIP]
 gang connect <robot>                  Establish a session via relay [WIP]
 ```
 
-Commands tagged `[WIP]` wait on the operator remote-dispatch hop — see [Fleet status](#fleet-status-what-works-today) above. See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full details, flags, and examples.
+Commands tagged `[WIP]` wait on the presence/streaming layer — see [Fleet status](#fleet-status-what-works-today) above. See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full details, flags, and examples.
 
 ## Capability groups
 

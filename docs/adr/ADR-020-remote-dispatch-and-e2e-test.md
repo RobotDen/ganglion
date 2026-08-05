@@ -1,18 +1,31 @@
 # ADR-020: Remote dispatch via control protocol and end-to-end validation
 
-**Status:** Accepted; partially implemented
+**Status:** Accepted; implemented
 **Date:** 2026-04-24
 
-> **Implementation status (as of v2.0.0).** The operator-experience and
-> supporting pieces landed: peer registry CLI (§4), operator config file (§5),
-> SSH-style TOFU identity verification (§6), shell completions (§8), the
-> reference WASM component build (§9), and target resolution (name → prefix →
-> peer id → local fallback) in §3. **Not yet implemented:** the robot agent
-> serve loop (§1) and relay-mediated operator remote dispatch (§2–§3) — a
-> resolved *remote* target exits with a "not yet implemented (ADR-020 Phase 32)"
-> message and only the local fallback executes. The e2e scenario (§7) is
-> therefore a **connectivity smoke test**, not the full deploy/invoke round-trip
-> described below. The design below is retained as the target design.
+> **Implementation status.** All eight work areas have landed. v2.0.0 shipped
+> the operator-experience and supporting pieces: peer registry CLI (§4),
+> operator config file (§5), the TOFU machinery (§6), shell completions (§8),
+> the reference WASM component build (§9), target resolution (§3), the robot
+> agent serve loop with replay protection (§1), and agent transport startup
+> (§2). Phase 32 completed the remaining hop: **relay-mediated operator remote
+> dispatch** (§3) — `gang deploy`/`run`/`caps` against a remote peer now dial
+> the robot via `<relay>/p2p-circuit/p2p/<robot-libp2p-id>` and exchange
+> control messages, with §6's host-key verification enforced on that path. The
+> e2e scenario (§7) performs the full deploy → invoke → list round-trip with
+> the signed test component, and in-process integration tests
+> (`crates/gang-cli/tests/remote_dispatch.rs`) drive the same flow through a
+> real relay circuit.
+>
+> Two deviations from the design as written: peers are registered with the
+> robot's **dialable base58 libp2p id** (the gang `12D3-<hex>` id is derived
+> from the embedded Ed25519 key and stored alongside — only the libp2p form
+> can appear in a `/p2p/` multiaddr component), and reaching a robot through
+> a relay requires the agent to hold a **circuit reservation** there (the
+> agent listens on `<relay>/p2p-circuit` and re-establishes the reservation if
+> it lapses; the relay lifts the libp2p per-circuit data/duration limits so
+> deploys can carry component bytes). Dynamic shell completions for peer and
+> capability names (§8, second half) remain unimplemented.
 
 ## Context
 

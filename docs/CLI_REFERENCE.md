@@ -51,7 +51,7 @@ Available commands:
   gang agent
   ...
 
-WIP commands (require relay connectivity):
+WIP commands (need the presence/streaming layer):
   gang logs  [WIP]
   gang list  [WIP]
   gang connect  [WIP]
@@ -143,8 +143,14 @@ $ gang agent --data-dir /tmp/gang-agent \
 
 The `/p2p/` component of the relay multiaddr must be the relay's
 **libp2p-format** peer ID (base58, `12D3KooW...`) — the Ganglion-native
-`12D3-<hex>` form does not parse in a multiaddr. `gang relay` logs the correct
-value as `local_peer_id=` at startup.
+`12D3-<hex>` form does not parse in a multiaddr. `gang relay` prints the
+correct value as `Peer ID (libp2p/dial)` (and ready-to-paste client
+multiaddrs) at startup.
+
+In relay mode the agent requests a **circuit reservation** on the relay (the
+reservation is what makes the robot reachable through it), prints its own
+dialable id as `Peer ID (libp2p/dial): 12D3KooW…`, and prints the exact
+`gang peer add` line to run on the operator machine.
 
 | Flag | Description |
 |------|-------------|
@@ -160,37 +166,61 @@ every 5 seconds until it succeeds.
 
 ### `gang deploy <robot> <wasm-path>`
 
-Deploy a signed WASM component to a robot.
+Deploy a signed WASM component to a robot — remotely over the relay circuit,
+or locally against an in-process agent.
+
+The `<robot>` argument resolves through: registered name → abbreviated peer ID
+prefix → full peer ID (gang `12D3-<hex>` or dialable libp2p `12D3KooW…`) →
+local fallback.
+
+**Remote targets** (a registered peer with a stored libp2p id and relay
+address): the CLI builds a transport from your operator identity, dials the
+relay, dials the robot via `<relay>/p2p-circuit/p2p/<robot-libp2p-id>`,
+verifies the robot's host key (SSH-style TOFU — see `host_key_policy` under
+`gang config`), and sends the signed bundle on `/ganglion/control/1.0` with a
+fresh nonce + timestamp (the robot rejects stale or replayed requests):
 
 ```bash
-$ gang deploy robot-42 my-diagnostics.wasm
-[log lines]
-Deployed 'my-diagnostics' to robot 'robot-42'
+$ gang deploy robot-a my-tool.wasm
+Deployed 'my-tool' to robot 'robot-a' (via relay)
 ```
 
-The `<robot>` argument resolves through: registered name → abbreviated peer ID prefix → full peer ID → local fallback.
+A remote failure exits non-zero with the robot's actual error, e.g.:
 
-> **Remote dispatch is WIP.** If the target resolves to a *remote* peer, the
-> command exits non-zero with a "Remote deploy ... is not yet implemented
-> (ADR-020 Phase 32)" message. Only the local fallback path
-> (`/tmp/gang-agent-<robot>`) currently deploys and invokes: deploy/run/caps
-> run an in-process local agent over that directory (a separately started
-> `gang agent` process is not consulted). The directory must exist for the
-> name to resolve locally — `mkdir -p /tmp/gang-agent-<robot>` first. The same
-> applies to `gang run` and `gang caps`.
+```
+Error: timed out after 60s: robot 'robot-a' not reachable via relay
+/ip4/203.0.113.10/tcp/4001/p2p/12D3KooW... (is the agent running, and did it
+connect to that relay?)
+```
+
+A peer registered with only a legacy gang id cannot be dialed; the command
+tells you to re-add it with the libp2p id the agent prints at startup.
+
+**Local fallback** (`/tmp/gang-agent-<robot>` exists): deploy/run/caps run an
+in-process local agent over that directory (a separately started `gang agent`
+process is not consulted). The directory must exist for the name to resolve
+locally — `mkdir -p /tmp/gang-agent-<robot>` first.
+
+```bash
+$ gang deploy robot-42 my-tool.wasm
+[log lines]
+Deployed 'my-tool' to robot 'robot-42'
+```
 
 | Flag | Description |
 |------|-------------|
 | `--manifest <path>` | Path to the manifest file. Auto-detected if adjacent to the `.wasm` file. |
-| `--peer <peer-id>`, `-p` | Explicit peer ID (bypasses name/prefix resolution). |
+| `--peer <peer-id>`, `-p` | Explicit peer ID (bypasses name/prefix resolution; accepts either id form). |
 | `--relay <multiaddr>`, `-r` | Override relay address. |
+| `--timeout <secs>` | Overall remote-dispatch timeout. Default: 60. |
 
 ### `gang run <robot> <cap-name> [args...]`
 
-Invoke an installed capability on a robot.
+Invoke an installed capability on a robot (remote dispatch and local fallback
+work exactly as for `gang deploy`; remote default timeout is 30 s).
 
 ```bash
-$ gang run robot-42 my-diagnostics
+$ gang run robot-42 my-tool
 [log lines]
 System Information:
   Hostname:  robot-42
@@ -209,17 +239,25 @@ Processes: 68 running
 ```
 
 With `--format json`, the raw JSON result is printed instead of the
-human-readable rendering.
+human-readable rendering. Non-JSON capability output is printed as text. A
+non-success invocation status from the robot (failure, policy denial, trap,
+timeout) exits non-zero.
+
+| Flag | Description |
+|------|-------------|
+| `--peer <peer-id>`, `-p` | Explicit peer ID (bypasses name/prefix resolution; accepts either id form). |
+| `--relay <multiaddr>`, `-r` | Override relay address. |
+| `--timeout <secs>` | Overall remote-dispatch timeout. Default: 30. |
 
 ### `gang caps <robot>`
 
-List capabilities installed on a robot.
+List capabilities installed on a robot (remote dispatch and local fallback as
+above; remote default timeout is 30 s, `--timeout` to override).
 
 ```bash
-$ gang caps robot-42
-[log lines]
-Capabilities on 'robot-42':
-  my-diagnostics v0.1.0 (by 12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890)
+$ gang caps robot-a
+Capabilities on 'robot-a':
+  my-tool v0.1.0 (by 12D3-68c62c79b89c56c575df0845f26b6fae)
     - ganglion:diagnostics/collect@1.0
 ```
 
@@ -237,7 +275,7 @@ $ gang logs robot-42 --follow
 |------|-------------|
 | `--follow` | Continuously stream new log entries (like `tail -f`). |
 
-> Note: `[WIP]` — requires relay connectivity, which is not yet wired. The command exits non-zero with a WIP message (with `--format json` it first prints a `{"status":"unavailable",...}` object). Run `gang demo` for local testing or `gang status` for a summary of available commands.
+> Note: `[WIP]` — requires the presence/streaming layer (fleet discovery and long-lived robot sessions), which is not yet implemented. The command exits non-zero with a WIP message (with `--format json` it first prints a `{"status":"unavailable",...}` object). Remote deploy/run/caps work today; see `gang status`.
 
 ## Diagnostics
 
@@ -525,18 +563,32 @@ See `deploy/relay/README.md` for production deployment with Docker.
 
 ### `gang peer add <name> <peer-id>`
 
-Register a known peer (robot, relay, or operator).
+Register a known peer (robot, relay, or operator). `<peer-id>` accepts either
+id form:
+
+- **Dialable libp2p id** (base58 `12D3KooW…`, printed by `gang agent` /
+  `gang relay` as `Peer ID (libp2p/dial)`): the gang trust id is derived from
+  the Ed25519 key embedded in it, and **both** ids are stored. This is the
+  form remote dispatch needs.
+- **Legacy gang id** (`12D3-` + 32 hex chars): stored without a dialable id.
+  The command notes that remote `deploy`/`run`/`caps` require re-adding the
+  peer with the libp2p id.
 
 ```bash
-$ gang peer add warehouse-bot 12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890 \
+$ gang peer add warehouse-bot 12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2 \
     --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
+Registered peer 'warehouse-bot':
+  Peer ID (gang identity): 12D3-6ca0419fa75b4ba889669086076df590
+  Peer ID (libp2p/dial):   12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2
+  Role:    robot-agent
+  Relay:   /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 ```
 
 A malformed peer id is rejected with a clean error (exit code 1):
 
 ```bash
 $ gang peer add badbot not-a-peer-id
-Error: Invalid peer ID 'not-a-peer-id': invalid peer id: missing `12D3-` prefix: not-a-peer-id. Expected format: 12D3-<32 hex chars>
+Error: Invalid peer ID 'not-a-peer-id'. Expected either the dialable libp2p id (base58 `12D3KooW…`, printed by `gang agent`/`gang relay` at startup) or a gang id (`12D3-` + 32 hex chars).
 ```
 
 | Flag | Description |
@@ -550,11 +602,13 @@ Remove a registered peer.
 
 ### `gang peer list`
 
-List all registered peers with their peer IDs, roles, and relay addresses.
+List all registered peers with their peer IDs, dialable ids, roles, and relay
+addresses.
 
 ### `gang peer show <name>`
 
-Show details for a specific peer.
+Show details for a specific peer, including both id forms when the dialable
+libp2p id is stored.
 
 ### `gang peer rename <old-name> <new-name>`
 
@@ -613,7 +667,7 @@ Supported shells: bash, zsh, fish, elvish, powershell.
 
 List reachable robots in the fleet.
 
-> Note: `[WIP]` — requires relay connectivity, which is not yet wired. The command exits non-zero with a WIP message (`--format json` prints `{"status":"unavailable",...}` first). Run `gang demo` for local testing or `gang status` for a summary of available commands.
+> Note: `[WIP]` — requires the presence/streaming layer, which is not yet implemented. The command exits non-zero with a WIP message (`--format json` prints `{"status":"unavailable",...}` first). Remote deploy/run/caps work today; see `gang status`.
 
 ### `gang connect <robot>` [WIP]
 
@@ -627,7 +681,7 @@ $ gang connect robot-42 --prefer-transport quic,tcp
 |------|-------------|
 | `--prefer-transport <t1,t2>` | Preferred transport order for happy-eyeballs selection. |
 
-> Note: `[WIP]` — requires relay connectivity, which is not yet wired. The command exits non-zero with a WIP message (`--format json` prints `{"status":"unavailable",...}` first). Run `gang demo` for local testing or `gang status` for a summary of available commands.
+> Note: `[WIP]` — requires the presence/streaming layer, which is not yet implemented. The command exits non-zero with a WIP message (`--format json` prints `{"status":"unavailable",...}` first). Remote deploy/run/caps work today; see `gang status`.
 
 ## Exit codes
 

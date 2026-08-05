@@ -2,6 +2,56 @@
 
 All notable changes to Ganglion will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Operator-side remote dispatch (ADR-020 Phase 32).** `gang deploy`, `gang
+  run`, and `gang caps` against a remote robot now work end-to-end: the CLI
+  builds a libp2p transport from the operator identity, dials the configured
+  relay, dials the robot via `<relay>/p2p-circuit/p2p/<robot-libp2p-id>`, and
+  exchanges control messages on `/ganglion/control/1.0` (fresh nonce +
+  timestamp per request; the robot rejects replays). Remote failures exit
+  non-zero with actionable errors; the whole dispatch is timeout-bounded
+  (60 s deploy, 30 s run/caps, `--timeout <secs>` to override).
+- **Dialable peer ids in the registry.** `gang peer add` accepts either the
+  base58 libp2p id (`12D3KooW…`, printed by `gang agent`/`gang relay` as
+  `Peer ID (libp2p/dial)`) — deriving and storing the gang id alongside — or
+  a legacy gang id (stored without a dial id; remote dispatch then instructs
+  re-adding with the libp2p form). `peer list`/`show` display both. Older
+  `peers.json` files load unchanged.
+- **Host-key verification enforced.** The SSH-style TOFU machinery now gates
+  every remote dispatch: `strict` prompts on first connect (and refuses
+  non-interactive stdin with guidance), `tofu` auto-accepts the first key;
+  both hard-fail with the loud SSH-style warning when a known robot name
+  presents a different identity. `gang peer trust-reset` clears it.
+- **Relay circuit reservations.** Client nodes with configured relays listen
+  on `<relay>/p2p-circuit`, establishing — and automatically re-establishing —
+  the reservation that makes them reachable through the relay. The relay
+  server registers its listen addresses as external addresses (reservations
+  were previously unusable: `NoAddressesInReservation`) and lifts the libp2p
+  per-circuit limits (128 KiB / 2 min → unlimited bytes / 1 h) so deploys can
+  ship component bytes.
+- **In-process integration tests** (`crates/gang-cli/tests/remote_dispatch.rs`)
+  drive Deploy → Invoke → List through a real relay circuit on loopback (the
+  robot binds no direct address), plus replay rejection, untrusted-deployer
+  rejection, and a direct-dial variant.
+- The e2e Docker harness (`test-harness/e2e-dispatch/`) performs a real
+  deploy → invoke → list round-trip with the signed test WASM component
+  instead of a connectivity-only smoke test.
+
+### Changed
+
+- `gang agent` (relay mode) prints `Peer ID (libp2p/dial): …` and a
+  copy-pasteable `gang peer add` line using the dialable id, and requires the
+  relay multiaddr to carry its `/p2p/<relay-libp2p-id>` suffix (failing fast
+  with guidance otherwise — reservations cannot be requested without it).
+- Control-plane RPC timeout ceiling raised from libp2p's 10 s default to
+  120 s; `send_rpc` supports per-request timeouts.
+- `gang logs`/`list`/`connect`/`transport-stats` remain `[WIP]`, now
+  explicitly waiting on the presence/streaming layer (fleet discovery and
+  long-lived sessions), not on remote dispatch.
+
 ## [2.0.0] - 2026-07-23
 
 A security- and quality-hardening release. Every change below reflects code that

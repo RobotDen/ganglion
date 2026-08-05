@@ -128,19 +128,28 @@ authentication).
 1. **Registered peer name** — an alias created with
    `gang peer add <name> <peer-id> --relay <multiaddr> --role robot-agent`
    (stored in `~/.gang/peers.json`)
-2. **Peer-ID prefix** — Docker-style abbreviation, e.g. `12D3-f721`
+2. **Peer-ID prefix** — Docker-style abbreviation, e.g. `12D3-6ca0`
    (must be unambiguous among registered peers)
-3. **Full peer ID** — `12D3-` + 32 hex chars
+3. **Full peer ID** — either form: the dialable base58 libp2p id
+   (`12D3KooW…`) or the gang id (`12D3-` + 32 hex chars; not dialable, so
+   remote dispatch needs the libp2p form)
 4. **Local agent fallback** — if `/tmp/gang-agent-<target>` exists, the command
    runs against an in-process local agent over that directory (step 8)
 
+**Two id forms.** A robot has one Ed25519 key and two spellings of its
+identity: the base58 **libp2p id** (`12D3KooW…`) literally embeds the public
+key and is the only form a `/p2p/` multiaddr component accepts, and the short
+**gang id** (`12D3-<32 hex>`, a Blake3 digest of the same key) used in trust
+stores, policies, and audit logs. Register robots with the libp2p id — the
+gang id is derived from it automatically and both are stored.
+
 **Host keys (TOFU).** Peer identity verification is SSH-style
-trust-on-first-use: `host_key_policy` in `~/.gang/config.toml` is `strict`
-(prompt on first connect, hard-fail on key change), `tofu` (auto-accept new
-keys, hard-fail on change), or `none`. `gang peer trust-reset <name>` clears a
-stored host key. The policy is stored and the verification machinery exists
-today; it is enforced on the remote-dispatch path as that lands (see the
-[Fleet status](../README.md#fleet-status-what-works-today) box).
+trust-on-first-use, enforced on every remote `deploy`/`run`/`caps`:
+`host_key_policy` in `~/.gang/config.toml` is `strict` (prompt on first
+connect, hard-fail on key change; requires an interactive terminal), `tofu`
+(auto-accept new keys, hard-fail on change — use this for scripts), or `none`.
+`gang peer trust-reset <name>` clears a stored host key after an expected
+re-image.
 
 **Know your network.** `gang diagnose` probes the local environment and
 classifies it into one of five archetypes. Real output from the (deliberately
@@ -190,29 +199,27 @@ $ gang relay --port 4001 --data-dir /var/lib/gang-relay
 Ganglion Relay Server
 ====================
 
-Peer ID:      12D3-782c28d3bf62449667fa35b25bf7fdae
+Peer ID (gang identity): 12D3-782c28d3bf62449667fa35b25bf7fdae
+Peer ID (libp2p/dial):   12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 Relay mode:   server
 
 Listen addresses:
   /ip4/0.0.0.0/tcp/4001
   /ip4/0.0.0.0/udp/4001/quic-v1
 
-[log lines] Building Ganglion swarm local_peer_id=12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk relay_server=true
+Relay multiaddrs (for client config):
+  /ip4/0.0.0.0/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
+  /ip4/0.0.0.0/udp/4001/quic-v1/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
+
 Relay is running. Press Ctrl+C to stop.
 ```
 
-Build the dialable relay multiaddr from your server's address plus the
-**libp2p-format** peer ID from the `local_peer_id=` log line:
+The `/p2p/` component carries the **libp2p-format** (base58) peer id — the
+only dialable form. Substitute your server's address for `0.0.0.0`:
 
 ```
 /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 ```
-
-> **Note:** the `Relay multiaddrs (for client config)` lines the relay also
-> prints embed the short `12D3-<hex>` (Ganglion-native) peer ID; multiaddr
-> parsing only accepts the base58 `12D3KooW...` form, so use the
-> `local_peer_id` value in the `/p2p/` component. (Known gap — the printed
-> config lines will switch to the dialable form.)
 
 The relay's identity key persists in `--data-dir`, so the multiaddr stays
 stable across restarts. See `deploy/relay/README.md` for production deployment
@@ -228,43 +235,51 @@ $ gang agent --data-dir /var/lib/gang-agent \
     -r /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 [log lines]
 Robot agent started:
-  Peer ID:  12D3-f721be4d302e7da31bebf3b89e2b9f53
+  Peer ID:  12D3-6ca0419fa75b4ba889669086076df590
   Data dir: /var/lib/gang-agent
   Policy:   permissive (dev mode)
   Relay:    /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
   Mode:     remote (listening on /ganglion/control/1.0)
 
+[log lines] Requesting relay circuit reservation on /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i…/p2p-circuit
+Peer ID (libp2p/dial): 12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2
+
 Register on operator machine:
-  gang peer add my-robot 12D3-f721be4d302e7da31bebf3b89e2b9f53 --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
+  gang peer add my-robot 12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2 --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 
 Starting transport...
 [log lines]
 Connected to relay. Waiting for operator connections...
 ```
 
-If the relay is unreachable the agent doesn't exit — it logs a warning and
-retries every 5 seconds. Without a policy file the agent warns loudly that it
-is running a PERMISSIVE dev policy with trust checks disabled; production
-agents get a default-deny policy file and a populated trust store (see
-[SECURITY.md](SECURITY.md)).
+The circuit **reservation** the agent requests is what makes the robot
+reachable *through* the relay — merely being connected is not enough. If the
+relay is unreachable the agent doesn't exit — it logs a warning, retries every
+5 seconds, and re-establishes the reservation. Without a policy file the agent
+warns loudly that it is running a PERMISSIVE dev policy with trust checks
+disabled; production agents get a default-deny policy file and a populated
+trust store (see [SECURITY.md](SECURITY.md)).
 
 ## 7. Register the robot on your workstation
 
 Paste the line the agent printed (naming it whatever you like):
 
 ```console
-$ gang peer add robot-a 12D3-f721be4d302e7da31bebf3b89e2b9f53 \
+$ gang peer add robot-a 12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2 \
     --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk \
     --role robot-agent
 Registered peer 'robot-a':
-  Peer ID: 12D3-f721be4d302e7da31bebf3b89e2b9f53
+  Peer ID (gang identity): 12D3-6ca0419fa75b4ba889669086076df590
+  Peer ID (libp2p/dial):   12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2
   Role:    robot-agent
   Relay:   /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 ```
 
-From now on `robot-a` resolves to that peer ID + relay (`gang peer list` shows
-the mapping). This is the entire "establishing a connection to a robot" story:
-robot dials relay, you record the robot's identity and relay locally.
+Note the gang identity was **derived** from the dialable id you pasted — the
+base58 libp2p id embeds the robot's Ed25519 public key. From now on `robot-a`
+resolves to that identity + relay (`gang peer list` shows the mapping). This
+is the entire "establishing a connection to a robot" story: robot dials relay
+and reserves a circuit, you record the robot's identity and relay locally.
 
 ## 8. Sign, deploy, run
 
@@ -273,52 +288,79 @@ Sign a component with your identity, declaring its capabilities explicitly.
 walkthrough — building a real component is step 9:
 
 ```console
-$ printf '\0asm\1\0\0\0' > my-diagnostics.wasm
-$ gang sign my-diagnostics.wasm --capabilities diagnostics
-Signed component: my-diagnostics.wasm
-  Name:     my-diagnostics
+$ printf 'demo capability bytes (not wasm)' > my-tool.wasm
+$ gang sign my-tool.wasm --name my-tool --capabilities diagnostics
+Signed component: my-tool.wasm
+  Name:     my-tool
   Version:  0.1.0
-  Manifest: my-diagnostics.manifest.cbor
-  Author:   12D3-c2ace1a32fd67c0c8c66976336bceead
-  Hash:     0d66d411a21e80d93afa1487b002a186...
+  Manifest: my-tool.manifest.cbor
+  Author:   12D3-68c62c79b89c56c575df0845f26b6fae
+  Hash:     b4f4a1814d6cedd002496f90a01b469e...
   Capabilities:
     - ganglion:diagnostics/collect@1.0
 ```
 
-**The honest caveat.** Deploying to the *remote* `robot-a` is the one hop that
-is not finished yet — the operator side does not send the request over the
-relay circuit. It fails fast and tells you so:
+**Deploy over the relay circuit.** The operator dials the relay, requests a
+circuit to the robot, verifies the robot's host key (TOFU), and sends the
+signed bundle on `/ganglion/control/1.0`. Real (trimmed) output — this run
+used `host_key_policy = tofu`, so the first connect auto-records the key:
 
 ```console
-$ gang deploy robot-a my-diagnostics.wasm
-Error: Remote deploy to 'robot-a' (12D3-f721be4d302e7da31bebf3b89e2b9f53) is not yet implemented.
-The transport infrastructure is ready but the agent serve loop (ADR-020 Phase 32)
-must be completed first. Use local mode for now
+$ gang deploy robot-a my-tool.wasm
+Auto-accepted host key for 12D3-6ca0419fa75b4ba889669086076df590 (fingerprint: BLAKE3:6ca0419fa75b4ba889669086076df590).
+Warning: Permanently added '12D3-6ca0419fa75b4ba889669086076df590' (BLAKE3:6ca0419fa75b4ba889669086076df590) to the list of known robots.
+Deployed 'my-tool' to robot 'robot-a' (via relay)
+
+$ gang caps robot-a
+Capabilities on 'robot-a':
+  my-tool v0.1.0 (by 12D3-68c62c79b89c56c575df0845f26b6fae)
+    - ganglion:diagnostics/collect@1.0
+
+$ gang run robot-a my-tool
+System Information:
+  Hostname:  vm
+  OS:        linux 6.18.5
+  Arch:      x86_64
+  CPUs:      2
+  Memory:    7 GB
+  ...
 ```
 
-The same applies to `gang run` and `gang caps` against remote targets, and
-`gang logs`/`list`/`connect`/`transport-stats` depend on the same hop. Status
-and tracking: [Fleet status](../README.md#fleet-status-what-works-today) and
+Every request carries a fresh nonce + timestamp (the robot rejects stale or
+replayed requests), the whole dispatch is timeout-bounded (60 s deploy, 30 s
+run/caps, `--timeout <secs>` to override), and any remote failure — robot
+offline, policy denial, signature failure — exits non-zero with the robot's
+actual error. A robot that is down looks like this:
+
+```console
+$ gang caps robot-a --timeout 8
+Error: timed out after 8s: robot 'robot-a' not reachable via relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk (is the agent running, and did it connect to that relay?)
+```
+
+`gang logs`/`list`/`connect`/`transport-stats` still wait on the
+presence/streaming layer — status and tracking:
+[Fleet status](../README.md#fleet-status-what-works-today) and
 [ADR-020](adr/ADR-020-remote-dispatch-and-e2e-test.md).
 
-**The local path works end-to-end** and exercises the identical
-signing/policy/audit pipeline. Creating `/tmp/gang-agent-<name>` is what makes
-a name resolve to a local in-process agent (resolution rule 4 in step 3):
+**The local path also works end-to-end** and exercises the identical
+signing/policy/audit pipeline with no network at all. Creating
+`/tmp/gang-agent-<name>` is what makes a name resolve to a local in-process
+agent (resolution rule 4 in step 3):
 
 ```console
 $ mkdir -p /tmp/gang-agent-my-robot
 
-$ gang deploy my-robot my-diagnostics.wasm
+$ gang deploy my-robot my-tool.wasm
 [log lines]
-Deployed 'my-diagnostics' to robot 'my-robot'
+Deployed 'my-tool' to robot 'my-robot'
 
 $ gang caps my-robot
 [log lines]
 Capabilities on 'my-robot':
-  my-diagnostics v0.1.0 (by 12D3-c2ace1a32fd67c0c8c66976336bceead)
+  my-tool v0.1.0 (by 12D3-68c62c79b89c56c575df0845f26b6fae)
     - ganglion:diagnostics/collect@1.0
 
-$ gang run my-robot my-diagnostics
+$ gang run my-robot my-tool
 [log lines]
 System Information:
   Hostname:  vm
