@@ -45,6 +45,28 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Event-feed transport selector for `logs`/`connect`/`tui` (ADR-024). Maps to
+/// [`gang_libp2p::EventsTransport`]; `auto` prefers push and falls back to poll.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum EventsTransportArg {
+    /// Prefer the push substream; fall back to poll automatically (default).
+    Auto,
+    /// Force the push substream; error if it cannot be opened.
+    Push,
+    /// Force the request-response poll; never open a push stream.
+    Poll,
+}
+
+impl From<EventsTransportArg> for gang_libp2p::EventsTransport {
+    fn from(a: EventsTransportArg) -> Self {
+        match a {
+            EventsTransportArg::Auto => Self::Auto,
+            EventsTransportArg::Push => Self::Push,
+            EventsTransportArg::Poll => Self::Poll,
+        }
+    }
+}
+
 /// Reject `--format json` on subcommands that only produce human-readable
 /// output, rather than silently emitting text when JSON was requested.
 fn reject_json(format: &OutputFormat, command: &str) -> anyhow::Result<()> {
@@ -263,6 +285,9 @@ enum Commands {
         /// Relay multiaddr (overrides registry and config defaults).
         #[arg(long, short = 'r')]
         relay: Option<String>,
+        /// Event-feed transport: auto (default), push, or poll (ADR-024).
+        #[arg(long, value_name = "MODE")]
+        events_transport: Option<EventsTransportArg>,
     },
 
     /// Run a local end-to-end demo: start agent, deploy diagnostics, invoke.
@@ -405,6 +430,9 @@ enum Commands {
         /// recording); Ctrl-C still quits.
         #[arg(long)]
         no_input: bool,
+        /// Event-feed transport: auto (default), push, or poll (ADR-024).
+        #[arg(long, value_name = "MODE")]
+        events_transport: Option<EventsTransportArg>,
     },
 
     /// Attach a live status view to a robot (presence + heartbeat + audit tail).
@@ -415,6 +443,9 @@ enum Commands {
         /// Preferred transport order for happy-eyeballs selection.
         #[arg(long, value_delimiter = ',')]
         prefer_transport: Option<Vec<String>>,
+        /// Event-feed transport: auto (default), push, or poll (ADR-024).
+        #[arg(long, value_name = "MODE")]
+        events_transport: Option<EventsTransportArg>,
     },
 
     /// Generate shell completion scripts.
@@ -735,6 +766,7 @@ async fn main() -> anyhow::Result<()> {
             since,
             peer,
             relay,
+            events_transport,
         } => {
             commands::logs(
                 &robot,
@@ -742,6 +774,7 @@ async fn main() -> anyhow::Result<()> {
                 since.as_deref(),
                 peer.as_deref(),
                 relay.as_deref(),
+                events_transport.map(Into::into),
                 &cli.format,
             )
             .await?
@@ -843,11 +876,22 @@ async fn main() -> anyhow::Result<()> {
             robot,
             frames,
             no_input,
-        } => tui::tui(robot.as_deref(), frames, no_input, &cli.format).await?,
+            events_transport,
+        } => {
+            tui::tui(
+                robot.as_deref(),
+                frames,
+                no_input,
+                events_transport.map(Into::into),
+                &cli.format,
+            )
+            .await?
+        }
         Commands::Connect {
             robot,
             prefer_transport: _,
-        } => commands::connect(&robot, &cli.format).await?,
+            events_transport,
+        } => commands::connect(&robot, events_transport.map(Into::into), &cli.format).await?,
         Commands::Relay {
             listen_addr,
             port,

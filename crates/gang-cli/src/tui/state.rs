@@ -35,6 +35,13 @@ pub enum FeedMsg {
     },
     /// The feed to `robot` dropped; `reason` is a short human string.
     Disconnected { robot: String, reason: String },
+    /// The active event transport (ADR-024). Reported when a feed opens and
+    /// again if `auto` falls back push→poll mid-session, so the title bar can
+    /// show which path is live. Dashboard-global (last writer wins across the
+    /// fleet), so it carries no per-robot key.
+    Transport {
+        transport: gang_libp2p::EventsTransport,
+    },
 }
 
 /// Coarse liveness of a peer, derived from how recently it was heard from.
@@ -203,6 +210,9 @@ pub struct DashboardState {
     pub gap_notice: Option<(String, u64)>,
     /// The relay address the fleet routes through, if known.
     pub relay_addr: Option<String>,
+    /// The active event transport (ADR-024), for the title-bar indicator.
+    /// `None` until the first feed opens.
+    pub feed_transport: Option<gang_libp2p::EventsTransport>,
     /// True until at least one robot is configured (drives the first-run panel).
     pub roster_empty: bool,
     /// Events buffered while paused, applied on resume.
@@ -229,6 +239,7 @@ impl DashboardState {
             last_activity: None,
             gap_notice: None,
             relay_addr,
+            feed_transport: None,
             pending: Vec::new(),
         }
     }
@@ -294,6 +305,7 @@ impl DashboardState {
                 });
             }
             FeedMsg::Event { robot, event } => self.apply_event(&robot, &event, now),
+            FeedMsg::Transport { transport } => self.feed_transport = Some(transport),
         }
     }
 
@@ -516,6 +528,16 @@ impl DashboardState {
     /// Seconds since the dashboard started.
     pub fn uptime_secs(&self, now: DateTime<Utc>) -> u64 {
         (now - self.started_at).num_seconds().max(0) as u64
+    }
+
+    /// A short label for the active event transport (ADR-024), for the title
+    /// bar: `push`, `poll(1.5s)`, or empty until the first feed opens.
+    pub fn feed_transport_label(&self) -> String {
+        match self.feed_transport {
+            Some(gang_libp2p::EventsTransport::Poll) => "poll(1.5s)".to_string(),
+            Some(_) => "push".to_string(),
+            None => String::new(),
+        }
     }
 
     /// Whether the feed looks stale: no activity (event or ~2s stats sample)

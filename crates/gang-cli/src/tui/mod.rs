@@ -72,16 +72,19 @@ const SNAPSHOT_H: u16 = 34;
 ///   cycles, print the rendered frame as text, and exit (no raw terminal —
 ///   safe for CI, pipes, and demo capture).
 /// * `no_input` runs the live loop but ignores keys (for unattended recording).
+/// * `events_transport` selects the feed transport (ADR-024): auto/push/poll.
 pub async fn tui(
     robot_filter: Option<&str>,
     frames: Option<usize>,
     no_input: bool,
+    events_transport: Option<gang_libp2p::EventsTransport>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
     if matches!(format, OutputFormat::Json) {
         anyhow::bail!("`gang tui` is an interactive dashboard and does not support --format json");
     }
 
+    let mode = events_transport.unwrap_or_default();
     let (robots, relay_addr) = build_roster(robot_filter)?;
     let now = Utc::now();
     let names: Vec<String> = robots.iter().map(|(n, _)| n.clone()).collect();
@@ -92,9 +95,9 @@ pub async fn tui(
     let mut tasks = Vec::new();
     for (name, target) in robots {
         let tx = tx.clone();
-        tasks.push(tokio::spawn(
-            async move { feed_task(name, target, tx).await },
-        ));
+        tasks.push(tokio::spawn(async move {
+            feed_task(name, target, mode, tx).await
+        }));
     }
     drop(tx); // the loop holds `rx`; tasks hold their clones.
 
@@ -164,10 +167,16 @@ fn build_roster(robot_filter: Option<&str>) -> anyhow::Result<Roster> {
     Ok((robots, relay_addr))
 }
 
-/// Poll one robot's event feed forever, funnelling [`FeedMsg`]s to the loop.
-/// Reconnects with backoff on transport failure; exits cleanly once the
-/// receiver is gone (dashboard quit).
-async fn feed_task(name: String, target: RemoteTarget, tx: mpsc::Sender<FeedMsg>) {
+/// Follow one robot's event feed forever, funnelling [`FeedMsg`]s to the loop.
+/// The feed transport is chosen by `mode` (ADR-024): push, poll, or auto (push
+/// with poll fallback). Reconnects with backoff on transport failure; exits
+/// cleanly once the receiver is gone (dashboard quit).
+async fn feed_task(
+    name: String,
+    target: RemoteTarget,
+    mode: gang_libp2p::EventsTransport,
+    tx: mpsc::Sender<FeedMsg>,
+) {
     let timeout = std::time::Duration::from_secs(CONTROL_TIMEOUT_SECS);
     loop {
         let conn = match establish_remote_connection(&target, timeout).await {
@@ -198,11 +207,11 @@ async fn feed_task(name: String, target: RemoteTarget, tx: mpsc::Sender<FeedMsg>
             return;
         }
 
-        // Open the live push feed once; events then arrive instantly. A
-        // separate ticker samples transport stats for the tunnel/RTT panes.
+        // Open the live feed (push or poll per `mode`). A separate ticker
+        // samples transport stats for the tunnel/RTT panes.
         let mut stream = match conn
             .transport
-            .subscribe_events(&target.gang_id, None, timeout)
+            .subscribe_events(&target.gang_id, None, timeout, mode)
             .await
         {
             Ok(s) => s,
@@ -218,6 +227,11 @@ async fn feed_task(name: String, target: RemoteTarget, tx: mpsc::Sender<FeedMsg>
                 continue;
             }
         };
+
+        // Report the active transport for the title-bar indicator; re-report if
+        // `auto` falls back push→poll mid-session (checked on each stats tick).
+        let mut active = stream.active_transport();
+        let _ = tx.send(FeedMsg::Transport { transport: active }).await;
 
         let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
         stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -250,6 +264,14 @@ async fn feed_task(name: String, target: RemoteTarget, tx: mpsc::Sender<FeedMsg>
                     }
                 },
                 _ = stats_tick.tick() => {
+                    // Surface an auto push→poll fallback that happened mid-session.
+                    let now_active = stream.active_transport();
+                    if now_active != active {
+                        active = now_active;
+                        let _ = tx
+                            .send(FeedMsg::Transport { transport: active })
+                            .await;
+                    }
                     if let Some(stats) = gang_core::transport::TransportAdapter::transport_stats(
                         conn.transport.as_ref(),
                         &target.gang_id,

@@ -138,6 +138,10 @@ fn render_title(
         right.push(Span::styled(" PAUSED ", theme.deny()));
         right.push(Span::raw("  "));
     }
+    let feed = state.feed_transport_label();
+    if !feed.is_empty() {
+        right.push(Span::styled(format!("feed {feed}  "), theme.dim()));
+    }
     if state.feed_stale(now) {
         right.push(Span::styled("[stale feed]", theme.warn()));
     } else {

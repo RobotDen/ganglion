@@ -4066,6 +4066,12 @@ pub async fn transport_stats(
 /// enough apart that this never truncates a live burst.
 pub(crate) const CATCHUP_IDLE: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// The default event-feed poll cadence, used only to honestly label the poll
+/// fallback in `logs`/`connect`/`tui` (e.g. "feed: poll (1.5s)"). The actual
+/// interval lives in `Libp2pConfig::events_poll_interval_ms`; this mirrors its
+/// default so the operator-visible label matches the real cadence.
+pub(crate) const EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// Parse a short duration like `30s`, `5m`, `2h`, `1d` into a `chrono::Duration`.
 fn parse_since(spec: &str) -> anyhow::Result<chrono::Duration> {
     let spec = spec.trim();
@@ -4202,8 +4208,10 @@ pub async fn logs(
     since: Option<&str>,
     explicit_peer: Option<&str>,
     explicit_relay: Option<&str>,
+    events_transport: Option<gang_libp2p::EventsTransport>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
+    let mode = events_transport.unwrap_or_default();
     let cutoff = match since {
         Some(spec) => Some(chrono::Utc::now() - parse_since(spec)?),
         None => None,
@@ -4238,13 +4246,16 @@ pub async fn logs(
         }
     };
 
-    // Open the live push feed: the snapshot + retained context arrive first,
-    // then the feed stays open for the live tail.
+    // Open the live feed (push or poll per `mode`): the snapshot + retained
+    // context arrive first, then the feed stays open for the live tail.
     let mut stream = conn
         .transport
-        .subscribe_events(&remote.gang_id, None, timeout)
+        .subscribe_events(&remote.gang_id, None, timeout, mode)
         .await
         .map_err(|e| anyhow::anyhow!("subscribing to '{display}' failed: {e}"))?;
+    if let OutputFormat::Text = format {
+        eprintln!("--- feed: {} ---", feed_label(stream.active_transport()));
+    }
 
     // Drain the initial snapshot + retained catch-up burst.
     for ev in drain_catchup(&mut stream, CATCHUP_IDLE).await {
@@ -4268,10 +4279,26 @@ pub async fn logs(
     result
 }
 
+/// A short, honest label for the active event transport, including the poll
+/// cadence so an operator sees which path is live and how fresh it is.
+fn feed_label(active: gang_libp2p::EventsTransport) -> String {
+    match active {
+        gang_libp2p::EventsTransport::Poll => {
+            format!("poll ({:.1}s)", EVENT_POLL_INTERVAL.as_secs_f64())
+        }
+        _ => "push".to_string(),
+    }
+}
+
 /// `gang connect <robot>` — attach a live status view (presence + heartbeat +
 /// connection state + a live tail of policy/audit) as scrolling text until
 /// Ctrl-C. The non-TUI precursor to the dashboard; reuses the subscription API.
-pub async fn connect(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn connect(
+    robot: &str,
+    events_transport: Option<gang_libp2p::EventsTransport>,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    let mode = events_transport.unwrap_or_default();
     let target = resolve_target(robot, None, None)?;
     if target.is_local {
         anyhow::bail!(
@@ -4293,18 +4320,21 @@ pub async fn connect(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
         OutputFormat::Text => println!("{}", event_human_line(ev)),
     };
 
-    if let OutputFormat::Text = format {
-        println!("Connected to '{display}'. Live status (Ctrl-C to detach):");
-    }
-
     let mut stream = conn
         .transport
-        .subscribe_events(&remote.gang_id, None, timeout)
+        .subscribe_events(&remote.gang_id, None, timeout, mode)
         .await
         .map_err(|e| anyhow::anyhow!("connecting to '{display}' failed: {e}"))?;
 
+    if let OutputFormat::Text = format {
+        println!(
+            "Connected to '{display}'  [feed: {}]. Live status (Ctrl-C to detach):",
+            feed_label(stream.active_transport())
+        );
+    }
+
     // Show everything in the live view: the initial snapshot + retained context
-    // arrive first, then the feed pushes live events until Ctrl-C.
+    // arrive first, then live events until Ctrl-C.
     let all = |_ev: &gang_core::events::AgentEvent| true;
     let result = tail_events(&mut stream, all, &print).await;
     drop(stream);
@@ -4313,12 +4343,16 @@ pub async fn connect(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
 }
 
 /// Drain the initial snapshot + retained catch-up burst from a freshly-opened
-/// push feed: collect events until [`CATCHUP_IDLE`] elapses with nothing new
-/// (the burst is contiguous), or the robot closes the feed.
-async fn drain_catchup(
-    stream: &mut gang_libp2p::EventStream,
+/// feed: collect events until [`CATCHUP_IDLE`] elapses with nothing new (the
+/// burst is contiguous), or the robot closes the feed. Works over either
+/// transport (push or poll) since both surface as the same `Stream`.
+async fn drain_catchup<S>(
+    stream: &mut S,
     idle: std::time::Duration,
-) -> Vec<gang_core::events::AgentEvent> {
+) -> Vec<gang_core::events::AgentEvent>
+where
+    S: futures::Stream<Item = gang_core::events::AgentEvent> + Unpin,
+{
     use futures::StreamExt;
     let mut out = Vec::new();
     while let Ok(Some(ev)) = tokio::time::timeout(idle, stream.next()).await {
@@ -4327,14 +4361,17 @@ async fn drain_catchup(
     out
 }
 
-/// Tail a live push feed, printing new events as the robot pushes them (true
-/// push — no polling, no cadence) until Ctrl-C or the robot closes the feed.
-/// `keep` filters which events to print.
-async fn tail_events(
-    stream: &mut gang_libp2p::EventStream,
+/// Tail a live feed, printing new events as they arrive until Ctrl-C or the
+/// robot closes the feed. `keep` filters which events to print. Transport-
+/// agnostic: push events arrive instantly, poll events on the poll interval.
+async fn tail_events<S>(
+    stream: &mut S,
     keep: impl Fn(&gang_core::events::AgentEvent) -> bool,
     print: &impl Fn(&gang_core::events::AgentEvent),
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: futures::Stream<Item = gang_core::events::AgentEvent> + Unpin,
+{
     use futures::StreamExt;
     loop {
         tokio::select! {
@@ -4427,7 +4464,12 @@ async fn probe_presence(
     let conn = establish_remote_connection(remote, timeout).await?;
     let stream = conn
         .transport
-        .subscribe_events(&remote.gang_id, None, timeout)
+        .subscribe_events(
+            &remote.gang_id,
+            None,
+            timeout,
+            gang_libp2p::EventsTransport::Auto,
+        )
         .await;
 
     let result = async {
