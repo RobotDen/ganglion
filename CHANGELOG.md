@@ -4,6 +4,29 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Event feed is now genuine server-push, not a poll (ADR-024).** The
+  robot→operator event feed (`gang logs --follow`, `gang connect`, `gang tui`,
+  and the `list`/presence probe) moved off the ~1.5 s poll-multiplex over the
+  control protocol onto a persistent push substream on `/ganglion/events/1.0`,
+  carried by the new `libp2p-stream` dependency. The robot accepts inbound event
+  substreams, authenticates each subscriber with the **same** trust rule as
+  deploy (SEC-03; loud dev-permissive on an empty trust store), sends the
+  `PresenceSnapshot` + retained catch-up, then pushes framed `AgentEvent`s live
+  from the bounded `EventBus` broadcast until the stream closes (slow consumer →
+  `Gap`, unchanged). The operator's `Libp2pTransportAdapter::subscribe_events`
+  now returns a live `Stream<AgentEvent>` decoding framed CBOR until EOF. Events
+  reach operators the instant the robot emits them — measured ~2 ms over a real
+  relay circuit (asserted `< 500 ms`), versus the old ~1.5 s cadence. The
+  `ControlMessage::SubscribeEvents`/`Events` request-response path and the CLI's
+  poll loop + 1.5 s timer are removed. The `AgentEvent` wire model, the trust
+  rule, and the bounded resource model are unchanged. Adds exactly one workspace
+  dependency, `libp2p-stream` (pinned `=0.4.0-alpha`; resolves cleanly against
+  the locked `libp2p-swarm 0.47.1`); `cargo deny` passes clean, so no policy
+  exception was needed. The stream traverses the relay circuit end-to-end, same
+  as control RPC. See [ADR-024](docs/adr/ADR-024-event-push-stream.md).
+
 ### Added
 
 - **`gang tui` — the live fleet dashboard (issue #2).** A full-screen
@@ -28,8 +51,9 @@ All notable changes to Ganglion will be documented in this file.
   widget-render tests over `ratatui::backend::TestBackend`, with `main`/the
   event loop a thin shell; subscriptions run on tokio tasks feeding the render
   loop over a channel so the UI never blocks on the network, and the terminal
-  is restored on quit/Ctrl-C/panic. Feed cadence is the ADR-022 bounded ~1.5 s
-  poll (not faked sub-second). A headless `--frames N` snapshot mode renders a
+  is restored on quit/Ctrl-C/panic. Feed delivery is the ADR-024 push substream
+  (events land instantly; heartbeats still drive staleness). A headless
+  `--frames N` snapshot mode renders a
   frame to text for CI and capture; `--robot <name>` focuses one robot. Design
   notes in [ADR-023](docs/adr/ADR-023-tui-dashboard.md). Adds `ratatui` 0.30 and
   `crossterm` 0.29 to the workspace (used in `gang-cli` only; kept out of the

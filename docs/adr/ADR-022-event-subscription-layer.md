@@ -1,6 +1,10 @@
 # ADR-022: Robot→operator event subscription layer
 
-**Status:** Accepted; implemented
+**Status:** Accepted; implemented. **Transport mechanism superseded by
+[ADR-024](ADR-024-event-push-stream.md)** — the feed is now a genuine push
+substream over `libp2p-stream`, not the ~1.5 s poll-multiplex described below.
+The wire model (`AgentEvent`), the subscriber trust rule, and the bounded
+resource model documented here are unchanged and remain in force.
 **Date:** 2026-08-06
 
 > **Implementation status.** Landed. A versioned `AgentEvent` wire model

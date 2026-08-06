@@ -485,8 +485,9 @@ Capabilities on 'robot-a':
 Subscribe to a robot's event feed over the relay circuit and print its
 `AuditAppended` and `PolicyDecision` events. Without `--follow`, prints the
 recent context from the robot's retained window and exits; with `--follow`,
-tails live (bounded poll; Ctrl-C to stop). Honest non-zero exit if the robot is
-unreachable or refuses the subscription.
+tails live over a genuine server-push substream — events print the instant the
+robot emits them, no poll cadence (Ctrl-C to stop). Honest non-zero exit if the
+robot is unreachable or refuses the subscription.
 
 ```bash
 $ gang logs up-robot
@@ -1028,8 +1029,9 @@ presence  v2.1.0  up 12s  archetype=unknown  caps=[diagnostics]
 The **live fleet dashboard** — a full-screen [ratatui](https://ratatui.rs)
 view built on the same event subscription API as `gang logs`/`connect`
 ([ADR-022](adr/ADR-022-event-subscription-layer.md)). It subscribes to every
-registered robot's event feed and folds it into four panes, refreshed on a
-bounded ~1.5 s poll:
+registered robot's event feed and folds it into four panes. The feed is a
+genuine server-push substream ([ADR-024](adr/ADR-024-event-push-stream.md)), so
+events land the instant the robot emits them (no poll cadence):
 
 - **Peers** — name, status dot (`●` live / `◐` transitional / `○` offline),
   transport, and RTT.
@@ -1040,8 +1042,9 @@ bounded ~1.5 s poll:
 - **Audit tail** — timestamp, action, operator, result, and duration.
 
 The title bar shows relay, live/total peer count, dashboard uptime, and a
-`♥ live` pulse that flips to `[stale feed]` when no events arrive within the
-poll cadence. With **no robots registered** the dashboard shows a friendly
+`♥ live` pulse that flips to `[stale feed]` when no heartbeat arrives within the
+15 s liveness window (heartbeats still drive staleness even though the feed
+itself is now instant). With **no robots registered** the dashboard shows a friendly
 first-run panel pointing at `gang up` / `gang pair` rather than a blank grid.
 
 ```console
@@ -1081,7 +1084,7 @@ even on panic (a panic hook + RAII guard).
 | Flag | Description |
 |------|-------------|
 | `--robot <name>` | Focus a single registered robot instead of the whole fleet. |
-| `--frames <n>` | Headless snapshot: fold the feed for `n` poll cycles, print the rendered frame as text, then exit. No raw terminal — safe for CI, pipes, and capturing a static frame. |
+| `--frames <n>` | Headless snapshot: fold the live push feed for `n` cycles (~1 s each), print the rendered frame as text, then exit. No raw terminal — safe for CI, pipes, and capturing a static frame. |
 | `--no-input` | Run the live dashboard but ignore keyboard input (unattended recording); Ctrl-C still quits. |
 | `--data-dir <path>` | (global) Point at a `gang up` fleet directory. |
 

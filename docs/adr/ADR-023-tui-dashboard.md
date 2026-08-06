@@ -24,9 +24,13 @@ Two forces shaped the design:
 
 1. **CI has no TTY.** The dashboard's logic must be testable headless, so
    correctness is not gated on a terminal.
-2. **The feed is a bounded ~1.5 s poll, not push** (ADR-022). The UI must be
-   honest about staleness rather than fake sub-second motion, and must never
-   block the render thread on a slow or dead robot.
+2. **The feed was a bounded ~1.5 s poll, not push** (ADR-022, at the time this
+   ADR was written). The UI must be honest about staleness rather than fake
+   sub-second motion, and must never block the render thread on a slow or dead
+   robot. (The feed later became a genuine push substream — see
+   [ADR-024](ADR-024-event-push-stream.md); the dashboard consumes it
+   unchanged, and its staleness indicator now reflects a dead connection rather
+   than a missed poll.)
 
 ## Decision
 

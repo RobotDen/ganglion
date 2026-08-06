@@ -64,10 +64,11 @@ Each ADR follows a consistent format:
 
 | # | Title | Status |
 |---|-------|--------|
-| 022 | [Robot→operator event subscription layer](ADR-022-event-subscription-layer.md) | Accepted; implemented |
+| 022 | [Robot→operator event subscription layer](ADR-022-event-subscription-layer.md) | Accepted; implemented (transport superseded by ADR-024) |
 
 ### Live dashboard (v0.9)
 
 | # | Title | Status |
 |---|-------|--------|
 | 023 | [`gang tui` live fleet dashboard](ADR-023-tui-dashboard.md) | Accepted; implemented |
+| 024 | [True server-push event stream over libp2p-stream](ADR-024-event-push-stream.md) | Accepted; implemented |
