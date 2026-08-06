@@ -29,6 +29,9 @@ ciborium = { workspace = true }
 dirs = "6"
 clap_complete = "4"
 toml = "1.1"
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

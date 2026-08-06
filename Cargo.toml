@@ -102,6 +102,13 @@ libp2p = { version = "0.56", features = [
 wasmtime = { version = "36", features = ["component-model"] }
 wasmtime-wasi = "36"
 
+# Terminal UI (gang-cli only — the `gang tui` live dashboard, issue #2).
+# Kept out of the library crates; majors pinned. crossterm's `event-stream`
+# feature integrates key input into the tokio select loop without a blocking
+# input thread.
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+
 # Testing
 tempfile = "3"
 
