@@ -147,6 +147,30 @@ pub enum ControlMessage {
         /// The installed capabilities.
         capabilities: Vec<CapabilityInfo>,
     },
+    /// Subscribe to the robot's event feed (presence, policy, audit, …).
+    ///
+    /// This multiplexes the `/ganglion/events/1.0` subscription over the
+    /// control protocol: the shared request-response behaviour always
+    /// negotiates the first stream protocol (control), so a subscription rides
+    /// control as a typed message rather than negotiating a distinct protocol.
+    /// The `AgentEvent` schema and the robot-side authentication are identical
+    /// to the reserved direct-substream path. Authenticated by the same
+    /// wire-proven peer id as deploy; no nonce (an idempotent read).
+    SubscribeEvents {
+        /// Return only events with `seq` greater than this cursor; `None`
+        /// requests a fresh subscription (presence snapshot + recent context).
+        #[serde(default)]
+        since_seq: Option<u64>,
+        /// Soft cap on the number of events returned (robot clamps).
+        #[serde(default)]
+        max_events: Option<u32>,
+    },
+    /// The batch of events returned for a [`ControlMessage::SubscribeEvents`].
+    Events {
+        /// The events, oldest first. A fresh subscription is headed by a
+        /// [`crate::events::AgentEvent::PresenceSnapshot`].
+        events: Vec<crate::events::AgentEvent>,
+    },
     /// Robot → operator enrollment request over a pairing session (`gang join`).
     ///
     /// Rides the control protocol so it reuses the same authenticated circuit

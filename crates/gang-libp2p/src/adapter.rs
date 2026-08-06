@@ -390,35 +390,51 @@ impl Libp2pTransportAdapter {
         await_reply_within(peer, reply_rx, timeout).await
     }
 
-    /// Subscribe to a robot's `/ganglion/events/1.0` feed and return the batch
-    /// of [`AgentEvent`]s the robot streams in response.
+    /// Subscribe to a robot's event feed and return the batch of
+    /// [`gang_core::events::AgentEvent`]s the robot returns.
     ///
     /// A fresh subscription (`since_seq == None`) yields a
-    /// [`AgentEvent::PresenceSnapshot`] followed by the robot's retained recent
-    /// events; a resume (`since_seq == Some(cursor)`) yields only newer events.
-    /// The response is decoded with the shared framed CBOR codec
-    /// ([`gang_core::events::decode_events`]); an empty response means the robot
-    /// refused the subscription (unauthorized) or produced nothing.
+    /// [`gang_core::events::AgentEvent::PresenceSnapshot`] followed by the
+    /// robot's retained recent events; a resume (`since_seq == Some(cursor)`)
+    /// yields only newer events, with a leading
+    /// [`gang_core::events::AgentEvent::Gap`] if the cursor predated the
+    /// retained window.
     ///
-    /// Local buffering is bounded: the whole batch is bounded by the robot's
-    /// retention window, and the request-response ceiling bounds the wire size.
+    /// The subscription is carried as a [`ControlMessage::SubscribeEvents`]
+    /// over the control protocol (see that message's docs for why). A robot
+    /// that refuses the subscription (e.g. the operator is not trusted) returns
+    /// an error, surfaced here as a typed [`TransportError`].
+    ///
+    /// Local buffering is bounded: the batch is bounded by the robot's
+    /// retention window and the request-response size ceiling.
     pub async fn subscribe_events(
         &self,
         peer: &PeerId,
         since_seq: Option<u64>,
         timeout: Duration,
     ) -> Result<Vec<gang_core::events::AgentEvent>, TransportError> {
-        let req = match since_seq {
-            Some(cursor) => gang_core::events::EventSubscribeRequest::since(cursor),
-            None => gang_core::events::EventSubscribeRequest::fresh(),
+        use gang_core::message::{ControlMessage, decode_message, encode_message};
+
+        let msg = ControlMessage::SubscribeEvents {
+            since_seq,
+            max_events: None,
         };
-        let request_bytes = gang_core::message::encode_message(&req)
+        let request_bytes = encode_message(&msg)
             .map_err(|e| TransportError::ProtocolNegotiation(format!("encode subscribe: {e}")))?;
         let response = self
-            .send_rpc_on(peer, ProtocolId::events(), request_bytes, timeout)
+            .send_rpc_with_timeout(peer, request_bytes, timeout)
             .await?;
-        gang_core::events::decode_events(&response)
-            .map_err(|e| TransportError::ProtocolNegotiation(format!("decode events: {e}")))
+        let (decoded, _) = decode_message::<ControlMessage>(&response)
+            .map_err(|e| TransportError::ProtocolNegotiation(format!("decode response: {e}")))?;
+        match decoded {
+            ControlMessage::Events { events } => Ok(events),
+            ControlMessage::Error { message, .. } => Err(TransportError::ProtocolNegotiation(
+                format!("robot refused subscription: {message}"),
+            )),
+            other => Err(TransportError::ProtocolNegotiation(format!(
+                "unexpected response to subscribe: {other:?}"
+            ))),
+        }
     }
 
     /// Look up the libp2p peer id for a connected gang peer.

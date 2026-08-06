@@ -765,6 +765,20 @@ impl RobotAgent {
                             message: e.to_string(),
                         },
                     },
+                    ControlMessage::SubscribeEvents {
+                        since_seq,
+                        max_events,
+                    } => {
+                        let req = EventSubscribeRequest::new(since_seq, max_events);
+                        match agent.build_event_subscription(&remote_peer, &req).await {
+                            Ok(events) => ControlMessage::Events { events },
+                            Err(e) => ControlMessage::Error {
+                                request_id: None,
+                                code: "unauthorized".into(),
+                                message: e.to_string(),
+                            },
+                        }
+                    }
                     ControlMessage::ListCapabilities => {
                         let caps = agent.list_capabilities().await;
                         ControlMessage::CapabilityList {

@@ -74,6 +74,15 @@ impl EventSubscribeRequest {
             max_events: None,
         }
     }
+
+    /// Construct a request with explicit fields (the `#[non_exhaustive]` type
+    /// cannot be built with a struct literal outside this crate).
+    pub fn new(since_seq: Option<EventSeq>, max_events: Option<u32>) -> Self {
+        Self {
+            since_seq,
+            max_events,
+        }
+    }
 }
 
 /// The verdict of a policy evaluation.
