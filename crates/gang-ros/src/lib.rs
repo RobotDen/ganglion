@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod archetype;
 pub mod diagnostics;
+pub mod events;
 pub mod filesystem;
 pub mod logs;
 pub mod metrics;

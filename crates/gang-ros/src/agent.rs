@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -10,13 +10,18 @@ use gang_core::audit::{AuditLog, AuditRecord, CapabilityIoStats, ExitStatus};
 use gang_core::broker::CapabilityBroker;
 use gang_core::capability::{CapabilityGroup, InstalledCapability};
 use gang_core::error::{CapabilityError, ManifestError};
+use gang_core::events::{AgentEvent, AuditProjection, EventSubscribeRequest, PolicyOutcome};
 use gang_core::identity::{Keypair, PeerId};
 use gang_core::manifest::{SignedManifest, TrustStore};
 use gang_core::policy::Policy;
 
 use crate::diagnostics::DiagnosticsBroker;
+use crate::events::{EventBus, SubscribeError};
 use crate::filesystem::{FsBroker, FsRule};
 use crate::logs::LogStreamBroker;
+
+/// How often the agent emits a [`AgentEvent::Heartbeat`] to the event bus.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 /// The robot agent — the central process running on a deployed robot.
 /// Manages installed capabilities, brokers, policy enforcement, and audit logging.
@@ -55,6 +60,14 @@ pub struct RobotAgent {
     /// requests whose nonce has been seen or whose timestamp is outside the
     /// freshness window.
     replay_guard: Arc<Mutex<gang_core::message::ReplayGuard>>,
+
+    /// Bounded in-process event bus feeding the `/ganglion/events/1.0`
+    /// subscription (presence, policy decisions, audit appends, heartbeats).
+    event_bus: Arc<EventBus>,
+
+    /// When the agent was constructed, for reporting uptime in presence
+    /// snapshots and heartbeats.
+    started_at: Instant,
 }
 
 /// Configuration for the robot agent.
@@ -180,6 +193,8 @@ impl RobotAgent {
             replay_guard: Arc::new(Mutex::new(gang_core::message::ReplayGuard::new(
                 Duration::from_secs(300),
             ))),
+            event_bus: Arc::new(EventBus::default()),
+            started_at: Instant::now(),
         };
 
         // Load any previously installed capabilities (CODE-21: propagate errors).
@@ -233,8 +248,41 @@ impl RobotAgent {
         }
 
         // 3. Evaluate policy against the authenticated deployer identity.
-        self.policy
-            .evaluate(&manifest.declared_capabilities, deployer)?;
+        //    Emit a PolicyDecision on BOTH paths so the event feed records every
+        //    evaluation, not just the failures.
+        let group_summary = manifest
+            .declared_capabilities
+            .iter()
+            .map(|g| g.name())
+            .collect::<Vec<_>>()
+            .join(",");
+        match self.policy.evaluate(&manifest.declared_capabilities, deployer) {
+            Ok(()) => {
+                let deployer = deployer.clone();
+                let group_summary = group_summary.clone();
+                self.event_bus.publish(move |seq| AgentEvent::PolicyDecision {
+                    seq,
+                    ts: chrono::Utc::now(),
+                    operator_peer: deployer,
+                    capability_group: group_summary,
+                    decision: PolicyOutcome::Allow,
+                    reason: "capabilities permitted by policy".into(),
+                });
+            }
+            Err(e) => {
+                let reason = e.to_string();
+                let deployer_ev = deployer.clone();
+                self.event_bus.publish(move |seq| AgentEvent::PolicyDecision {
+                    seq,
+                    ts: chrono::Utc::now(),
+                    operator_peer: deployer_ev,
+                    capability_group: group_summary,
+                    decision: PolicyOutcome::Deny,
+                    reason,
+                });
+                return Err(e.into());
+            }
+        }
 
         // 4. Store component and manifest
         let cap_dir = self.capabilities_dir.join(&manifest.name);
@@ -518,6 +566,95 @@ impl RobotAgent {
         if let Err(e) = self.audit_log.append(&record) {
             warn!("Failed to write audit record: {e}");
         }
+
+        // A policy denial surfaced by the sandbox at invoke time (e.g. a WASM
+        // guest reaching for an undeclared capability) is a policy decision as
+        // much as a deploy-time one — emit it on the feed's deny path too.
+        if let ExitStatus::PolicyDenied { reason } = &record.exit_status {
+            let operator = record.operator_peer_id.clone();
+            let group = record.capabilities_used.join(",");
+            let reason = reason.clone();
+            self.event_bus.publish(move |seq| AgentEvent::PolicyDecision {
+                seq,
+                ts: chrono::Utc::now(),
+                operator_peer: operator,
+                capability_group: group,
+                decision: PolicyOutcome::Deny,
+                reason,
+            });
+        }
+
+        // Every appended record is announced on the feed (secret-free
+        // projection) so `gang logs` and live viewers see it.
+        let projection = AuditProjection::from(&record);
+        self.event_bus.publish(move |seq| AgentEvent::AuditAppended {
+            seq,
+            record: projection,
+        });
+    }
+
+    /// Access the agent's in-process event bus (for live in-process consumers
+    /// and tests).
+    pub fn event_bus(&self) -> &Arc<EventBus> {
+        &self.event_bus
+    }
+
+    /// Agent uptime in whole seconds.
+    fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+
+    /// Build the ordered event batch for a subscription request, enforcing the
+    /// subscriber trust rule first.
+    ///
+    /// Authentication mirrors deploy (SEC-03): when a trust store is
+    /// configured, only trusted operators may subscribe; an empty trust store
+    /// is the loud dev-permissive path. On a fresh subscription (`since_seq`
+    /// is `None`) the batch is headed by a [`AgentEvent::PresenceSnapshot`];
+    /// otherwise it carries only events newer than the cursor. A dropped-events
+    /// gap (the subscriber fell behind the retained window) is surfaced as a
+    /// leading [`AgentEvent::Gap`].
+    pub async fn build_event_subscription(
+        &self,
+        subscriber: &PeerId,
+        req: &EventSubscribeRequest,
+    ) -> Result<Vec<AgentEvent>, SubscribeError> {
+        if !self.trust_store.trusted_peers.is_empty() && !self.trust_store.is_trusted(subscriber) {
+            warn!(peer = %subscriber, "Rejecting event subscription from untrusted peer");
+            return Err(SubscribeError::Unauthorized {
+                peer: subscriber.to_string(),
+            });
+        }
+
+        let mut out = Vec::new();
+        if req.since_seq.is_none() {
+            out.push(AgentEvent::PresenceSnapshot {
+                seq: self.event_bus.tip(),
+                ganglion_version: env!("CARGO_PKG_VERSION").to_string(),
+                uptime_secs: self.uptime_secs(),
+                archetype: None,
+                installed_capabilities: self
+                    .list_capabilities()
+                    .await
+                    .into_iter()
+                    .map(|c| c.name)
+                    .collect(),
+            });
+        }
+
+        let max = req
+            .max_events
+            .map(|m| m as usize)
+            .unwrap_or(crate::events::RING_CAPACITY)
+            .min(crate::events::RING_CAPACITY);
+        let batch = self.event_bus.recent_since(req.since_seq, max);
+        if batch.dropped > 0 {
+            out.push(AgentEvent::Gap {
+                dropped: batch.dropped,
+            });
+        }
+        out.extend(batch.events);
+        Ok(out)
     }
 
     /// Start serving incoming control protocol messages over the transport.
@@ -676,7 +813,123 @@ impl RobotAgent {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to register control handler: {e}"))?;
 
-        info!(peer_id = %self.peer_id, "Robot agent serving on /ganglion/control/1.0");
+        // --- /ganglion/events/1.0: authenticated event subscription ---
+        let events_agent = Arc::clone(self);
+        let events_handler: StreamHandler = Box::new(move |mut stream| {
+            let agent = Arc::clone(&events_agent);
+            Box::pin(async move {
+                let subscriber = stream.remote_peer.clone();
+
+                // Read the (single) subscription request. An empty stream is a
+                // fresh subscription (default request).
+                let mut request_bytes = Vec::new();
+                if let Err(e) = stream.inner.read_to_end(&mut request_bytes).await {
+                    warn!("Failed to read subscribe request from {subscriber}: {e}");
+                    return;
+                }
+                let req: EventSubscribeRequest = if request_bytes.is_empty() {
+                    EventSubscribeRequest::default()
+                } else {
+                    match decode_message(&request_bytes) {
+                        Ok((req, _)) => req,
+                        Err(e) => {
+                            warn!("Failed to decode subscribe request from {subscriber}: {e}");
+                            return;
+                        }
+                    }
+                };
+
+                // Authenticate + build the batch. An unauthorized peer receives
+                // NOTHING (the stream closes empty); we never stream events to
+                // an unauthenticated subscriber.
+                match agent.build_event_subscription(&subscriber, &req).await {
+                    Ok(events) => match gang_core::events::encode_events(&events) {
+                        Ok(bytes) => {
+                            if let Err(e) = stream.inner.write_all(&bytes).await {
+                                warn!("Failed to write events to {subscriber}: {e}");
+                            }
+                        }
+                        Err(e) => warn!("Failed to encode events for {subscriber}: {e}"),
+                    },
+                    Err(e) => {
+                        warn!(peer = %subscriber, "Event subscription refused: {e}");
+                        // Close empty — the operator observes no snapshot and
+                        // reports an authorization/reachability failure.
+                    }
+                }
+            })
+        });
+
+        transport
+            .listen(ProtocolId::events(), events_handler)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to register events handler: {e}"))?;
+
+        // Heartbeat ticker: emit a liveness beat on the bus every N seconds so
+        // a live viewer can tell "quiet" from "gone". Lives for the process.
+        let hb_agent = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(HEARTBEAT_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let uptime = hb_agent.uptime_secs();
+                hb_agent.event_bus.publish(move |seq| AgentEvent::Heartbeat {
+                    seq,
+                    ts: chrono::Utc::now(),
+                    uptime_secs: uptime,
+                });
+            }
+        });
+
+        // Bridge transport connection events onto the bus as ConnectionChanged.
+        let conn_bus = Arc::clone(&self.event_bus);
+        let mut transport_events = transport.events();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            use gang_core::events::ConnectionState;
+            use gang_core::transport::TransportEvent;
+            while let Some(ev) = transport_events.next().await {
+                match ev {
+                    TransportEvent::PeerConnected { peer_id, via_relay } => {
+                        conn_bus.publish(move |seq| AgentEvent::ConnectionChanged {
+                            seq,
+                            ts: chrono::Utc::now(),
+                            peer: peer_id,
+                            transport: if via_relay { "relay".into() } else { "direct".into() },
+                            via_relay,
+                            state: ConnectionState::Up,
+                        });
+                    }
+                    TransportEvent::PeerDisconnected { peer_id } => {
+                        conn_bus.publish(move |seq| AgentEvent::ConnectionChanged {
+                            seq,
+                            ts: chrono::Utc::now(),
+                            peer: peer_id,
+                            transport: "".into(),
+                            via_relay: false,
+                            state: ConnectionState::Down,
+                        });
+                    }
+                    TransportEvent::DirectUpgrade { peer_id } => {
+                        conn_bus.publish(move |seq| AgentEvent::ConnectionChanged {
+                            seq,
+                            ts: chrono::Utc::now(),
+                            peer: peer_id,
+                            transport: "direct".into(),
+                            via_relay: false,
+                            state: ConnectionState::Up,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        info!(
+            peer_id = %self.peer_id,
+            "Robot agent serving on /ganglion/control/1.0 and /ganglion/events/1.0"
+        );
         Ok(())
     }
 
@@ -854,6 +1107,180 @@ mod tests {
         let agent = RobotAgent::new(test_config(dir.path())).unwrap();
         let caps = agent.list_capabilities().await;
         assert!(caps.is_empty());
+    }
+
+    // --- Event subscription: trust + emission ---
+
+    /// Configure an agent with a non-empty trust store containing `trusted`.
+    fn agent_with_trusted(dir: &std::path::Path, trusted: &Keypair) -> RobotAgent {
+        let mut trust = TrustStore::default();
+        trust.add(gang_core::manifest::TrustedPeer {
+            peer_id: trusted.peer_id(),
+            name: "trusted-op".into(),
+            public_key: trusted.public_key().to_bytes().to_vec(),
+        });
+        let trust_path = dir.join("trusted_peers.json");
+        trust.save(&trust_path).unwrap();
+        let mut config = test_config(dir);
+        config.trust_store_path = trust_path;
+        RobotAgent::new(config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unauthorized_peer_cannot_subscribe() {
+        let dir = TempDir::new().unwrap();
+        let trusted = Keypair::generate();
+        let agent = agent_with_trusted(dir.path(), &trusted);
+
+        // A stranger (not in the trust store) is refused.
+        let stranger = Keypair::generate().peer_id();
+        let err = agent
+            .build_event_subscription(&stranger, &EventSubscribeRequest::fresh())
+            .await
+            .expect_err("stranger must be refused");
+        assert!(matches!(err, SubscribeError::Unauthorized { .. }));
+
+        // The trusted operator gets a batch headed by a presence snapshot.
+        let ok = agent
+            .build_event_subscription(&trusted.peer_id(), &EventSubscribeRequest::fresh())
+            .await
+            .expect("trusted operator may subscribe");
+        assert!(matches!(ok.first(), Some(AgentEvent::PresenceSnapshot { .. })));
+    }
+
+    #[tokio::test]
+    async fn empty_trust_store_is_dev_permissive_for_subscribe() {
+        let dir = TempDir::new().unwrap();
+        // test_config uses an absent (empty) trust store → dev-permissive.
+        let agent = RobotAgent::new(test_config(dir.path())).unwrap();
+        let anyone = Keypair::generate().peer_id();
+        let batch = agent
+            .build_event_subscription(&anyone, &EventSubscribeRequest::fresh())
+            .await
+            .expect("dev-permissive path allows any subscriber");
+        assert!(matches!(
+            batch.first(),
+            Some(AgentEvent::PresenceSnapshot { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn deploy_deny_emits_policy_decision_on_feed() {
+        let dir = TempDir::new().unwrap();
+        // Restrictive policy: only diagnostics is permitted; process/spawn is
+        // denied. The deployer is authorized to deploy.
+        let policy_toml = r#"
+[[capability_rules]]
+group = "ganglion:diagnostics/collect"
+allowed_patterns = ["**"]
+
+[[peer_rules]]
+peer_id = "*"
+can_deploy = true
+"#;
+        let policy_path = dir.path().join("policy.toml");
+        std::fs::write(&policy_path, policy_toml).unwrap();
+        let mut config = test_config(dir.path());
+        config.policy_path = Some(policy_path);
+        let agent = RobotAgent::new(config).unwrap();
+
+        // Deploy a component declaring an UNDECLARED-by-policy capability group.
+        let kp = Keypair::generate();
+        let component = b"not-wasm";
+        let manifest = gang_core::manifest::ComponentManifest {
+            schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
+            name: "needs-spawn".into(),
+            version: "0.1.0".into(),
+            declared_capabilities: vec![CapabilityGroup::ProcessSpawn {
+                version: "1.0".into(),
+                allowed_commands: vec!["ls".into()],
+            }],
+            author_peer_id: kp.peer_id(),
+            component_hash: blake3::hash(component).to_hex().to_string(),
+            limits: Default::default(),
+            language: Default::default(),
+            description: String::new(),
+            tags: vec![],
+            min_ganglion_version: None,
+        };
+        let signed = SignedManifest::sign(&manifest, &kp).unwrap();
+        let manifest_cbor = signed.to_cbor().unwrap();
+
+        let result = agent
+            .deploy_capability(&manifest_cbor, component, &kp.peer_id())
+            .await;
+        assert!(result.is_err(), "process/spawn must be denied by policy");
+
+        // The feed carries a PolicyDecision{Deny} for the denied deploy.
+        let batch = agent
+            .build_event_subscription(&kp.peer_id(), &EventSubscribeRequest::fresh())
+            .await
+            .unwrap();
+        let denied = batch.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::PolicyDecision {
+                    decision: PolicyOutcome::Deny,
+                    ..
+                }
+            )
+        });
+        assert!(denied, "a PolicyDecision Deny should be on the feed: {batch:?}");
+    }
+
+    #[tokio::test]
+    async fn allowed_invoke_emits_audit_appended_on_feed() {
+        let dir = TempDir::new().unwrap();
+        let agent = RobotAgent::new(test_config(dir.path())).unwrap();
+        let kp = Keypair::generate();
+
+        // Deploy + invoke a diagnostics capability via the broker path.
+        let component = b"fake wasm bytes for testing";
+        let manifest = gang_core::manifest::ComponentManifest {
+            schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
+            name: "diag".into(),
+            version: "0.1.0".into(),
+            declared_capabilities: vec![CapabilityGroup::DiagnosticsCollect {
+                version: "1.0".into(),
+            }],
+            author_peer_id: kp.peer_id(),
+            component_hash: blake3::hash(component).to_hex().to_string(),
+            limits: Default::default(),
+            language: Default::default(),
+            description: String::new(),
+            tags: vec![],
+            min_ganglion_version: None,
+        };
+        let signed = SignedManifest::sign(&manifest, &kp).unwrap();
+        agent
+            .deploy_capability(&signed.to_cbor().unwrap(), component, &kp.peer_id())
+            .await
+            .unwrap();
+        agent
+            .invoke_capability("diag", &[], &kp.peer_id())
+            .await
+            .unwrap();
+
+        let batch = agent
+            .build_event_subscription(&kp.peer_id(), &EventSubscribeRequest::fresh())
+            .await
+            .unwrap();
+        assert!(
+            batch
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AuditAppended { .. })),
+            "an AuditAppended event should be on the feed: {batch:?}"
+        );
+        assert!(
+            batch.iter().any(|e| matches!(
+                e,
+                AgentEvent::PolicyDecision {
+                    decision: PolicyOutcome::Allow,
+                    ..
+                }
+            )),
+            "a PolicyDecision Allow (from deploy) should be on the feed"
+        );
     }
 
     #[tokio::test]
