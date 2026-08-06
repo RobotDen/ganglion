@@ -65,3 +65,9 @@ Each ADR follows a consistent format:
 | # | Title | Status |
 |---|-------|--------|
 | 022 | [Robot→operator event subscription layer](ADR-022-event-subscription-layer.md) | Accepted; implemented |
+
+### Live dashboard (v0.9)
+
+| # | Title | Status |
+|---|-------|--------|
+| 023 | [`gang tui` live fleet dashboard](ADR-023-tui-dashboard.md) | Accepted; implemented |

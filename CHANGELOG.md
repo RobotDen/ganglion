@@ -6,6 +6,35 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **`gang tui` — the live fleet dashboard (issue #2).** A full-screen
+  [ratatui](https://ratatui.rs) dashboard that subscribes to every registered
+  robot's event feed (the ADR-022 layer) and folds it into four live panes:
+  **Peers** (status dot `●`live/`◐`transitional/`○`offline · transport · RTT),
+  **Tunnels** (direct vs relay · ↑/↓ byte counters from the live transport
+  stats), **Policy decisions** (ts · ALLOW/DENY · capability group · operator ·
+  reason), and a tailing **Audit** log (ts · action · result · duration). A
+  title bar shows relay, live/total peers, uptime, and a `♥ live` pulse that
+  becomes `[stale feed]` when the feed goes quiet. Keys: `↑↓`/`j k` select a
+  peer, `⏎` inspect it (a drill-down overlay of caps + recent decisions +
+  audit), `p` pause/resume the feed (freezes the display with a `PAUSED`
+  indicator and replays buffered events on resume — for clean demo captures),
+  `/` filter, `a` audit-only fullscreen, `?` help, `q`/Esc quit. With no robots
+  registered it shows a friendly first-run panel pointing at `gang up` /
+  `gang pair`. Honors `NO_COLOR` (monochrome/ASCII theme — ASCII borders and
+  status markers, no color escapes) and is resize-aware (collapses to a single
+  stacked column on narrow terminals, a "terminal too small" hint below the
+  minimum). The core is structured for headless testing: a **pure event-fold
+  state reducer** (synthetic `AgentEvent`s → asserted UI rows) and
+  widget-render tests over `ratatui::backend::TestBackend`, with `main`/the
+  event loop a thin shell; subscriptions run on tokio tasks feeding the render
+  loop over a channel so the UI never blocks on the network, and the terminal
+  is restored on quit/Ctrl-C/panic. Feed cadence is the ADR-022 bounded ~1.5 s
+  poll (not faked sub-second). A headless `--frames N` snapshot mode renders a
+  frame to text for CI and capture; `--robot <name>` focuses one robot. Design
+  notes in [ADR-023](docs/adr/ADR-023-tui-dashboard.md). Adds `ratatui` 0.30 and
+  `crossterm` 0.29 to the workspace (used in `gang-cli` only; kept out of the
+  library crates).
+
 - **Presence & event-streaming layer — `gang logs`/`connect`/`transport-stats`/`list`
   are now real.** An authenticated, bounded robot→operator event feed carries
   presence, policy decisions (allow and deny), audit appends, connection changes,

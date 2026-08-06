@@ -270,6 +270,7 @@ Available commands:
   ...
   gang logs
   gang connect
+  gang tui
   gang list
   gang transport-stats
 ```
@@ -1021,6 +1022,79 @@ presence  v2.1.0  up 12s  archetype=unknown  caps=[diagnostics]
 | Flag | Description |
 |------|-------------|
 | `--prefer-transport <t1,t2>` | Preferred transport order (accepted; reserved for happy-eyeballs selection). |
+
+### `gang tui`
+
+The **live fleet dashboard** — a full-screen [ratatui](https://ratatui.rs)
+view built on the same event subscription API as `gang logs`/`connect`
+([ADR-022](adr/ADR-022-event-subscription-layer.md)). It subscribes to every
+registered robot's event feed and folds it into four panes, refreshed on a
+bounded ~1.5 s poll:
+
+- **Peers** — name, status dot (`●` live / `◐` transitional / `○` offline),
+  transport, and RTT.
+- **Tunnels** — the operator↔robot circuit: direct vs relay, and ↑/↓ byte
+  counters (from the live transport stats `gang transport-stats` reads).
+- **Policy decisions (live)** — timestamp, `ALLOW`/`DENY`, capability group,
+  operator, and reason, newest last.
+- **Audit tail** — timestamp, action, operator, result, and duration.
+
+The title bar shows relay, live/total peer count, dashboard uptime, and a
+`♥ live` pulse that flips to `[stale feed]` when no events arrive within the
+poll cadence. With **no robots registered** the dashboard shows a friendly
+first-run panel pointing at `gang up` / `gang pair` rather than a blank grid.
+
+```console
+$ gang --data-dir ~/.gang/up tui
+╭ gang tui — fleet dashboard ────────────────────────────────────────────────────╮
+│relay /ip4/127.0.0.1/tcp/37163   peers 1/1 live   up 6s                   ♥ live│
+╰──────────────────────────────────────────────────────────────────────────────────╯
+╭ Peers (1) ──────────────────────╮╭ Tunnels ────────────────────────╮
+│   peer          transport  rtt  ││peer       path      ↑ up   ↓ down│
+│●  up-robot      relay      3ms  ││up-robot   relay     0 B    3.8 KB │
+╰───────────────────────────────────╯╰───────────────────────────────────╯
+╭ Policy decisions (live) (3) ────╮╭ Audit tail (1) ─────────────────╮
+│05:21:48 ALLOW …/collect  …      ││05:21:48 diagnostics v0.1.0 … ok │
+│05:21:49 DENY  …/spawn    …      ││                                 │
+╰───────────────────────────────────╯╰───────────────────────────────────╯
+↑↓ select · ⏎ inspect · p pause · / filter · a audit · ? help · q quit
+```
+
+#### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓`, `k` / `j` | Select a peer (wraps). |
+| `⏎` Enter | Inspect the selected peer — a drill-down overlay with its capabilities, recent policy decisions, and recent audit. |
+| `p` | Pause / resume the live feed. Paused freezes the display and shows a `PAUSED` indicator; buffered events replay on resume — ideal for capturing a clean demo GIF. |
+| `/` | Filter by peer name / text (matches peers, decisions, and audit). Enter applies, Esc cancels. |
+| `c` | Clear the active filter. |
+| `a` | Audit-only fullscreen view. |
+| `?` | Toggle the help overlay. |
+| `q` / Esc | Quit (Esc first closes an open overlay). Ctrl-C also quits. |
+
+The terminal is always restored on exit — raw mode off, alternate screen left —
+even on panic (a panic hook + RAII guard).
+
+#### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--robot <name>` | Focus a single registered robot instead of the whole fleet. |
+| `--frames <n>` | Headless snapshot: fold the feed for `n` poll cycles, print the rendered frame as text, then exit. No raw terminal — safe for CI, pipes, and capturing a static frame. |
+| `--no-input` | Run the live dashboard but ignore keyboard input (unattended recording); Ctrl-C still quits. |
+| `--data-dir <path>` | (global) Point at a `gang up` fleet directory. |
+
+#### NO_COLOR
+
+`gang tui` honors the [`NO_COLOR`](https://no-color.org) convention: any
+non-empty `NO_COLOR` renders a clean **monochrome, ASCII** theme — ASCII box
+borders (`+ - |`), ASCII status markers (`* ~ .`), and no color escapes — so
+recordings and plain terminals stay legible. The dashboard is resize-aware: on a
+narrow terminal it collapses the 2×2 grid into a single stacked column, and
+below a minimum size it shows a "terminal too small" hint rather than garbling.
+
+`gang tui` is interactive and does not support `--format json`.
 
 ## Exit codes
 

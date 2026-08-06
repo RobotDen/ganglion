@@ -132,6 +132,31 @@ Ctrl-C tears the whole fleet down.
 
 `gang up` runs in the foreground and blocks; Ctrl-C shuts the relay and agent down. The steps below are the same fleet, wired by hand for a real multi-host deployment.
 
+### 2c. Watch your fleet: `gang tui`
+
+With a fleet up (or any robot enrolled), `gang tui` is the **live dashboard** — the "watch your fleet" moment. It subscribes to every registered robot's event feed and folds it into four live panes: connected **peers** (status · transport · RTT), active **tunnels** (direct/relay · ↑/↓ bytes), live **policy** allow/deny decisions, and a tailing **audit** log.
+
+```bash
+gang --data-dir /home/you/.gang/up tui     # point at the `gang up` fleet
+```
+
+```console
+╭ gang tui — fleet dashboard ──────────────────────────────────────────────────────────────╮
+│relay /ip4/127.0.0.1/tcp/37163   peers 1/1 live   up 6s                             ♥ live│
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Peers (1) ─────────────────────────────╮╭ Tunnels ───────────────────────────────╮
+│   peer              transport    rtt   ││peer         path         ↑ up     ↓ down│
+│●  up-robot          relay        3ms   ││up-robot     relay        0 B      3.8 KB │
+╰─────────────────────────────────────────╯╰─────────────────────────────────────────╯
+╭ Policy decisions (live) (3) ───────────╮╭ Audit tail (1) ─────────────────────────╮
+│05:21:48 ALLOW ganglion:diagnostics/co… ││05:21:48 diagnostics v0.1.0  … success   │
+│05:21:49 DENY  ganglion:process/spawn … ││                                         │
+╰─────────────────────────────────────────╯╰─────────────────────────────────────────╯
+↑↓ select · ⏎ inspect · p pause · / filter · a audit · ? help · q quit
+```
+
+Keys: `↑↓`/`j k` select a peer · `⏎` inspect it · `p` pause the feed (for a clean recording) · `/` filter · `a` audit-only fullscreen · `?` help · `q`/Esc quit. The feed is a bounded ~1.5 s poll ([ADR-022](docs/adr/ADR-022-event-subscription-layer.md)); the `♥ live` pulse shows it is fresh. Honors `NO_COLOR` (monochrome/ASCII) and resizes gracefully. Full reference: [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md).
+
 ### 3. Set up a relay (server)
 
 Robots are reached through a circuit relay, never by DNS name or inbound port. On any host both your workstation and the robots can dial:
@@ -293,6 +318,7 @@ gang completions <shell>              Generate shell completions (bash/zsh/fish)
 gang relay [--port P]                 Run a circuit relay v2 server
 gang list                             List registered robots + live reachability
 gang connect <robot>                  Live status view (presence + audit tail)
+gang tui [--robot N] [--frames N]     Live fleet dashboard (peers, tunnels, policy, audit)
 ```
 
 See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full details, flags, and examples.
