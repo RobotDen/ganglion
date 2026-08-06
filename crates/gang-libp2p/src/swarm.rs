@@ -25,6 +25,12 @@ pub struct GanglionBehaviour {
     /// Enforces `config.max_inbound_connections` on established inbound links.
     pub connection_limits: connection_limits::Behaviour,
     pub ganglion_rpc: request_response::Behaviour<GanglionCodec>,
+    /// Genuine server-push substreams (ADR-024). Carries the
+    /// `/ganglion/events/1.0` event feed as a persistent push stream rather
+    /// than a request-response poll. The swarm remains single-owner; callers
+    /// interact through a cloned [`libp2p_stream::Control`] handle obtained at
+    /// build time, which talks to this behaviour over its own channel.
+    pub stream: libp2p_stream::Behaviour,
 }
 
 /// Maximum message size for Ganglion request/response (16 MiB).
@@ -203,7 +209,11 @@ pub(crate) fn load_ed25519_secret(path: &std::path::Path) -> anyhow::Result<[u8;
 pub async fn build_swarm(
     config: &Libp2pConfig,
     secret_key: [u8; 32],
-) -> anyhow::Result<(Swarm<GanglionBehaviour>, Libp2pPeerId)> {
+) -> anyhow::Result<(
+    Swarm<GanglionBehaviour>,
+    Libp2pPeerId,
+    libp2p_stream::Control,
+)> {
     // Convert the raw secret into a libp2p keypair (both are Ed25519).
     // `ed25519_from_bytes` takes the bytes by value and zeroizes them.
     let libp2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(secret_key)?;
@@ -290,6 +300,7 @@ pub async fn build_swarm(
                 relay_server,
                 connection_limits,
                 ganglion_rpc,
+                stream: libp2p_stream::Behaviour::new(),
             })
         })?
         .with_swarm_config(|c| {
@@ -297,15 +308,28 @@ pub async fn build_swarm(
         })
         .build();
 
-    Ok((swarm, local_peer_id))
+    // Detach a Control handle for the event-push substreams. The handle talks
+    // to the `stream` behaviour over its own channel, so the swarm stays owned
+    // by a single task (no shared mutex over the `Swarm`).
+    let stream_control = swarm.behaviour().stream.new_control();
+
+    Ok((swarm, local_peer_id, stream_control))
 }
 
-/// Return the set of Ganglion stream protocols with full inbound+outbound support.
+/// Return the set of request-response Ganglion protocols with full
+/// inbound+outbound support.
+///
+/// `/ganglion/events/1.0` is deliberately excluded: since ADR-024 the event
+/// feed is a genuine push substream carried by the [`libp2p_stream::Behaviour`],
+/// not a request-response exchange. Registering it here as well would let two
+/// behaviours claim the same inbound protocol id, so the event protocol is
+/// owned solely by the stream behaviour.
 fn ganglion_protocols() -> Vec<(GanglionProtocol, request_response::ProtocolSupport)> {
-    use gang_core::protocol::ALL_PROTOCOLS;
+    use gang_core::protocol::{ALL_PROTOCOLS, PROTOCOL_EVENTS};
 
     ALL_PROTOCOLS
         .iter()
+        .filter(|p| **p != PROTOCOL_EVENTS)
         .map(|p| {
             (
                 GanglionProtocol(p.to_string()),
