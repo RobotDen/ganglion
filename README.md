@@ -1,3 +1,5 @@
+<img src="assets/logo-lockup.svg" alt="Ganglion" height="72">
+
 # Ganglion
 
 Secure connectivity and auditable tool execution for ROS 2 robot fleets on hostile networks — outbound-only reachability, signed WASM tooling, default-deny policy.
