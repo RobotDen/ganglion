@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Ganglion pre-push hook — mirror the CI gate locally so a red build never
+# reaches GitHub. Install: ./scripts/setup-hooks.sh (sets core.hooksPath).
+#
+# This runs the same checks as .github/workflows/ci.yml, grouped by cost:
+#   fast   — fmt, clippy -Dwarnings, doc -Dwarnings   (always)
+#   test   — cargo test --workspace                   (always)
+#   deny   — cargo deny check (if cargo-deny installed; skipped with a note)
+#   harness — docker scenarios (opt-in: GANG_PREPUSH_HARNESS=1, needs docker)
+#
+# Escape hatches:
+#   GANG_SKIP_PREPUSH=1   skip everything (use sparingly; CI still gates)
+#   GANG_PREPUSH_HARNESS=1 also run the docker test-harness (open-warehouse
+#                          + e2e dispatch) — the CI-only class of failure that
+#                          bit us twice. Requires docker.
+set -uo pipefail
+
+if [ "${GANG_SKIP_PREPUSH:-}" = "1" ]; then
+    echo "pre-push: skipped (GANG_SKIP_PREPUSH=1)"
+    exit 0
+fi
+
+# Run from the repo root regardless of where git invoked us.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+fail() {
+    echo ""
+    echo "pre-push: FAILED — $1"
+    echo "Fix it, or push anyway with GANG_SKIP_PREPUSH=1 git push (CI will still check)."
+    exit 1
+}
+
+echo "=== pre-push: cargo fmt --check ==="
+cargo fmt --all --check || fail "formatting (run 'cargo fmt --all')"
+
+echo "=== pre-push: cargo clippy --all-targets -D warnings ==="
+RUSTFLAGS="-Dwarnings" cargo clippy --workspace --all-targets --quiet || fail "clippy warnings"
+
+echo "=== pre-push: cargo doc --no-deps -D warnings (CI 'Documentation' job) ==="
+RUSTDOCFLAGS="-Dwarnings" cargo doc --no-deps --workspace --quiet || fail "rustdoc warnings / broken doc links"
+
+echo "=== pre-push: cargo test --workspace ==="
+cargo test --workspace --quiet || fail "tests"
+
+echo "=== pre-push: cargo deny check (CI 'Cargo Deny' job) ==="
+if command -v cargo-deny >/dev/null 2>&1; then
+    cargo deny check 2>&1 || fail "cargo-deny (advisories/bans/licenses/sources)"
+else
+    echo "  cargo-deny not installed — skipping (install: cargo install cargo-deny --locked)"
+    echo "  NOTE: the CI 'Cargo Deny' job will still run this; install it to catch advisories locally."
+fi
+
+if [ "${GANG_PREPUSH_HARNESS:-}" = "1" ]; then
+    if command -v docker >/dev/null 2>&1; then
+        echo "=== pre-push: docker harness (open-warehouse) ==="
+        ./test-harness/run-tests.sh --scenario open-warehouse || fail "open-warehouse harness scenario"
+        echo "=== pre-push: docker harness (e2e dispatch) ==="
+        ./test-harness/e2e-dispatch/run-test.sh || fail "e2e dispatch smoke test"
+    else
+        echo "pre-push: GANG_PREPUSH_HARNESS=1 set but docker not found — skipping harness."
+        echo "  The docker-only harness class is what caused two prior red CI runs;"
+        echo "  run it on a machine with docker before releases."
+    fi
+else
+    echo "=== pre-push: docker harness SKIPPED (set GANG_PREPUSH_HARNESS=1 to run) ==="
+    echo "  Reminder: harness failures are CI-only unless you run them here."
+fi
+
+echo ""
+echo "=== pre-push: all checks passed — pushing ==="

@@ -22,15 +22,33 @@ cargo test
 
 ## Development workflow
 
-### Pre-commit hooks
+### Git hooks
 
-After running `./scripts/setup-hooks.sh`, every commit will automatically run:
+After running `./scripts/setup-hooks.sh`, two hooks are installed.
+
+**pre-commit** (fast, runs on every commit):
 
 1. `cargo fmt --check` — formatting must pass
 2. `cargo clippy --all-targets -- -D warnings` — no clippy warnings allowed
 3. `cargo test` — all tests must pass
 
-If any check fails, the commit is rejected. Fix the issue and try again.
+**pre-push** (mirrors the full CI gate, so a red build never reaches GitHub):
+
+1. `cargo fmt --all --check`
+2. `cargo clippy --workspace --all-targets` with `-Dwarnings`
+3. `cargo doc --no-deps` with `-Dwarnings` (the CI *Documentation* job — catches broken
+   doc links, which are invisible to `cargo build`)
+4. `cargo test --workspace`
+5. `cargo deny check` if `cargo-deny` is installed (advisories/licenses/bans/sources)
+6. The docker test-harness is **opt-in**: `GANG_PREPUSH_HARNESS=1 git push` runs the
+   open-warehouse + e2e-dispatch scenarios (requires docker). These multi-container
+   scenarios are the one class CI catches that a plain `cargo test` cannot — run them
+   locally before a release, or rely on the push-to-`main` CI run.
+
+If any check fails, the push is rejected. Override once (CI still gates) with
+`GANG_SKIP_PREPUSH=1 git push`.
+
+If any pre-commit check fails, the commit is rejected. Fix the issue and try again.
 
 ### Branch conventions
 
