@@ -1168,16 +1168,28 @@ async fn remote_dispatch_inner(
 
         // Dial the robot through the relay circuit, then wait for the
         // authenticated connection. The dial itself only queues; the poll below
-        // (bounded by the caller's overall timeout) observes the outcome.
+        // (bounded by the caller's overall timeout) observes the outcome. A
+        // circuit dial can fail transiently — most notably with NO_RESERVATION
+        // when the robot is connected to the relay but its reservation is not
+        // accepted yet — and a failed dial is never retried by the swarm, so
+        // re-dial periodically instead of waiting forever on the first attempt.
         let circuit = circuit_addr(&target.relay_addr, &target.libp2p_id);
         transport.dial_multiaddr(&circuit).await.map_err(|e| {
             anyhow::anyhow!("failed to dial '{display}' via relay circuit {circuit}: {e}")
         })?;
 
+        let redial_every = std::time::Duration::from_secs(2);
+        let mut last_dial = std::time::Instant::now();
         loop {
             let connected = transport.connected_peers().await;
             if connected.iter().any(|(id, _)| *id == target.gang_id) {
                 break;
+            }
+            if last_dial.elapsed() >= redial_every {
+                last_dial = std::time::Instant::now();
+                // Errors here are non-fatal: the outer timeout bounds the
+                // whole exchange and the next tick re-dials again.
+                let _ = transport.dial_multiaddr(&circuit).await;
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
@@ -1467,20 +1479,54 @@ pub async fn agent(
                         // connection was established before claiming success.
                         let deadline =
                             std::time::Instant::now() + std::time::Duration::from_secs(8);
+                        let mut connected = false;
                         loop {
                             if !dial_transport.connected_peers().await.is_empty() {
-                                println!("Connected to relay. Waiting for operator connections...");
-                                return;
+                                connected = true;
+                                break;
                             }
                             if std::time::Instant::now() >= deadline {
                                 break;
                             }
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         }
-                        eprintln!(
-                            "warning: no connection to relay {relay_addr_owned} yet \
-                             (attempt {attempt}); retrying in 5s..."
-                        );
+                        if connected {
+                            // Connected is not the same as REACHABLE: the robot
+                            // is only dialable once the relay has accepted its
+                            // circuit reservation (visible as a /p2p-circuit
+                            // listen address). Wait for it before announcing
+                            // readiness — operators (and the test harness) key
+                            // off this line to start dispatching.
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(15);
+                            loop {
+                                let reserved = dial_transport
+                                    .listen_addrs()
+                                    .await
+                                    .iter()
+                                    .any(|a| a.contains("/p2p-circuit"));
+                                if reserved {
+                                    println!("Relay circuit reservation established.");
+                                    println!(
+                                        "Connected to relay. Waiting for operator connections..."
+                                    );
+                                    return;
+                                }
+                                if std::time::Instant::now() >= deadline {
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            }
+                            eprintln!(
+                                "warning: connected to relay {relay_addr_owned} but no circuit \
+                                 reservation yet (attempt {attempt}); retrying in 5s..."
+                            );
+                        } else {
+                            eprintln!(
+                                "warning: no connection to relay {relay_addr_owned} yet \
+                                 (attempt {attempt}); retrying in 5s..."
+                            );
+                        }
                     }
                     Err(e) => {
                         eprintln!(

@@ -80,7 +80,7 @@ gang agent --data-dir /var/lib/gang-agent \
     -r /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 ```
 
-The agent requests a circuit reservation on the relay (that reservation is what makes the robot reachable), retries the relay every 5 seconds until it logs `Connected to relay. Waiting for operator connections...`, and prints its dialable id (`Peer ID (libp2p/dial): 12D3KooW…`) plus the exact `gang peer add` line to run on your workstation.
+The agent requests a circuit reservation on the relay (that reservation is what makes the robot reachable), retries the relay every 5 seconds until it logs `Connected to relay. Waiting for operator connections...` — printed only once the reservation is actually held, so seeing it means the robot is dialable — and prints its dialable id (`Peer ID (libp2p/dial): 12D3KooW…`) plus the exact `gang peer add` line to run on your workstation.
 
 ### 5. Register, deploy, run (workstation)
 

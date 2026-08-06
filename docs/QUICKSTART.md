@@ -249,6 +249,7 @@ Register on operator machine:
 
 Starting transport...
 [log lines]
+Relay circuit reservation established.
 Connected to relay. Waiting for operator connections...
 ```
 

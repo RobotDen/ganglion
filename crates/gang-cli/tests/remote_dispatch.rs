@@ -371,6 +371,118 @@ async fn circuit_dispatch_deploy_invoke_list_and_replay() {
     }
 }
 
+/// A circuit dial issued before the robot holds its relay reservation fails
+/// (NO_RESERVATION) and is never retried by the swarm — the CLI dispatch path
+/// re-dials the circuit periodically until the robot becomes reachable. This
+/// test mirrors that loop: the operator starts dialing the circuit while the
+/// robot's transport does not exist yet, the robot comes up a few seconds
+/// later, and the dispatch still completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn circuit_dial_redials_until_robot_reservation_exists() {
+    let dirs = tempfile::TempDir::new().unwrap();
+    let (_relay, relay_addr) = start_relay(&dirs.path().join("relay")).await;
+
+    // Construct the robot's transport (fixing its identity and libp2p id) but
+    // do NOT run its event loop yet: no relay connection, no reservation.
+    let robot_dir = dirs.path().join("robot");
+    let agent = Arc::new(RobotAgent::new(agent_config(&robot_dir)).expect("agent builds"));
+    let robot_transport = Arc::new(
+        Libp2pTransportAdapter::new(Libp2pConfig {
+            key_path: robot_dir.join("identity.key"),
+            listen_addrs: vec![],
+            relay_addrs: vec![relay_addr.clone()],
+            ..Default::default()
+        })
+        .await
+        .expect("adapter builds"),
+    );
+    let robot_libp2p_id = *robot_transport.libp2p_peer_id();
+    let robot_gang_id = robot_transport.local_peer_id_for_test();
+
+    // Operator connects to the relay and starts dialing the circuit NOW,
+    // while the robot is not reachable.
+    let operator_dir = dirs.path().join("operator");
+    let operator = start_adapter(Libp2pConfig {
+        key_path: operator_dir.join("identity.key"),
+        listen_addrs: vec![],
+        ..Default::default()
+    })
+    .await;
+    let operator_kp = Keypair::load(&operator_dir.join("identity.key")).unwrap();
+    operator
+        .dial_multiaddr(&relay_addr)
+        .await
+        .expect("relay dial queued");
+    wait_until("operator connection to the relay", async || {
+        !operator.connected_peers().await.is_empty()
+    })
+    .await;
+
+    let circuit = format!("{relay_addr}/p2p-circuit/p2p/{robot_libp2p_id}");
+    operator
+        .dial_multiaddr(&circuit)
+        .await
+        .expect("circuit dial queued");
+
+    // Bring the robot up ~2s later, exactly as a slow-starting agent would.
+    let late_agent = Arc::clone(&agent);
+    let late_transport = Arc::clone(&robot_transport);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        late_agent
+            .serve(late_transport.as_ref())
+            .await
+            .expect("agent serves control protocol");
+        let looped = Arc::clone(&late_transport);
+        tokio::spawn(async move {
+            let _ = looped.run_event_loop().await;
+        });
+    });
+
+    // The CLI dispatch loop: poll for the robot connection, re-dialing the
+    // circuit every 2s (a failed circuit dial is never retried by the swarm).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(WAIT_SECS);
+    let mut last_dial = tokio::time::Instant::now();
+    loop {
+        if operator
+            .connected_peers()
+            .await
+            .iter()
+            .any(|(id, _)| *id == robot_gang_id)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out: circuit re-dials never reached the late-starting robot"
+        );
+        if last_dial.elapsed() >= Duration::from_secs(2) {
+            last_dial = tokio::time::Instant::now();
+            let _ = operator.dial_multiaddr(&circuit).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // The connection is usable: a real deploy round-trip completes.
+    let component = b"gang-test-component (late reservation)".to_vec();
+    let response = rpc(
+        &operator,
+        &robot_gang_id,
+        &deploy_message(&operator_kp, "late-diag", &component),
+    )
+    .await;
+    assert!(
+        matches!(
+            response,
+            ControlMessage::InvokeResult {
+                status: InvokeStatus::Success,
+                ..
+            }
+        ),
+        "deploy after late reservation failed: {response:?}"
+    );
+}
+
 /// With a non-empty trust store on the robot, a deployer whose identity is
 /// not trusted is rejected even when the manifest is signed by a trusted
 /// author.
