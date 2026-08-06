@@ -92,6 +92,70 @@ Clean up when done: rm -rf /tmp/gang-demo
 The diagnostics output (hostname, OS, process list) is collected live from the
 machine you run it on.
 
+## 2b. One-command local fleet: `gang up`
+
+`gang demo` runs everything in a single process and tears itself down when it
+finishes — there is nothing left running to send commands to. `gang up` is the
+bridge to a real deployment: it stands up a **live** local fleet you drive with
+the same `gang` commands you'd use against a robot in the field, but entirely on
+loopback. It is a straight composition of the manual steps in sections 5–8
+below (relay, agent, sign, peer add), collapsed into one command.
+
+```console
+$ gang up
+=== gang up — standing up a local fleet ===
+
+Data dir: /home/you/.gang/up
+Relay circuit reservation established.
+
+  ┌─────────────────────────────────────────────────────────────
+  │ Your fleet is up.
+  ├─────────────────────────────────────────────────────────────
+  │ data dir : /home/you/.gang/up
+  │ relay    : /ip4/127.0.0.1/tcp/42139/p2p/12D3KooWNKAAE2Awv9bL7CFyNyZq5dwLzdKZG9S4N78wroekBWNr
+  │ robot    : up-robot  (12D3-3bdd18c50e2570ea35114d16e8fd75c8)
+  │ sample   : /home/you/.gang/up/diagnostics.wasm  (signed: diagnostics)
+  └─────────────────────────────────────────────────────────────
+
+Drive it from another terminal:
+
+  gang --data-dir /home/you/.gang/up deploy up-robot /home/you/.gang/up/diagnostics.wasm
+  gang --data-dir /home/you/.gang/up run up-robot diagnostics
+  gang --data-dir /home/you/.gang/up caps up-robot
+  gang --data-dir /home/you/.gang/up peer list
+
+The agent enforces a default-deny policy (/home/you/.gang/up/robot/policy.toml):
+  only the sample's diagnostics group is permitted; any other
+  capability group is denied at deploy time.
+
+Ctrl-C tears the whole fleet down.
+```
+
+`gang up` blocks in the foreground while the relay and agent serve; open a
+second terminal and paste the printed commands. Everything under `--data-dir`
+(default `~/.gang/up`) is self-contained — a separate operator identity, relay
+identity, and robot identity, plus the peer registry and the signed sample. The
+global `--data-dir` flag points the whole CLI at that directory, so
+`gang --data-dir <dir> …` in the second terminal reads exactly the files `up`
+wrote. Press Ctrl-C in the first terminal to shut the fleet down; pass `--force`
+to reset an existing fleet directory, or `--json` to emit the fleet facts for
+scripting.
+
+**Default-deny is real.** The agent loads a restrictive policy from disk (not
+the permissive dev fallback). The sample declares only
+`ganglion:diagnostics/collect`, which the policy permits, so it deploys and
+runs. Sign a capability that declares any other group and the robot rejects it
+at deploy time:
+
+```console
+$ gang --data-dir ~/.gang/up sign netprobe.wasm --capabilities network
+$ gang --data-dir ~/.gang/up deploy up-robot netprobe.wasm
+Error: deploy to 'up-robot' rejected by robot (deploy_failed): capability ganglion:network/probe@1.0 not permitted by policy
+```
+
+Edit `<data-dir>/robot/policy.toml` (it ships with commented examples) to widen
+what the fleet permits.
+
 ## 3. How robots are reached
 
 Before deploying anything, know how targeting works — none of it involves DNS.

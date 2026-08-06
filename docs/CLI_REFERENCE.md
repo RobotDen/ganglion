@@ -9,6 +9,7 @@ The `gang` CLI is the primary interface for operators to manage robot identities
 | `--format <text\|json>` | Output format. Default: `text`. Use `json` for machine-readable output. Text-only subcommands (e.g. `identity`, `sign`, `capability scaffold`, `registry install/publish`) reject `--format json` with an error rather than silently emitting text. |
 | `-v`, `-vv`, `-vvv` | Verbosity: `-v` = debug (`gang` crates), `-vv` = trace (`gang` crates), `-vvv` = trace (all crates). |
 | `-q`, `--quiet` | Errors only. Conflicts with `-v`. |
+| `--data-dir <path>` | Point the whole CLI at a self-contained fleet directory instead of `~/.gang` (identity, peer registry, config, trust store). This is the directory `gang up` stands a fleet up in; pass the same value here to drive it: `gang --data-dir <dir> deploy up-robot …`. |
 
 `RUST_LOG`, when set, overrides the `-v`/`-q` flags for log filtering.
 
@@ -21,6 +22,7 @@ Three frequently-typed subcommands have short aliases:
 | `gang id` | `gang identity` |
 | `gang cap` | `gang capability` |
 | `gang dx` | `gang diagnose` |
+| `gang fleet` | `gang up` |
 
 `gang --help` prints a long description of what `gang` is for and ends with a
 pointer to the self-contained demo: `Run 'gang demo' for a self-contained
@@ -311,6 +313,89 @@ System Info:
 === Demo complete ===
 Data stored at: /tmp/gang-demo
 Clean up when done: rm -rf /tmp/gang-demo
+```
+
+### `gang up` (alias: `gang fleet`)
+
+Stand up a **real** local fleet — a loopback circuit relay, a robot agent with a
+default-deny policy, and one signed sample capability — then print the exact
+commands to drive it from another terminal. This is the bridge between
+`gang demo` (self-contained, tears itself down) and a hand-wired
+relay/agent/deploy: it is a pure composition of `gang relay`, `gang agent`,
+`gang sign`, and `gang peer add` run in-process under one working directory.
+
+The command runs in the foreground and blocks, serving the relay and agent until
+you press Ctrl-C, which tears the whole fleet down.
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--data-dir <path>` | Working directory for the fleet (default: `~/.gang/up`). Holds the operator, relay, and robot identities, the peer registry, the agent policy/trust/state, and the signed sample. This is the global `--data-dir` flag, so pass the same value to `gang --data-dir <path> …` in the second terminal. |
+| `--port <port>` | Bind the relay to this loopback TCP port (default: an ephemeral port). |
+| `--force` | Reset the data directory if it already exists (removes its keys, registry, and agent state). Without it, `gang up` refuses to clobber a non-empty directory. |
+| `--json` | Emit the fleet facts (data dir, relay multiaddr, robot id, sample path, next commands) as JSON for scripting, then keep serving. |
+
+What it does, in order: generates/loads an operator identity plus separate relay
+and robot identities; starts the relay and captures its dialable multiaddr;
+writes the robot a default-deny `policy.toml` (only the sample's diagnostics
+group is permitted, with commented examples for widening it) and a trust store
+that trusts the operator; starts the agent pointed at the relay and waits for its
+circuit reservation; signs the sample capability (`--capabilities diagnostics`)
+with the operator identity; registers the robot as `up-robot` by its dialable id;
+and pre-provisions the robot's host key so the printed commands connect without a
+TOFU prompt.
+
+```console
+$ gang up
+=== gang up — standing up a local fleet ===
+
+Data dir: /home/you/.gang/up
+Relay circuit reservation established.
+
+  ┌─────────────────────────────────────────────────────────────
+  │ Your fleet is up.
+  ├─────────────────────────────────────────────────────────────
+  │ data dir : /home/you/.gang/up
+  │ relay    : /ip4/127.0.0.1/tcp/42139/p2p/12D3KooWNKAAE2Awv9bL7CFyNyZq5dwLzdKZG9S4N78wroekBWNr
+  │ robot    : up-robot  (12D3-3bdd18c50e2570ea35114d16e8fd75c8)
+  │ sample   : /home/you/.gang/up/diagnostics.wasm  (signed: diagnostics)
+  └─────────────────────────────────────────────────────────────
+
+Drive it from another terminal:
+
+  gang --data-dir /home/you/.gang/up deploy up-robot /home/you/.gang/up/diagnostics.wasm
+  gang --data-dir /home/you/.gang/up run up-robot diagnostics
+  gang --data-dir /home/you/.gang/up caps up-robot
+  gang --data-dir /home/you/.gang/up peer list
+
+The agent enforces a default-deny policy (/home/you/.gang/up/robot/policy.toml):
+  only the sample's diagnostics group is permitted; any other
+  capability group is denied at deploy time.
+
+Ctrl-C tears the whole fleet down.
+```
+
+Driven from the second terminal, the printed commands round-trip over the relay
+circuit:
+
+```console
+$ gang --data-dir ~/.gang/up deploy up-robot ~/.gang/up/diagnostics.wasm
+Deployed 'diagnostics' to robot 'up-robot' (via relay)
+
+$ gang --data-dir ~/.gang/up caps up-robot
+Capabilities on 'up-robot':
+  diagnostics v0.1.0 (by 12D3-3bdd18c50e2570ea35114d16e8fd75c8)
+    - ganglion:diagnostics/collect@1.0
+```
+
+Deploying a capability that declares a group the policy does not permit is
+rejected at deploy time — default-deny is genuinely enforced:
+
+```console
+$ gang --data-dir ~/.gang/up sign netprobe.wasm --capabilities network
+$ gang --data-dir ~/.gang/up deploy up-robot netprobe.wasm
+Error: deploy to 'up-robot' rejected by robot (deploy_failed): capability ganglion:network/probe@1.0 not permitted by policy
 ```
 
 ### `gang diagnose [robot]`

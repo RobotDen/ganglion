@@ -61,6 +61,38 @@ System Information:
   12D3-c2ace1a32fd67c0c8c66976336bceead invoked 'diagnostics' v0.1.0 at 18:47:54 -> Success
 ```
 
+### 2b. One command to a real local fleet: `gang up`
+
+`gang demo` runs the whole pipeline in a single process and then tears itself down — nothing is left running to talk to. `gang up` is the next step: it stands up a **real** local fleet you can drive with real `gang` commands, and it is a pure composition of the pieces documented below (relay + agent + sign + peer add).
+
+```bash
+gang up          # add --data-dir <path> to choose the working dir (default ~/.gang/up)
+```
+
+It starts a loopback relay and a robot agent under one working directory, gives the agent a **default-deny policy** (only the sample's diagnostics group is permitted), signs one sample capability with your operator identity, registers the robot as `up-robot`, and prints the exact commands to run in another terminal:
+
+```console
+  ┌─────────────────────────────────────────────────────────────
+  │ Your fleet is up.
+  ├─────────────────────────────────────────────────────────────
+  │ data dir : /home/you/.gang/up
+  │ relay    : /ip4/127.0.0.1/tcp/42139/p2p/12D3KooWNKAAE2Awv9bL7CFyNyZq5dwLzdKZG9S4N78wroekBWNr
+  │ robot    : up-robot  (12D3-3bdd18c50e2570ea35114d16e8fd75c8)
+  │ sample   : /home/you/.gang/up/diagnostics.wasm  (signed: diagnostics)
+  └─────────────────────────────────────────────────────────────
+
+Drive it from another terminal:
+
+  gang --data-dir /home/you/.gang/up deploy up-robot /home/you/.gang/up/diagnostics.wasm
+  gang --data-dir /home/you/.gang/up run up-robot diagnostics
+  gang --data-dir /home/you/.gang/up caps up-robot
+  gang --data-dir /home/you/.gang/up peer list
+
+Ctrl-C tears the whole fleet down.
+```
+
+`gang up` runs in the foreground and blocks; Ctrl-C shuts the relay and agent down. The steps below are the same fleet, wired by hand for a real multi-host deployment.
+
 ### 3. Set up a relay (server)
 
 Robots are reached through a circuit relay, never by DNS name or inbound port. On any host both your workstation and the robots can dial:
@@ -175,6 +207,8 @@ gang run <robot> <cap> [args...]      Invoke an installed capability
 gang caps <robot>                     List capabilities installed on a robot
 gang logs <robot> [--follow]          Stream robot logs [WIP]
 gang demo                             Self-contained end-to-end demo
+gang up [--data-dir] [--port]         Stand up a real local fleet (relay+agent+signed sample)
+        [--force] [--json]
 gang diagnose [robot]                 Detect network archetype, recommend transport config
 gang transport-stats <robot>          Show per-transport connection statistics [WIP: simulated]
 gang test-archetype <archetype>       Launch a Docker network scenario

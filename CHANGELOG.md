@@ -2,6 +2,35 @@
 
 All notable changes to Ganglion will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **`gang up` — one command to a real local fleet.** Bridges the gap between
+  `gang demo` (self-contained, tears itself down) and a hand-wired
+  relay/agent/deploy. In one foreground command it stands up a loopback circuit
+  relay, a robot agent with a real **default-deny** policy on disk (only the
+  sample's diagnostics group is permitted; commented examples show how to widen
+  it), and one sample capability signed with the operator identity, then
+  registers the robot as `up-robot` and prints the exact `gang` commands to
+  drive it from another terminal. Relay and agent run as in-process tasks in a
+  single runtime (mirroring the e2e harness) so Ctrl-C tears the whole fleet
+  down cleanly. Flags: `--data-dir`, `--port`, `--force`, `--json`. Alias:
+  `gang fleet`.
+- **Global `--data-dir` flag.** Points the whole CLI at a self-contained fleet
+  directory instead of `~/.gang` (identity, peer registry, config, trust store),
+  via the `GANG_HOME` environment variable. `gang --data-dir <dir> deploy
+  up-robot …` drives a `gang up` fleet.
+
+### Fixed
+
+- **`OperatorConfig::default()` now yields the documented defaults.** The
+  `#[serde(default = "…")]` attribute only fires during deserialization, so a
+  derived `Default` produced an empty `host_key_policy`, which `verify_host_key`
+  then rejected in any environment without a `config.toml` (e.g. a fresh fleet
+  directory). `Default` is now hand-written to match the deserialized defaults
+  (`host_key_policy = "strict"`).
+
 ## [2.1.0] - 2026-08-06
 
 ### Fixed
