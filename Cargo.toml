@@ -97,6 +97,12 @@ libp2p = { version = "0.56", features = [
     "serde",
     "request-response",
 ] }
+# True server-push substreams for the robot→operator event feed (ADR-024).
+# Pre-release: the libp2p 0.56 meta-crate exposes no `stream` feature, but
+# libp2p-stream 0.4.0-alpha resolves cleanly against the locked libp2p-swarm
+# 0.47.1. Pinned exactly to this pre-release so a future 0.4.0 final (or a new
+# alpha) cannot silently change the wire behaviour underneath us.
+libp2p-stream = "=0.4.0-alpha"
 
 # WASM runtime
 wasmtime = { version = "36", features = ["component-model"] }
