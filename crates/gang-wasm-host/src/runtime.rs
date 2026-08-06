@@ -3,7 +3,8 @@
 //! This is the core execution engine for Ganglion capabilities. It:
 //! 1. Loads a .wasm component file
 //! 2. Configures resource limits from the manifest (fuel, memory, wall-clock)
-//! 3. Links only declared capability imports (undeclared = trap)
+//! 3. Links all capability imports plus a deny-by-default WASI host
+//!    (calls to undeclared capability groups are denied at call time)
 //! 4. Invokes the component's `run` export
 //! 5. Captures stdout/stderr and returns the result
 
@@ -207,6 +208,16 @@ impl ComponentRuntime {
         brokers: HashMap<String, Arc<dyn CapabilityBroker>>,
     ) -> anyhow::Result<Self> {
         let mut linker = Linker::<CapabilityHost>::new(engine.engine());
+        // Components built with standard toolchains (cargo-component wraps a
+        // wasm32-wasip1 core module with the WASI preview1 adapter) import
+        // `wasi:cli`, `wasi:io`, `wasi:clocks`, `wasi:filesystem` and
+        // `wasi:random` even when they never touch the system — without these
+        // host definitions such a component fails to instantiate at all. The
+        // CapabilityHost's WasiCtx is deny-by-default (no env/args/preopens,
+        // sockets denied, stdio captured), so linking WASI grants no ambient
+        // authority; real system access still goes through declared
+        // capability brokers only.
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         register_capability_imports(&mut linker)?;
         Ok(Self {
             engine,
@@ -343,8 +354,8 @@ impl ComponentRuntime {
                 let host = store.into_data();
                 Ok(ComponentResult {
                     data,
-                    stdout: host.stdout,
-                    stderr: host.stderr,
+                    stdout: host.stdout_contents(),
+                    stderr: host.stderr_contents(),
                     elapsed,
                     fuel_consumed,
                 })
@@ -473,6 +484,129 @@ mod tests {
         let engine = GanglionEngine::new().unwrap();
         let brokers: HashMap<String, Arc<dyn CapabilityBroker>> = HashMap::new();
         let _runtime = ComponentRuntime::new(engine, brokers).unwrap();
+    }
+
+    /// A minimal `ganglion-capability`-shaped component that IMPORTS a WASI
+    /// interface, as every component built with a standard toolchain does
+    /// (cargo-component wraps a wasm32-wasip1 core module with the WASI
+    /// preview1 adapter, importing `wasi:cli`, `wasi:io`, `wasi:clocks`, …).
+    /// `run` returns the given payload bytes as its ok result.
+    fn wasi_importing_component(payload: &[u8]) -> Vec<u8> {
+        let data: String = payload.iter().map(|b| format!("\\{b:02x}")).collect();
+        let len = payload.len();
+        let wat = format!(
+            r#"(component
+  (import "wasi:cli/exit@0.2.0" (instance $wasi-exit
+    (export "exit" (func (param "status" (result))))))
+  (core module $m
+    (import "wasi" "exit" (func $exit (param i32)))
+    (memory (export "mem") 1)
+    (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32)
+      (i32.const 2048))
+    (func (export "run") (param i32 i32) (result i32)
+      (i32.store (i32.const 512) (i32.const 0))
+      (i32.store (i32.const 516) (i32.const 1024))
+      (i32.store (i32.const 520) (i32.const {len}))
+      (i32.const 512))
+    (data (i32.const 1024) "{data}"))
+  (core func $exit_lowered (canon lower (func $wasi-exit "exit")))
+  (core instance $i (instantiate $m
+    (with "wasi" (instance (export "exit" (func $exit_lowered))))))
+  (func (export "run") (param "args" (list string))
+        (result (result (list u8) (error string)))
+    (canon lift (core func $i "run") (memory $i "mem")
+      (realloc (func $i "cabi_realloc")))))"#
+        );
+        wat::parse_str(&wat).expect("component wat parses")
+    }
+
+    /// Regression test for the e2e-dispatch failure: a component that CALLS a
+    /// record-returning capability import (`diagnostics-collect.system-info`)
+    /// must receive properly-typed `list<diagnostic-entry>` records. When the
+    /// host returned JSON bytes instead (the old `set_result_json_bytes`),
+    /// Wasmtime's dynamic-func result type-check trapped the component's
+    /// first host call.
+    #[tokio::test]
+    async fn component_receives_typed_system_info_records() {
+        use gang_core::broker::{CapabilityRequest, CapabilityResponse};
+        use gang_core::capability::CapabilityGroup;
+        use gang_core::error::BrokerError;
+
+        struct MockDiagnostics;
+
+        #[async_trait::async_trait]
+        impl CapabilityBroker for MockDiagnostics {
+            async fn handle_request(
+                &self,
+                _req: CapabilityRequest,
+            ) -> Result<CapabilityResponse, BrokerError> {
+                let data = br#"{"hostname":"robo-1"}"#.to_vec();
+                let bytes_out = data.len() as u64;
+                Ok(CapabilityResponse {
+                    success: true,
+                    data,
+                    error: None,
+                    bytes_in: 0,
+                    bytes_out,
+                })
+            }
+
+            fn capability_group(&self) -> &str {
+                "ganglion:diagnostics/collect"
+            }
+        }
+
+        let engine = GanglionEngine::new().unwrap();
+        let mut brokers: HashMap<String, Arc<dyn CapabilityBroker>> = HashMap::new();
+        brokers.insert(
+            "ganglion:diagnostics/collect".into(),
+            Arc::new(MockDiagnostics),
+        );
+        let runtime = ComponentRuntime::new(engine, brokers).unwrap();
+
+        let bytes = wat::parse_str(include_str!("../testdata/system-info-component.wat")).unwrap();
+        let result = runtime
+            .invoke(
+                &bytes,
+                "system-info-fixture",
+                vec![CapabilityGroup::DiagnosticsCollect {
+                    version: "1.0".into(),
+                }],
+                &ResourceLimits::default(),
+                vec![],
+            )
+            .await
+            .expect("system-info-calling component must run");
+        assert_eq!(
+            String::from_utf8_lossy(&result.data),
+            "hostname=robo-1",
+            "typed diagnostic-entry records did not round-trip"
+        );
+    }
+
+    /// Regression test for the e2e-dispatch failure: a component importing
+    /// WASI interfaces must instantiate and run. Before WASI was added to the
+    /// runtime linker, instantiation failed immediately with a missing
+    /// `wasi:*` import — deploy succeeded (nothing instantiates at deploy)
+    /// but every `gang run` of a toolchain-built component errored instantly.
+    #[tokio::test]
+    async fn wasi_importing_component_instantiates_and_runs() {
+        let engine = GanglionEngine::new().unwrap();
+        let runtime = ComponentRuntime::new(engine, HashMap::new()).unwrap();
+
+        let payload = br#"{"component":"wasi-test"}"#;
+        let bytes = wasi_importing_component(payload);
+        let result = runtime
+            .invoke(
+                &bytes,
+                "wasi-test-hash",
+                vec![],
+                &ResourceLimits::default(),
+                vec![],
+            )
+            .await
+            .expect("WASI-importing component must instantiate and run");
+        assert_eq!(result.data, payload);
     }
 
     // --- Component cache bound ---

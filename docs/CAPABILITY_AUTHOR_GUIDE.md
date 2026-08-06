@@ -10,7 +10,7 @@ A Ganglion capability is a signed WebAssembly component that runs inside the rob
 export run: func(args: list<string>) -> result<list<u8>, string>;
 ```
 
-It may import any of the eight host interfaces defined in `ganglion:capability@0.5.0`. The host only links interfaces declared in the component's signed manifest; undeclared imports trap at instantiation.
+It may import any of the eight host interfaces defined in `ganglion:capability@0.5.0`. The host links every interface — plus a locked-down WASI 0.2 set (no environment, no arguments, no preopened directories, sockets denied, stdio captured) so that components built with standard toolchains (cargo-component, componentize-py, TinyGo) instantiate — and denies calls to capability groups not declared in the component's signed manifest at call time.
 
 ## Quick start
 

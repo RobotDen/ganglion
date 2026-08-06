@@ -91,10 +91,20 @@ fn set_result_bytes(results: &mut [Val], resp: Result<CapabilityResponse, String
 }
 
 /// Set a WIT result<list<string>, string> into the output Val slot.
+///
+/// The broker data is a JSON array; string elements are passed through and
+/// non-string elements (e.g. process-list's structured entries) are rendered
+/// as compact JSON so no information is silently dropped.
 fn set_result_string_list(results: &mut [Val], resp: Result<CapabilityResponse, String>) {
     match resp {
         Ok(r) if r.success => {
-            let items: Vec<String> = serde_json::from_slice(&r.data).unwrap_or_default();
+            let items: Vec<String> = serde_json::from_slice::<serde_json::Value>(&r.data)
+                .ok()
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .map(json_scalar_string)
+                .collect();
             results[0] = Val::Result(Ok(Some(Box::new(Val::List(
                 items.into_iter().map(Val::String).collect(),
             )))));
@@ -142,15 +152,227 @@ fn set_result_bool(results: &mut [Val], resp: Result<CapabilityResponse, String>
     }
 }
 
-/// Set a WIT result<list<record>, string> where records are serialized as JSON.
-/// The response data from the broker is expected to be JSON-encoded; we pass it
-/// through as a byte list that the component can deserialize.
-fn set_result_json_bytes(results: &mut [Val], resp: Result<CapabilityResponse, String>) {
-    // For record types (ros-entry, log-source, diagnostic-entry, etc.), we
-    // serialize the broker response as JSON bytes. The WASM component receives
-    // raw bytes and deserializes on its side. This avoids complex Val
-    // construction for nested record types while still providing the data.
-    set_result_bytes(results, resp);
+/// Decode a successful broker response as JSON and convert it into the
+/// function's declared WIT return shape via `convert`.
+///
+/// Wasmtime type-checks the result Vals of a dynamic (`func_new_async`) host
+/// function against the calling component's expected type, so the Val MUST
+/// match the WIT signature exactly. An earlier implementation returned JSON
+/// bytes (`list<u8>`) for every record-typed result, which trapped the very
+/// first host call of any toolchain-built component.
+fn set_result_typed(
+    results: &mut [Val],
+    resp: Result<CapabilityResponse, String>,
+    convert: impl FnOnce(&serde_json::Value) -> Result<Val, String>,
+) {
+    let outcome = match resp {
+        Ok(r) if r.success => serde_json::from_slice::<serde_json::Value>(&r.data)
+            .map_err(|e| format!("broker returned undecodable JSON: {e}"))
+            .and_then(|v| convert(&v)),
+        Ok(r) => Err(r.error.unwrap_or_else(|| "broker returned failure".into())),
+        Err(e) => Err(e),
+    };
+    match outcome {
+        Ok(val) => results[0] = Val::Result(Ok(Some(Box::new(val)))),
+        Err(msg) => results[0] = Val::Result(Err(Some(Box::new(Val::String(msg))))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON → typed Val converters (one per WIT record shape)
+// ---------------------------------------------------------------------------
+
+/// Build a `Val::Record` from (WIT-field-name, value) pairs. Field names are
+/// the WIT kebab-case names, in WIT declaration order.
+fn record_val(fields: &[(&str, Val)]) -> Val {
+    Val::Record(
+        fields
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    )
+}
+
+/// Render a JSON value as a display string: strings pass through unquoted,
+/// everything else as compact JSON.
+fn json_scalar_string(v: &serde_json::Value) -> String {
+    match v.as_str() {
+        Some(s) => s.to_string(),
+        None => v.to_string(),
+    }
+}
+
+fn json_field_str(v: &serde_json::Value, key: &str) -> String {
+    v.get(key).map(json_scalar_string).unwrap_or_default()
+}
+
+fn json_field_u64(v: &serde_json::Value, key: &str) -> u64 {
+    v.get(key).and_then(|x| x.as_u64()).unwrap_or(0)
+}
+
+fn json_field_f64(v: &serde_json::Value, key: &str) -> f64 {
+    v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0)
+}
+
+fn json_field_bool(v: &serde_json::Value, key: &str) -> bool {
+    v.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
+}
+
+fn json_field_byte_list(v: &serde_json::Value, key: &str) -> Val {
+    Val::List(
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|b| b.as_u64().map(|n| Val::U8(n as u8)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
+/// JSON object → `list<diagnostic-entry>` (record { key, value }), one entry
+/// per top-level field. Non-string values are rendered as compact JSON.
+fn kv_entries_val(v: &serde_json::Value) -> Result<Val, String> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "broker returned non-object JSON for key/value entries".to_string())?;
+    Ok(Val::List(
+        obj.iter()
+            .map(|(k, val)| {
+                record_val(&[
+                    ("key", Val::String(k.clone())),
+                    ("value", Val::String(json_scalar_string(val))),
+                ])
+            })
+            .collect(),
+    ))
+}
+
+/// RosListing { topics, services, nodes } → `list<ros-entry>`
+/// (record { name, entry-type }).
+fn ros_entries_val(v: &serde_json::Value) -> Result<Val, String> {
+    let mut out = Vec::new();
+    for (field, kind) in [
+        ("topics", "topic"),
+        ("services", "service"),
+        ("nodes", "node"),
+    ] {
+        if let Some(arr) = v.get(field).and_then(|a| a.as_array()) {
+            for name in arr {
+                out.push(record_val(&[
+                    ("name", Val::String(json_scalar_string(name))),
+                    ("entry-type", Val::String(kind.to_string())),
+                ]));
+            }
+        }
+    }
+    Ok(Val::List(out))
+}
+
+/// Broker log-source array → `list<log-source>` (record { name, source-type }).
+fn log_sources_val(v: &serde_json::Value) -> Result<Val, String> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| "broker returned non-array JSON for log sources".to_string())?;
+    Ok(Val::List(
+        arr.iter()
+            .map(|item| {
+                record_val(&[
+                    ("name", Val::String(json_field_str(item, "name"))),
+                    (
+                        "source-type",
+                        Val::String(json_field_str(item, "source_type")),
+                    ),
+                ])
+            })
+            .collect(),
+    ))
+}
+
+/// Broker FileStat → `file-stat` (record { size, is-dir, is-file, modified }).
+/// The broker does not report mtime, so `modified` is 0.
+fn file_stat_val(v: &serde_json::Value) -> Result<Val, String> {
+    Ok(record_val(&[
+        ("size", Val::U64(json_field_u64(v, "size"))),
+        ("is-dir", Val::Bool(json_field_bool(v, "is_dir"))),
+        ("is-file", Val::Bool(json_field_bool(v, "is_file"))),
+        ("modified", Val::U64(json_field_u64(v, "modified"))),
+    ]))
+}
+
+/// Broker ProcessOutput → `process-result`
+/// (record { exit-code, stdout, stderr }).
+fn process_result_val(v: &serde_json::Value) -> Result<Val, String> {
+    let exit_code = v.get("exit_code").and_then(|x| x.as_i64()).unwrap_or(-1) as i32;
+    Ok(record_val(&[
+        ("exit-code", Val::S32(exit_code)),
+        ("stdout", json_field_byte_list(v, "stdout")),
+        ("stderr", json_field_byte_list(v, "stderr")),
+    ]))
+}
+
+/// Broker PingResult → `ping-result`.
+fn ping_result_val(v: &serde_json::Value) -> Result<Val, String> {
+    Ok(record_val(&[
+        ("host", Val::String(json_field_str(v, "host"))),
+        ("reachable", Val::Bool(json_field_bool(v, "reachable"))),
+        ("rtt-ms", Val::Float64(json_field_f64(v, "rtt_ms"))),
+        (
+            "packets-sent",
+            Val::U32(json_field_u64(v, "packets_sent") as u32),
+        ),
+        (
+            "packets-received",
+            Val::U32(json_field_u64(v, "packets_received") as u32),
+        ),
+    ]))
+}
+
+/// Broker DnsResult → `dns-result`.
+fn dns_result_val(v: &serde_json::Value) -> Result<Val, String> {
+    let answers = v
+        .get("answers")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|s| Val::String(json_scalar_string(s)))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(record_val(&[
+        ("hostname", Val::String(json_field_str(v, "hostname"))),
+        ("record-type", Val::String(json_field_str(v, "record_type"))),
+        ("answers", Val::List(answers)),
+    ]))
+}
+
+/// Broker PortResult → `port-result`.
+fn port_result_val(v: &serde_json::Value) -> Result<Val, String> {
+    Ok(record_val(&[
+        ("host", Val::String(json_field_str(v, "host"))),
+        ("port", Val::U16(json_field_u64(v, "port") as u16)),
+        ("open", Val::Bool(json_field_bool(v, "open"))),
+        ("latency-ms", Val::Float64(json_field_f64(v, "latency_ms"))),
+    ]))
+}
+
+/// Broker traceroute hops → `list<traceroute-hop>`.
+fn traceroute_hops_val(v: &serde_json::Value) -> Result<Val, String> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| "broker returned non-array JSON for traceroute hops".to_string())?;
+    Ok(Val::List(
+        arr.iter()
+            .map(|hop| {
+                record_val(&[
+                    ("hop", Val::U32(json_field_u64(hop, "hop") as u32)),
+                    ("address", Val::String(json_field_str(hop, "address"))),
+                    ("rtt-ms", Val::Float64(json_field_f64(hop, "rtt_ms"))),
+                ])
+            })
+            .collect(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +408,7 @@ fn register_ros_interface(linker: &mut Linker<CapabilityHost>) -> anyhow::Result
         let (declared, broker) = extract_broker_state(&caller, GROUP);
         Box::new(async move {
             let resp = call_broker(GROUP, declared, broker, BrokerOperation::RosList).await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, ros_entries_val);
             Ok(())
         })
     })?;
@@ -285,7 +507,7 @@ fn register_logs_stream(linker: &mut Linker<CapabilityHost>) -> anyhow::Result<(
         let (declared, broker) = extract_broker_state(&caller, GROUP);
         Box::new(async move {
             let resp = call_broker(GROUP, declared, broker, BrokerOperation::LogSourceList).await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, log_sources_val);
             Ok(())
         })
     })?;
@@ -385,7 +607,7 @@ fn register_fs_bounded(linker: &mut Linker<CapabilityHost>) -> anyhow::Result<()
         };
         Box::new(async move {
             let resp = call_broker(GROUP, declared, broker, BrokerOperation::FsStat { path }).await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, file_stat_val);
             Ok(())
         })
     })?;
@@ -409,7 +631,7 @@ fn register_diagnostics_collect(linker: &mut Linker<CapabilityHost>) -> anyhow::
         let (declared, broker) = extract_broker_state(&caller, GROUP);
         Box::new(async move {
             let resp = call_broker(GROUP, declared, broker, BrokerOperation::SystemInfo).await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, kv_entries_val);
             Ok(())
         })
     })?;
@@ -429,7 +651,7 @@ fn register_diagnostics_collect(linker: &mut Linker<CapabilityHost>) -> anyhow::
         let (declared, broker) = extract_broker_state(&caller, GROUP);
         Box::new(async move {
             let resp = call_broker(GROUP, declared, broker, BrokerOperation::NetworkState).await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, kv_entries_val);
             Ok(())
         })
     })?;
@@ -551,7 +773,7 @@ fn register_process_spawn(linker: &mut Linker<CapabilityHost>) -> anyhow::Result
                 },
             )
             .await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, process_result_val);
             Ok(())
         })
     })?;
@@ -585,7 +807,7 @@ fn register_process_spawn(linker: &mut Linker<CapabilityHost>) -> anyhow::Result
                 },
             )
             .await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, process_result_val);
             Ok(())
         })
     })?;
@@ -623,7 +845,7 @@ fn register_network_probe(linker: &mut Linker<CapabilityHost>) -> anyhow::Result
                 BrokerOperation::NetPing { host, count },
             )
             .await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, ping_result_val);
             Ok(())
         })
     })?;
@@ -650,7 +872,7 @@ fn register_network_probe(linker: &mut Linker<CapabilityHost>) -> anyhow::Result
                 },
             )
             .await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, dns_result_val);
             Ok(())
         })
     })?;
@@ -682,7 +904,7 @@ fn register_network_probe(linker: &mut Linker<CapabilityHost>) -> anyhow::Result
                 },
             )
             .await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, port_result_val);
             Ok(())
         })
     })?;
@@ -706,7 +928,7 @@ fn register_network_probe(linker: &mut Linker<CapabilityHost>) -> anyhow::Result
                 BrokerOperation::NetTraceroute { host, max_hops },
             )
             .await;
-            set_result_json_bytes(results, resp);
+            set_result_typed(results, resp, traceroute_hops_val);
             Ok(())
         })
     })?;

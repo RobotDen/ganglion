@@ -2,7 +2,9 @@
 //
 // All WASM components interact with the host through these interfaces.
 // A component declares which interfaces it needs in its signed manifest.
-// The host only links declared interfaces; undeclared imports trap.
+// The host links every interface (plus a deny-by-default WASI 0.2 set for
+// toolchain-generated imports); calls to capability groups not declared in
+// the manifest are denied at call time.
 
 package ganglion:capability@0.5.0;
 

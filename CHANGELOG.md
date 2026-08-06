@@ -4,6 +4,25 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **WASI-built components can actually run.** The component runtime now links
+  a locked-down WASI 0.2 host (no environment, no arguments, no preopens,
+  sockets denied, stdin closed, stdout/stderr captured — bounded — for
+  diagnostics). Components produced by standard toolchains (cargo-component
+  wraps a wasm32-wasip1 core module with the WASI preview1 adapter) import
+  `wasi:cli`/`wasi:io`/`wasi:clocks`/`wasi:filesystem`/`wasi:random` even when
+  they never touch the system; without the WASI host definitions every such
+  component failed to instantiate on its first `gang run`.
+- **Record-typed host returns are really records.** Host functions whose WIT
+  signature returns records (`system-info`, `network-state`, `list-ros`,
+  `list-sources`, `stat-file`, `spawn`, `spawn-with-env`, `ping`,
+  `dns-lookup`, `port-check`, `traceroute`) previously returned JSON bytes;
+  Wasmtime type-checks dynamic host-function results against the component's
+  expected type, so the first such call trapped with
+  `type mismatch: expected record, found u8`. Broker JSON is now converted
+  into properly-typed component values.
+
 ### Added
 
 - **Operator-side remote dispatch (ADR-020 Phase 32).** `gang deploy`, `gang
