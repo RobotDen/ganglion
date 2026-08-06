@@ -680,6 +680,27 @@ impl RobotAgent {
         self: &Arc<Self>,
         transport: &gang_libp2p::Libp2pTransportAdapter,
     ) -> anyhow::Result<()> {
+        self.serve_inner(transport, true).await
+    }
+
+    /// Serve control + the **poll fallback only**, without accepting push
+    /// substreams (ADR-024). Useful for a robot that deliberately does not
+    /// expose the `/ganglion/events/1.0` push protocol — e.g. running an
+    /// alpha-free build, or exercising an operator's `auto` push→poll fallback.
+    /// The control-protocol `SubscribeEvents` poll still works, so operators can
+    /// still tail the feed.
+    pub async fn serve_poll_only(
+        self: &Arc<Self>,
+        transport: &gang_libp2p::Libp2pTransportAdapter,
+    ) -> anyhow::Result<()> {
+        self.serve_inner(transport, false).await
+    }
+
+    async fn serve_inner(
+        self: &Arc<Self>,
+        transport: &gang_libp2p::Libp2pTransportAdapter,
+        accept_push: bool,
+    ) -> anyhow::Result<()> {
         use gang_core::message::{
             CapabilityInfo, ControlMessage, InvokeStatus, decode_message, encode_message,
         };
@@ -779,6 +800,23 @@ impl RobotAgent {
                             message: e.to_string(),
                         },
                     },
+                    ControlMessage::SubscribeEvents {
+                        since_seq,
+                        max_events,
+                    } => {
+                        // Poll fallback (ADR-024): serve the same authenticated
+                        // batch the push feed would send, so an operator whose
+                        // push stream is unavailable can still tail via control.
+                        let req = EventSubscribeRequest::new(since_seq, max_events);
+                        match agent.build_event_subscription(&remote_peer, &req).await {
+                            Ok(events) => ControlMessage::Events { events },
+                            Err(e) => ControlMessage::Error {
+                                request_id: None,
+                                code: "unauthorized".into(),
+                                message: e.to_string(),
+                            },
+                        }
+                    }
                     ControlMessage::ListCapabilities => {
                         let caps = agent.list_capabilities().await;
                         ControlMessage::CapabilityList {
@@ -829,23 +867,27 @@ impl RobotAgent {
 
         // --- /ganglion/events/1.0: genuine push substreams (ADR-024) ---
         // Accept persistent inbound event substreams and push framed events to
-        // each authenticated subscriber live, rather than serving a buffered
-        // request-response batch.
-        let mut incoming = transport
-            .accept_event_streams()
-            .map_err(|e| anyhow::anyhow!("Failed to accept event streams: {e}"))?;
-        let events_agent = Arc::clone(self);
-        tokio::spawn(async move {
-            use futures::StreamExt;
-            while let Some((subscriber, stream)) = incoming.next().await {
-                let agent = Arc::clone(&events_agent);
-                // One task per subscriber so a slow/stalled operator only
-                // delays its own feed, never the agent or its peers.
-                tokio::spawn(async move {
-                    push_event_feed(agent, subscriber, stream).await;
-                });
-            }
-        });
+        // each authenticated subscriber live. The control-protocol
+        // `SubscribeEvents` poll (above) remains available as the fallback, so
+        // an operator whose push stream is unavailable can still tail. When
+        // `accept_push` is false this robot exposes ONLY the poll path.
+        if accept_push {
+            let mut incoming = transport
+                .accept_event_streams()
+                .map_err(|e| anyhow::anyhow!("Failed to accept event streams: {e}"))?;
+            let events_agent = Arc::clone(self);
+            tokio::spawn(async move {
+                use futures::StreamExt;
+                while let Some((subscriber, stream)) = incoming.next().await {
+                    let agent = Arc::clone(&events_agent);
+                    // One task per subscriber so a slow/stalled operator only
+                    // delays its own feed, never the agent or its peers.
+                    tokio::spawn(async move {
+                        push_event_feed(agent, subscriber, stream).await;
+                    });
+                }
+            });
+        }
 
         // Heartbeat ticker: emit a liveness beat on the bus every N seconds so
         // a live viewer can tell "quiet" from "gone". Lives for the process.
