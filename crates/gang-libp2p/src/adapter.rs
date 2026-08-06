@@ -614,6 +614,16 @@ impl SwarmWorker {
         let via_relay = endpoint.is_relayed();
         info!(peer = %peer_id, relay = via_relay, "Connection established");
 
+        // A circuit reservation listener that was created before its relay
+        // connection existed closes immediately; re-establish it NOW that a
+        // connection is up instead of waiting for the next sweep tick. This
+        // closes the startup window where an agent is connected to its relay
+        // but not yet reachable through it (an operator's circuit dial in
+        // that window is refused with NO_RESERVATION).
+        if !self.circuit_relisten.is_empty() {
+            self.relisten_closed_circuits();
+        }
+
         let Some(gang_peer_id) = libp2p_to_gang_peer_id(&peer_id) else {
             warn!(peer = %peer_id, "Rejecting peer: could not recover Ed25519 identity");
             let _ = self.swarm.disconnect_peer_id(peer_id);
