@@ -31,7 +31,7 @@ pub fn wip_stub(command: &str, format: &OutputFormat) -> anyhow::Result<()> {
 // --- Operator config ---
 
 /// Operator configuration loaded from `~/.gang/config.toml`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorConfig {
     /// Default relay multiaddr when --relay is not specified and the peer
     /// registry entry has no relay_addrs.
@@ -40,6 +40,19 @@ pub struct OperatorConfig {
     /// Identity verification policy: "strict" (default), "tofu", or "none".
     #[serde(default = "default_host_key_policy")]
     pub host_key_policy: String,
+}
+
+impl Default for OperatorConfig {
+    /// Hand-written so a config-less environment (e.g. a fresh `gang up` fleet
+    /// dir) gets the SAME defaults as a deserialized empty file. `#[derive]`
+    /// would give `host_key_policy = ""`, which `verify_host_key` then rejects;
+    /// the serde `default` attribute only fires during deserialization.
+    fn default() -> Self {
+        Self {
+            default_relay: None,
+            host_key_policy: default_host_key_policy(),
+        }
+    }
 }
 
 fn default_host_key_policy() -> String {
@@ -139,6 +152,7 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         "run",
         "caps",
         "demo",
+        "up",
         "diagnose",
         "test-archetype",
         "push",
@@ -2054,6 +2068,384 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
     println!("Clean up when done: rm -rf {}", data_dir.display());
 
     Ok(())
+}
+
+/// Build a real, restrictive default-deny agent policy that still permits the
+/// signed sample's declared group (`ganglion:diagnostics/collect`) and
+/// authorizes exactly the local operator to deploy. Everything else is denied
+/// because the policy engine is default-deny: a capability group with no rule,
+/// or a peer with no rule, is rejected. Commented examples show how to widen it.
+fn up_default_deny_policy(operator: &gang_core::identity::PeerId) -> String {
+    format!(
+        r#"# Ganglion robot-agent policy — DEFAULT DENY.
+#
+# The policy engine denies anything not explicitly listed here:
+#   * a capability group with no [[capability_rules]] entry is rejected;
+#   * a deploying peer with no matching [[peer_rules]] entry is rejected.
+# `gang up` writes this file so the agent enforces a real restrictive policy
+# (not the permissive dev fallback), yet still runs the signed sample below.
+
+# Permit ONLY the diagnostics group the sample capability declares.
+[[capability_rules]]
+group = "ganglion:diagnostics/collect"
+allowed_patterns = ["**"]
+
+# Uncomment to widen the policy. Each group stays denied until listed.
+# [[capability_rules]]
+# group = "ganglion:logs/stream"
+# allowed_patterns = ["journald/**", "ros2/**"]
+#
+# [[capability_rules]]
+# group = "ganglion:ros/interface"
+# allowed_patterns = ["/diagnostics", "/rosout"]
+# max_access = "read_only"
+#
+# [[capability_rules]]
+# group = "ganglion:fs/bounded"
+# allowed_patterns = ["/var/log/**"]
+
+# Authorize exactly the local `gang up` operator to deploy. Replace with the
+# gang id of any operator you trust, or "*" to allow any trusted peer.
+[[peer_rules]]
+peer_id = "{operator}"
+can_deploy = true
+"#
+    )
+}
+
+/// `gang up` — stand up a real local fleet (relay + agent + signed sample).
+///
+/// The on-ramp between `gang demo` (self-contained, tears itself down) and a
+/// hand-wired relay/agent/deploy. Everything runs as in-process tasks in this
+/// one runtime — the same wiring the e2e harness (`tests/remote_dispatch.rs`)
+/// uses — so teardown is a single `abort()` per task with no child processes,
+/// no PATH assumptions, and no orphaned relays if the command is killed.
+pub async fn up(
+    data_dir: Option<&str>,
+    port: Option<u16>,
+    force: bool,
+    json_flag: bool,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_core::capability::CapabilityGroup;
+    use gang_core::identity::{PeerEntry, PeerRegistry, Role};
+    use gang_core::manifest::{
+        ComponentManifest, ResourceLimits, SignedManifest, TrustStore, TrustedPeer,
+    };
+    use gang_libp2p::{Libp2pConfig, Libp2pTransportAdapter};
+    use gang_ros::agent::{AgentConfig, RobotAgent};
+    use gang_ros::filesystem::FsRule;
+    use std::sync::Arc;
+
+    let json_output = json_flag || matches!(format, OutputFormat::Json);
+
+    // 1. Resolve the working directory. With `--data-dir` main.rs has already
+    //    pointed GANG_HOME at it; without it we default to `<config>/up` and
+    //    set GANG_HOME here so the peer registry and operator identity this
+    //    command writes land in the fleet dir (and `gang --data-dir <dir> …`
+    //    from another terminal reads exactly those files).
+    let data_dir: PathBuf = match data_dir {
+        Some(d) => PathBuf::from(d),
+        None => gang_core::identity::default_config_dir().join("up"),
+    };
+    // SAFETY: set once, before any transport or registry access below; no other
+    // thread reads the environment at this point.
+    unsafe {
+        std::env::set_var("GANG_HOME", &data_dir);
+    }
+
+    // 2. Honor --force / refuse to clobber an existing non-empty dir.
+    let non_empty = data_dir
+        .read_dir()
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if non_empty {
+        if force {
+            std::fs::remove_dir_all(&data_dir)
+                .with_context(|| format!("resetting fleet dir {}", data_dir.display()))?;
+        } else {
+            anyhow::bail!(
+                "fleet dir {} already exists and is not empty. Pass --force to reset it \
+                 (this removes its keys, registry, and agent state).",
+                data_dir.display()
+            );
+        }
+    }
+    let relay_dir = data_dir.join("relay");
+    let robot_dir = data_dir.join("robot");
+    std::fs::create_dir_all(&relay_dir)?;
+    std::fs::create_dir_all(&robot_dir)?;
+
+    if !json_output {
+        println!("=== gang up — standing up a local fleet ===");
+        println!();
+        println!("Data dir: {}", data_dir.display());
+    }
+
+    // 3. Operator identity (== default_key_path() now that GANG_HOME is set).
+    let operator = gang_core::identity::Keypair::load_or_generate(&data_dir.join("identity.key"))?;
+    let operator_id = operator.peer_id();
+
+    // 4. Start the loopback relay and capture its dialable multiaddr.
+    let relay_listen = match port {
+        Some(p) => format!("/ip4/127.0.0.1/tcp/{p}"),
+        None => "/ip4/127.0.0.1/tcp/0".to_string(),
+    };
+    let relay = Arc::new(
+        Libp2pTransportAdapter::new(Libp2pConfig {
+            key_path: relay_dir.join("identity.key"),
+            listen_addrs: vec![relay_listen],
+            relay_server: true,
+            ..Default::default()
+        })
+        .await
+        .context("building the relay transport")?,
+    );
+    let relay_loop = Arc::clone(&relay);
+    let relay_task = tokio::spawn(async move { relay_loop.run_event_loop().await });
+
+    let relay_tcp = wait_for(
+        std::time::Duration::from_secs(15),
+        "the relay to report its loopback listen address",
+        || {
+            let relay = Arc::clone(&relay);
+            async move {
+                relay
+                    .listen_addrs()
+                    .await
+                    .into_iter()
+                    .find(|a| a.contains("/tcp/"))
+            }
+        },
+    )
+    .await?;
+    let relay_addr = format!("{relay_tcp}/p2p/{}", relay.libp2p_peer_id());
+
+    // 5. Write the robot's trust store (trust the operator so remote deploy is
+    //    authorized, SEC-03) and its real default-deny policy.
+    let mut trust = TrustStore::default();
+    trust.add(TrustedPeer {
+        peer_id: operator_id.clone(),
+        name: "up-operator".into(),
+        public_key: operator.public_key().to_bytes().to_vec(),
+    });
+    let trust_path = robot_dir.join("trusted_peers.json");
+    trust.save(&trust_path)?;
+
+    let policy_path = robot_dir.join("policy.toml");
+    std::fs::write(&policy_path, up_default_deny_policy(&operator_id))
+        .with_context(|| format!("writing policy {}", policy_path.display()))?;
+
+    // 6. Start the robot agent, pointed at the relay, serving the control
+    //    protocol. It binds no direct listener — reachable through the relay
+    //    circuit only, exactly like a robot behind NAT.
+    let agent = Arc::new(RobotAgent::new(AgentConfig {
+        key_path: robot_dir.join("identity.key"),
+        policy_path: Some(policy_path.clone()),
+        trust_store_path: trust_path,
+        capabilities_dir: robot_dir.join("capabilities"),
+        audit_log_path: robot_dir.join("audit.log"),
+        audit_max_size_bytes: 50 * 1024 * 1024,
+        fs_allowed_patterns: vec![FsRule {
+            pattern: format!("{}/**", robot_dir.display()),
+            read: true,
+            write: true,
+        }],
+        log_allowed_sources: vec!["**".into()],
+    })?);
+    let robot_id = agent.peer_id().clone();
+
+    let robot_transport = Arc::new(
+        Libp2pTransportAdapter::new(Libp2pConfig {
+            key_path: robot_dir.join("identity.key"),
+            listen_addrs: vec![],
+            relay_addrs: vec![relay_addr.clone()],
+            ..Default::default()
+        })
+        .await
+        .context("building the robot transport")?,
+    );
+    let robot_libp2p_id = robot_transport.libp2p_peer_id().to_string();
+
+    agent
+        .serve(robot_transport.as_ref())
+        .await
+        .context("agent failed to serve the control protocol")?;
+    let robot_loop = Arc::clone(&robot_transport);
+    let robot_task = tokio::spawn(async move { robot_loop.run_event_loop().await });
+
+    // Dial the relay and wait for the circuit reservation — the robot is only
+    // reachable once the relay accepts it (mirrors `gang agent`'s readiness).
+    robot_transport
+        .dial_multiaddr(&relay_addr)
+        .await
+        .context("robot dialing the relay")?;
+    wait_for(
+        std::time::Duration::from_secs(20),
+        "the robot's relay circuit reservation",
+        || {
+            let t = Arc::clone(&robot_transport);
+            async move {
+                t.listen_addrs()
+                    .await
+                    .into_iter()
+                    .find(|a| a.contains("p2p-circuit"))
+            }
+        },
+    )
+    .await?;
+    if !json_output {
+        println!("Relay circuit reservation established.");
+    }
+
+    // 7. Sign the one sample capability with the operator identity. Placeholder
+    //    component bytes are served through the diagnostics broker path (the
+    //    same bytes the demo/e2e use), so no wasm toolchain is required.
+    let sample_wasm = data_dir.join("diagnostics.wasm");
+    let component_bytes = b"gang-capability-diagnostics-v0.1.0-up".to_vec();
+    std::fs::write(&sample_wasm, &component_bytes)?;
+    let manifest = ComponentManifest {
+        schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
+        name: "diagnostics".into(),
+        version: "0.1.0".into(),
+        declared_capabilities: vec![CapabilityGroup::DiagnosticsCollect {
+            version: "1.0".into(),
+        }],
+        author_peer_id: operator_id.clone(),
+        component_hash: blake3::hash(&component_bytes).to_hex().to_string(),
+        limits: ResourceLimits::default(),
+        language: gang_core::registry::CapabilityLanguage::Rust,
+        description: "System diagnostics (gang up sample)".into(),
+        tags: vec!["diagnostics".into()],
+        min_ganglion_version: None,
+    };
+    let signed = SignedManifest::sign(&manifest, &operator)?;
+    let sample_manifest = sample_wasm.with_extension("manifest.cbor");
+    std::fs::write(&sample_manifest, signed.to_cbor()?)?;
+
+    // 8. Register the robot in the operator's peer list by its dialable id —
+    //    equivalent to `gang peer add up-robot <libp2p-id> --relay <addr>`.
+    let registry_path = gang_core::identity::default_registry_path();
+    let mut registry = PeerRegistry::load(&registry_path)?;
+    registry.register(
+        "up-robot".into(),
+        PeerEntry {
+            peer_id: robot_id.clone(),
+            role: Role::RobotAgent,
+            relay_addrs: vec![relay_addr.clone()],
+            libp2p_id: Some(robot_libp2p_id.clone()),
+        },
+    );
+    registry.save(&registry_path)?;
+
+    // 8b. Pre-provision the robot's host key in the OPERATOR trust store (the
+    //     known-hosts file `verify_host_key` consults) so the printed commands
+    //     connect straight away under the default "strict" policy — no TOFU
+    //     prompt. This is safe precisely because `up` generated that key: the
+    //     operator genuinely knows it. (Distinct from the robot's own trust
+    //     store above, which trusts the operator as a deployer.)
+    let robot_kp = gang_core::identity::Keypair::load(&robot_dir.join("identity.key"))?;
+    let host_trust_path = gang_core::identity::default_trust_store_path();
+    let mut host_trust = TrustStore::load(&host_trust_path)?;
+    host_trust.add(TrustedPeer {
+        peer_id: robot_id.clone(),
+        name: "up-robot".into(),
+        public_key: robot_kp.public_key().to_bytes().to_vec(),
+    });
+    host_trust.save(&host_trust_path)?;
+
+    // 9. Report the fleet facts and the exact next commands.
+    let dd = data_dir.display();
+    let sample = sample_wasm.display();
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "up",
+                "data_dir": data_dir.display().to_string(),
+                "relay_addr": relay_addr,
+                "operator_id": operator_id.as_str(),
+                "robot": {
+                    "name": "up-robot",
+                    "gang_id": robot_id.as_str(),
+                    "libp2p_id": robot_libp2p_id,
+                },
+                "sample_wasm": sample_wasm.display().to_string(),
+                "sample_manifest": sample_manifest.display().to_string(),
+                "next_commands": [
+                    format!("gang --data-dir {dd} deploy up-robot {sample}"),
+                    format!("gang --data-dir {dd} run up-robot diagnostics"),
+                    format!("gang --data-dir {dd} caps up-robot"),
+                    format!("gang --data-dir {dd} peer list"),
+                ],
+            }))?
+        );
+    } else {
+        println!();
+        println!("  ┌─────────────────────────────────────────────────────────────");
+        println!("  │ Your fleet is up.");
+        println!("  ├─────────────────────────────────────────────────────────────");
+        println!("  │ data dir : {dd}");
+        println!("  │ relay    : {relay_addr}");
+        println!("  │ robot    : up-robot  ({robot_id})");
+        println!("  │ sample   : {sample}  (signed: diagnostics)");
+        println!("  └─────────────────────────────────────────────────────────────");
+        println!();
+        println!("Drive it from another terminal:");
+        println!();
+        println!("  gang --data-dir {dd} deploy up-robot {sample}");
+        println!("  gang --data-dir {dd} run up-robot diagnostics");
+        println!("  gang --data-dir {dd} caps up-robot");
+        println!("  gang --data-dir {dd} peer list");
+        println!();
+        println!(
+            "The agent enforces a default-deny policy ({}):",
+            policy_path.display()
+        );
+        println!("  only the sample's diagnostics group is permitted; any other");
+        println!("  capability group is denied at deploy time.");
+        println!();
+        println!("Ctrl-C tears the whole fleet down.");
+        println!();
+    }
+
+    // 10. Serve until Ctrl-C, then tear every task down.
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            if !json_output {
+                println!("\nTearing down fleet…");
+            }
+        }
+        r = relay_task => {
+            if let Ok(Err(e)) = r { eprintln!("relay event loop error: {e}"); }
+        }
+    }
+    robot_task.abort();
+
+    Ok(())
+}
+
+/// Poll `probe` until it yields `Some(_)` or `timeout` elapses. Used by
+/// `gang up` to wait on loopback network readiness with an honest error.
+async fn wait_for<T, F, Fut>(
+    timeout: std::time::Duration,
+    what: &str,
+    mut probe: F,
+) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(v) = probe().await {
+            return Ok(v);
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out after {}s waiting for {what}", timeout.as_secs());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }
 
 /// `gang test-archetype`

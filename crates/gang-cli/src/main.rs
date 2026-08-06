@@ -27,6 +27,13 @@ struct Cli {
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     quiet: bool,
 
+    /// Point the whole CLI at a self-contained fleet directory instead of
+    /// `~/.gang` (identity, peer registry, config, trust). This is the dir
+    /// `gang up` stands a local fleet up in; pass the same value here to drive
+    /// that fleet: `gang --data-dir <dir> deploy up-robot …`.
+    #[arg(long, value_name = "PATH", global = true)]
+    data_dir: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -172,6 +179,27 @@ enum Commands {
     /// Run a local end-to-end demo: start agent, deploy diagnostics, invoke.
     #[command(display_order = 52)]
     Demo,
+
+    /// Stand up a real local fleet: relay + agent (default-deny) + signed sample.
+    ///
+    /// The bridge between `gang demo` (self-contained, tears itself down) and a
+    /// hand-wired relay/agent/deploy. `gang up` starts a loopback relay and a
+    /// robot agent under one working directory, signs one sample capability with
+    /// your operator identity, registers the robot, and prints the exact `gang`
+    /// commands to drive it from another terminal. Blocks until Ctrl-C, then
+    /// tears the fleet down.
+    #[command(display_order = 55, visible_alias = "fleet")]
+    Up {
+        /// Relay TCP port on loopback (default: an ephemeral port).
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+        /// Reset the data dir if it already exists (fresh keys and state).
+        #[arg(long)]
+        force: bool,
+        /// Emit the fleet facts as JSON (for scripting), then keep serving.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Run a local test harness scenario (requires Docker).
     #[command(display_order = 53)]
@@ -433,6 +461,17 @@ enum IdentityAction {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // A global `--data-dir` redirects the entire CLI's `~/.gang` lookups
+    // (identity, peer registry, config, trust store) at the given directory via
+    // GANG_HOME, so `gang --data-dir <dir> deploy …` drives a `gang up` fleet.
+    // `gang up` resolves and sets this itself when the flag is omitted.
+    if let Some(dir) = &cli.data_dir {
+        // SAFETY: set once at startup, before any threads read the environment.
+        unsafe {
+            std::env::set_var("GANG_HOME", dir);
+        }
+    }
+
     // Initialize tracing. RUST_LOG wins when set; otherwise derive from
     // the -q / -v flags. Each verbosity level is genuinely distinct.
     let derived = if cli.quiet {
@@ -533,6 +572,9 @@ async fn main() -> anyhow::Result<()> {
             .await?
         }
         Commands::Demo => commands::demo(&cli.format).await?,
+        Commands::Up { port, force, json } => {
+            commands::up(cli.data_dir.as_deref(), port, force, json, &cli.format).await?
+        }
         Commands::Logs {
             robot: _,
             follow: _,
