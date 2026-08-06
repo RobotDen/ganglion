@@ -10,7 +10,8 @@ one dashed link = a relayed circuit). Accent is **teal `#0D9488`**.
 | `logo-mono.svg` | Monochrome mark; inherits `currentColor`, so it adapts to light/dark. |
 | `logo-lockup.svg` | Mark + `ganglion` wordmark, horizontal. Used in the README header. |
 | `logo-lockup-mono.svg` | Monochrome lockup (`currentColor`). |
-| `logo-512.png` | 512×512 raster of the color mark (avatar upload, slides). |
+| `logo-512.png` | 512×512 raster of the color mark on transparent (slides, docs). |
+| `logo-avatar.svg` / `.png` | 512×512 rounded **dark tile** with the teal mark — the GitHub org/profile avatar (GitHub renders it rounded). A light variant is trivial: swap `#0b1220`→`#ffffff` and `#2dd4bf`→`#0D9488`. |
 | `social-preview.svg` / `.png` | 1280×640 GitHub social preview card. |
 
 The wordmark is **outlined to vector paths** (Space Grotesk Bold), so the SVGs

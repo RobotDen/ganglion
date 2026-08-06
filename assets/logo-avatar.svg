@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="96" fill="#0b1220"/>
+<g transform="translate(96,96) scale(3.3333333333333335)">
+  <!-- Neural-relay hub: a central ganglion body with signals radiating to
+       nodes. Monochrome: inherits the surrounding text color via #2dd4bf,
+       so it adapts to light and dark automatically. -->
+  <g stroke="#2dd4bf" stroke-width="3" stroke-linecap="round">
+    <line x1="48" y1="48" x2="79.4" y2="37.8"/>
+    <line x1="48" y1="48" x2="50.6" y2="18.1"/>
+    <line x1="48" y1="48" x2="18.3" y2="36.0"/>
+    <line x1="48" y1="48" x2="22.0" y2="63.0"/>
+    <!-- one relayed link, drawn dashed -->
+    <line x1="48" y1="48" x2="66.9" y2="75.0" stroke-dasharray="3 4.5"/>
+  </g>
+  <g fill="#2dd4bf">
+    <circle cx="48" cy="48" r="8.5"/>
+    <circle cx="79.4" cy="37.8" r="5"/>
+    <circle cx="18.3" cy="36.0" r="5"/>
+    <circle cx="22.0" cy="63.0" r="5"/>
+    <circle cx="66.9" cy="75.0" r="5"/>
+  </g>
+  <!-- one hollow node: an endpoint not yet connected -->
+  <circle cx="50.6" cy="18.1" r="4.6" fill="none" stroke="#2dd4bf" stroke-width="2.6"/>
+</g>
+</svg>
