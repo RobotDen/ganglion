@@ -144,6 +144,7 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
     let artifact_dir = artifact_store_dir();
 
     let available = [
+        "init",
         "identity show",
         "identity generate",
         "sign",
@@ -271,6 +272,325 @@ pub async fn identity_generate(force: bool) -> anyhow::Result<()> {
     println!("Generated new identity:");
     println!("  Peer ID:  {}", keypair.peer_id());
     println!("  Key file: {}", key_path.display());
+    Ok(())
+}
+
+// --- First-run setup ---
+
+/// Ask a yes/no question on the terminal, returning `default_yes` on a blank
+/// line. Only called in interactive mode (a TTY is present).
+fn prompt_yes_no(question: &str, default_yes: bool) -> anyhow::Result<bool> {
+    use std::io::Write;
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("{question} {hint} ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    Ok(match input.trim().to_lowercase().as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        _ => false,
+    })
+}
+
+/// Per-archetype "real deployment" hint for the next-steps panel. Every command
+/// referenced here is a real `gang` subcommand.
+fn archetype_deploy_hint(archetype: &gang_ros::archetype::NetworkArchetype) -> &'static str {
+    use gang_ros::archetype::NetworkArchetype::*;
+    match archetype {
+        OpenWarehouse => {
+            "Flat network: a direct QUIC path is available, but a relay still \
+             gives robots behind egress controls a stable rendezvous."
+        }
+        NatOffice => {
+            "Consumer NAT: run a relay; DCUtR will hole-punch to a direct QUIC \
+             link after the first connection."
+        }
+        EnterpriseDmz => {
+            "Enterprise DMZ: run the relay on TCP 443 (QUIC/UDP is likely \
+             blocked) and plan for relay-only operation."
+        }
+        RegulatedFacility => {
+            "Air-gapped: skip the relay. Sign capabilities here with `gang sign` \
+             and move the signed bundle to the robot over approved media."
+        }
+        MobileCgnat => {
+            "Mobile/CGNAT: run a relay and expect relay-only operation — \
+             symmetric NAT defeats hole-punching."
+        }
+    }
+}
+
+/// `gang init` — guided first-run setup. Collapses the read-the-docs first-run
+/// phase into one command: detect the network archetype, generate the operator
+/// identity, write a default-deny policy + operator config, and print exactly
+/// what to run next.
+///
+/// Interactive on a TTY (a couple of skippable prompts with safe defaults);
+/// fully non-interactive when stdin is not a terminal or `--yes` is passed,
+/// mirroring how `verify_host_key` degrades under `strict`. Existing files are
+/// never overwritten without `--force`; the command reports what already
+/// existed and continues (idempotent).
+pub async fn init(
+    _data_dir: Option<&str>,
+    force: bool,
+    yes: bool,
+    json_flag: bool,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_core::identity::{Keypair, PeerId, default_config_dir, default_key_path};
+
+    let json_output = json_flag || matches!(format, OutputFormat::Json);
+    // Non-interactive when asked (`--yes`), when emitting JSON, or when stdin is
+    // not a terminal (CI, pipes) — same rule the host-key prompt uses.
+    let interactive = !yes && !json_output && std::io::IsTerminal::is_terminal(&std::io::stdin());
+
+    // The global `--data-dir` has already pointed GANG_HOME here (main.rs), so
+    // all default_* paths resolve inside the chosen home. `~/.gang` otherwise.
+    let config_dir = default_config_dir();
+    let key_path = default_key_path();
+    let policy_path = config_dir.join("policy.toml");
+    let config_path = config_dir.join("config.toml");
+    std::fs::create_dir_all(&config_dir)
+        .with_context(|| format!("creating data dir {}", config_dir.display()))?;
+
+    if !json_output {
+        println!("=== gang init — configuring Ganglion ===");
+        println!();
+        println!("Data dir: {}", config_dir.display());
+        if !interactive && !yes {
+            println!("(stdin is not a TTY — running non-interactively with defaults)");
+        }
+        println!();
+    }
+
+    // --- 1. Network archetype detection (reuses `gang diagnose`'s probes). ---
+    let detection = gang_ros::archetype::detect_archetype();
+    let transport_line = detection
+        .recommendations
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "See `gang diagnose` for transport recommendations.".to_string());
+    if !json_output {
+        println!("[1/4] Network archetype");
+        println!(
+            "  Detected:  {} ({:.0}% confidence)",
+            detection.archetype,
+            detection.confidence * 100.0
+        );
+        println!("  Transport: {transport_line}");
+        println!();
+    }
+
+    // --- 2. Operator identity (never clobber without --force). ---
+    let mut identity_created = false;
+    let identity_existed = key_path.exists();
+    if !json_output {
+        println!("[2/4] Operator identity");
+    }
+    if identity_existed && !force {
+        let peer_id = match Keypair::load(&key_path) {
+            Ok(kp) => kp.peer_id().to_string(),
+            Err(_) => "present but unreadable".to_string(),
+        };
+        if !json_output {
+            println!("  Already present: {peer_id}");
+            println!("  Key file:        {}", key_path.display());
+            println!("  (use --force to regenerate — this rotates your peer id)");
+        }
+    } else {
+        let do_generate = if interactive {
+            let q = if identity_existed {
+                "Regenerate operator identity (rotates your peer id)?"
+            } else {
+                "Generate operator identity?"
+            };
+            prompt_yes_no(q, true)?
+        } else {
+            true
+        };
+        if do_generate {
+            let keypair = Keypair::generate();
+            keypair.save(&key_path)?;
+            identity_created = true;
+            if !json_output {
+                println!(
+                    "  {}: {}",
+                    if identity_existed {
+                        "Regenerated"
+                    } else {
+                        "Generated"
+                    },
+                    keypair.peer_id()
+                );
+                println!("  Key file:  {}", key_path.display());
+            }
+        } else if !json_output {
+            println!("  Skipped — run `gang identity generate` when ready.");
+        }
+    }
+    // The peer id to authorize in the policy (whatever identity exists now).
+    let operator_id: Option<PeerId> = Keypair::load(&key_path).ok().map(|kp| kp.peer_id().clone());
+    if !json_output {
+        println!();
+    }
+
+    // --- 3. Policy + config (default-deny; never clobber without --force). ---
+    if !json_output {
+        println!("[3/4] Policy + config");
+    }
+    let write_policy_config = if interactive {
+        prompt_yes_no("Write a default-deny policy and operator config?", true)?
+    } else {
+        true
+    };
+    let mut policy_created = false;
+    let mut config_created = false;
+    if write_policy_config {
+        // Policy: genuinely default-deny (no active capability rules), with the
+        // operator authorized to deploy and commented example rules to widen it.
+        if policy_path.exists() && !force {
+            if !json_output {
+                println!("  Policy exists, kept:   {}", policy_path.display());
+            }
+        } else {
+            // Without an identity we cannot name an authorized deployer; leave a
+            // wildcard the user must narrow. This only happens if the user
+            // declined identity generation above.
+            let author = operator_id
+                .clone()
+                .unwrap_or_else(|| PeerId::parse("12D3-00000000000000000000000000000000").unwrap());
+            std::fs::write(&policy_path, default_deny_policy(&author, false))
+                .with_context(|| format!("writing policy {}", policy_path.display()))?;
+            policy_created = true;
+            if !json_output {
+                println!("  Wrote default-deny policy: {}", policy_path.display());
+            }
+        }
+
+        // Config: sane defaults, incl. host_key_policy = strict.
+        if config_path.exists() && !force {
+            if !json_output {
+                println!("  Config exists, kept:   {}", config_path.display());
+            }
+        } else {
+            OperatorConfig::default().save()?;
+            config_created = true;
+            if !json_output {
+                println!(
+                    "  Wrote operator config:     {}  (host_key_policy = strict)",
+                    config_path.display()
+                );
+            }
+        }
+    } else if !json_output {
+        println!("  Skipped — run `gang config init` and edit policy.toml when ready.");
+    }
+    if !json_output {
+        println!();
+    }
+
+    // --- 4. Next steps, tailored to the detected archetype. ---
+    use gang_ros::archetype::NetworkArchetype;
+    let deploy_hint = archetype_deploy_hint(&detection.archetype);
+    // Each step is (command, trailing-comment). Air-gapped facilities skip the
+    // relay entirely; enterprise DMZ pins the relay to TCP 443.
+    let deploy_steps: Vec<(String, &'static str)> =
+        if matches!(detection.archetype, NetworkArchetype::RegulatedFacility) {
+            vec![
+                (
+                    "gang sign <component.wasm> --capabilities <groups>".to_string(),
+                    "# on this workstation",
+                ),
+                (
+                    "# transfer <component>.wasm + .manifest.cbor over approved media".to_string(),
+                    "",
+                ),
+                (
+                    "gang deploy <name> <signed.wasm>".to_string(),
+                    "# on the robot host",
+                ),
+            ]
+        } else {
+            let relay_port = if matches!(detection.archetype, NetworkArchetype::EnterpriseDmz) {
+                "443"
+            } else {
+                "4001"
+            };
+            let relay_note = if matches!(detection.archetype, NetworkArchetype::EnterpriseDmz) {
+                "# on a host both sides reach (TCP 443)"
+            } else {
+                "# on a host both sides reach"
+            };
+            vec![
+                (format!("gang relay --port {relay_port}"), relay_note),
+                (
+                    "gang agent --relay <relay-multiaddr>".to_string(),
+                    "# on the robot",
+                ),
+                (
+                    "gang peer add <name> <robot-libp2p-id> --relay <relay-multiaddr>".to_string(),
+                    "",
+                ),
+                (
+                    "gang deploy <name> <signed.wasm>".to_string(),
+                    "# from your workstation",
+                ),
+            ]
+        };
+    let mut next_commands: Vec<String> = vec!["gang up".to_string()];
+    next_commands.extend(
+        deploy_steps
+            .iter()
+            .map(|(cmd, _)| cmd.clone())
+            .filter(|c| !c.starts_with('#')),
+    );
+
+    if json_output {
+        let info = serde_json::json!({
+            "status": "configured",
+            "data_dir": config_dir.display().to_string(),
+            "archetype": {
+                "name": detection.archetype.to_string(),
+                "confidence": detection.confidence,
+                "transport": transport_line,
+            },
+            "identity": {
+                "id": operator_id.as_ref().map(|p| p.as_str().to_string()),
+                "key_path": key_path.display().to_string(),
+                "created": identity_created,
+                "existed": identity_existed,
+            },
+            "policy_path": policy_path.display().to_string(),
+            "config_path": config_path.display().to_string(),
+            "policy_created": policy_created,
+            "config_created": config_created,
+            "next_commands": next_commands,
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
+        return Ok(());
+    }
+
+    println!("[4/4] You're configured. What to run next");
+    println!();
+    println!("  # Try a live local fleet on loopback right now:");
+    println!("  gang up");
+    println!();
+    println!("  # For a real deployment ({}):", detection.archetype);
+    println!("  #   {deploy_hint}");
+    for (cmd, comment) in &deploy_steps {
+        if comment.is_empty() {
+            println!("  {cmd}");
+        } else {
+            println!("  {cmd:<38} {comment}");
+        }
+    }
+    println!();
+    println!("  # Enrol a robot (gang pair is coming; today use peer add):");
+    println!("  gang peer add <name> <robot-libp2p-id> --relay <relay-multiaddr>");
+    println!();
+    println!("Run `gang status` to review your configuration.");
+
     Ok(())
 }
 
@@ -2075,23 +2395,37 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
 /// authorizes exactly the local operator to deploy. Everything else is denied
 /// because the policy engine is default-deny: a capability group with no rule,
 /// or a peer with no rule, is rejected. Commented examples show how to widen it.
-fn up_default_deny_policy(operator: &gang_core::identity::PeerId) -> String {
+/// Render a default-deny robot-agent `policy.toml` authorizing `operator` to
+/// deploy. When `allow_diagnostics` is true the diagnostics group is permitted
+/// by an ACTIVE rule (so `gang up`'s signed sample deploys); otherwise every
+/// capability group is denied and the diagnostics rule appears only as a
+/// commented example a user uncomments. Shared by `gang up` and `gang init`.
+fn default_deny_policy(operator: &gang_core::identity::PeerId, allow_diagnostics: bool) -> String {
+    // The diagnostics rule: active for `gang up` (it deploys a diagnostics
+    // sample), commented-out for `gang init` (a genuinely empty default-deny).
+    let diagnostics_block = if allow_diagnostics {
+        "# Permit ONLY the diagnostics group the sample capability declares.\n\
+         [[capability_rules]]\n\
+         group = \"ganglion:diagnostics/collect\"\n\
+         allowed_patterns = [\"**\"]\n\n"
+            .to_string()
+    } else {
+        "# Example rules — uncomment (and adjust) one to allow a group.\n\
+         # [[capability_rules]]\n\
+         # group = \"ganglion:diagnostics/collect\"\n\
+         # allowed_patterns = [\"**\"]\n#\n"
+            .to_string()
+    };
     format!(
         r#"# Ganglion robot-agent policy — DEFAULT DENY.
 #
 # The policy engine denies anything not explicitly listed here:
 #   * a capability group with no [[capability_rules]] entry is rejected;
 #   * a deploying peer with no matching [[peer_rules]] entry is rejected.
-# `gang up` writes this file so the agent enforces a real restrictive policy
-# (not the permissive dev fallback), yet still runs the signed sample below.
+# This is a real restrictive policy, not the permissive dev fallback. Each
+# capability group stays denied until you add (or uncomment) a rule for it.
 
-# Permit ONLY the diagnostics group the sample capability declares.
-[[capability_rules]]
-group = "ganglion:diagnostics/collect"
-allowed_patterns = ["**"]
-
-# Uncomment to widen the policy. Each group stays denied until listed.
-# [[capability_rules]]
+{diagnostics_block}# [[capability_rules]]
 # group = "ganglion:logs/stream"
 # allowed_patterns = ["journald/**", "ros2/**"]
 #
@@ -2104,8 +2438,8 @@ allowed_patterns = ["**"]
 # group = "ganglion:fs/bounded"
 # allowed_patterns = ["/var/log/**"]
 
-# Authorize exactly the local `gang up` operator to deploy. Replace with the
-# gang id of any operator you trust, or "*" to allow any trusted peer.
+# Authorize exactly this operator to deploy. Replace with the gang id of any
+# operator you trust, or "*" to allow any trusted peer.
 [[peer_rules]]
 peer_id = "{operator}"
 can_deploy = true
@@ -2233,7 +2567,7 @@ pub async fn up(
     trust.save(&trust_path)?;
 
     let policy_path = robot_dir.join("policy.toml");
-    std::fs::write(&policy_path, up_default_deny_policy(&operator_id))
+    std::fs::write(&policy_path, default_deny_policy(&operator_id, true))
         .with_context(|| format!("writing policy {}", policy_path.display()))?;
 
     // 6. Start the robot agent, pointed at the relay, serving the control

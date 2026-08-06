@@ -60,6 +60,28 @@ fn reject_json(format: &OutputFormat, command: &str) -> anyhow::Result<()> {
 // (20s), Network (30s), Registry & Artifacts (40s), Diagnostics (50s).
 #[derive(Subcommand)]
 enum Commands {
+    /// Guided first-run setup — go from installed to configured in one command.
+    ///
+    /// Detects the network archetype (like `gang diagnose`), generates the
+    /// operator identity if none exists, writes a default-deny `policy.toml`
+    /// with commented example rules plus an operator `config.toml`, and prints
+    /// exactly what to run next. Interactive on a TTY; runs non-interactively
+    /// with safe defaults when stdin is a pipe or `--yes` is given. Existing
+    /// files are never clobbered without `--force`.
+    #[command(display_order = 9)]
+    Init {
+        /// Overwrite an existing identity, policy, or config.
+        #[arg(long)]
+        force: bool,
+        /// Skip prompts and use safe defaults (implied when stdin is not a
+        /// TTY, e.g. in CI or a pipe).
+        #[arg(long, short = 'y', visible_alias = "non-interactive")]
+        yes: bool,
+        /// Emit the resulting setup (identity id, archetype, paths) as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage peer identity.
     #[command(display_order = 10, visible_alias = "id")]
     Identity {
@@ -489,6 +511,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     match cli.command {
+        Commands::Init { force, yes, json } => {
+            commands::init(cli.data_dir.as_deref(), force, yes, json, &cli.format).await?
+        }
         Commands::Identity { action } => {
             reject_json(&cli.format, "identity")?;
             match action {
