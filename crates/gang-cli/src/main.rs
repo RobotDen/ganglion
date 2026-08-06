@@ -245,14 +245,23 @@ enum Commands {
         timeout: Option<u64>,
     },
 
-    /// Stream robot logs. [WIP: requires relay]
+    /// Stream a robot's audit + policy events over the relay circuit.
     #[command(display_order = 34)]
     Logs {
-        /// Robot name or peer ID.
+        /// Robot name, abbreviated peer ID, or full peer ID.
         robot: String,
-        /// Follow log output (like tail -f).
+        /// Follow output live (like tail -f); Ctrl-C to stop.
         #[arg(long)]
         follow: bool,
+        /// Only show events newer than this (e.g. 30s, 5m, 2h, 1d).
+        #[arg(long, value_name = "DUR")]
+        since: Option<String>,
+        /// Explicit peer ID (bypasses name/prefix resolution).
+        #[arg(long, short = 'p')]
+        peer: Option<String>,
+        /// Relay multiaddr (overrides registry and config defaults).
+        #[arg(long, short = 'r')]
+        relay: Option<String>,
     },
 
     /// Run a local end-to-end demo: start agent, deploy diagnostics, invoke.
@@ -294,11 +303,20 @@ enum Commands {
         robot: Option<String>,
     },
 
-    /// Show per-transport statistics for a connected peer. [WIP: simulated data until relay lands]
+    /// Show real per-transport statistics for the live circuit to a robot.
     #[command(display_order = 35)]
     TransportStats {
-        /// Robot name or peer ID.
+        /// Robot name, abbreviated peer ID, or full peer ID.
         robot: String,
+        /// Explicit peer ID (bypasses name/prefix resolution).
+        #[arg(long, short = 'p')]
+        peer: Option<String>,
+        /// Relay multiaddr (overrides registry and config defaults).
+        #[arg(long, short = 'r')]
+        relay: Option<String>,
+        /// Overall timeout in seconds (default: 30).
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
 
     /// Retrieve an artifact by CID from any reachable peer.
@@ -357,11 +375,11 @@ enum Commands {
     #[command(display_order = 50)]
     Status,
 
-    /// List reachable robots in the fleet. [WIP: requires relay]
+    /// List registered robots with live reachability from a presence probe.
     #[command(display_order = 33)]
     List,
 
-    /// Establish a session with a robot via relay. [WIP: requires relay]
+    /// Attach a live status view to a robot (presence + heartbeat + audit tail).
     #[command(display_order = 32)]
     Connect {
         /// Robot name or peer ID.
@@ -684,13 +702,38 @@ async fn main() -> anyhow::Result<()> {
             commands::up(cli.data_dir.as_deref(), port, force, json, &cli.format).await?
         }
         Commands::Logs {
-            robot: _,
-            follow: _,
-        } => commands::wip_stub("logs", &cli.format)?,
+            robot,
+            follow,
+            since,
+            peer,
+            relay,
+        } => {
+            commands::logs(
+                &robot,
+                follow,
+                since.as_deref(),
+                peer.as_deref(),
+                relay.as_deref(),
+                &cli.format,
+            )
+            .await?
+        }
         Commands::TestArchetype { archetype } => commands::test_archetype(&archetype).await?,
         Commands::Diagnose { robot } => commands::diagnose(robot.as_deref(), &cli.format).await?,
-        Commands::TransportStats { robot } => {
-            commands::transport_stats(&robot, &cli.format).await?
+        Commands::TransportStats {
+            robot,
+            peer,
+            relay,
+            timeout,
+        } => {
+            commands::transport_stats(
+                &robot,
+                peer.as_deref(),
+                relay.as_deref(),
+                timeout,
+                &cli.format,
+            )
+            .await?
         }
         Commands::Fetch { cid, output } => {
             commands::fetch_artifact(&cid, output.as_deref(), &cli.format).await?
@@ -767,11 +810,11 @@ async fn main() -> anyhow::Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "gang", &mut std::io::stdout());
         }
         Commands::Status => commands::status(&cli.format).await?,
-        Commands::List => commands::wip_stub("list", &cli.format)?,
+        Commands::List => commands::list(&cli.format).await?,
         Commands::Connect {
-            robot: _,
+            robot,
             prefer_transport: _,
-        } => commands::wip_stub("connect", &cli.format)?,
+        } => commands::connect(&robot, &cli.format).await?,
         Commands::Relay {
             listen_addr,
             port,

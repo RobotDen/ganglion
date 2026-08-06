@@ -5,29 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::OutputFormat;
 
-/// Emit the standard notice for a command that is not yet available because it
-/// needs the presence/streaming layer (fleet discovery and long-lived robot
-/// sessions), honoring `--format`, then fail with a non-zero exit. Stubs must
-/// not exit 0 (ADR-018).
-pub fn wip_stub(command: &str, format: &OutputFormat) -> anyhow::Result<()> {
-    if let OutputFormat::Json = format {
-        // Clean JSON on stdout for machine consumers; the error still exits 1.
-        println!(
-            "{}",
-            serde_json::json!({
-                "status": "unavailable",
-                "command": command,
-                "wip": true,
-                "reason": "requires the presence/streaming layer (not yet implemented)",
-            })
-        );
-    }
-    anyhow::bail!(
-        "`gang {command}` requires the presence/streaming layer, which is not yet \
-         implemented [WIP]. Remote deploy/run/caps work today; see `gang status`."
-    );
-}
-
 // --- Operator config ---
 
 /// Operator configuration loaded from `~/.gang/config.toml`.
@@ -172,17 +149,15 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
         "completions",
         "relay",
         "status",
+        "logs",
+        "connect",
+        "list",
+        "transport-stats",
     ];
 
-    // WIP: need the presence/streaming layer (fleet discovery, long-lived
-    // sessions) or produce only simulated output today. Remote deploy/run/caps
-    // over a relay circuit are implemented (ADR-020 Phase 32).
-    let wip = [
-        "logs",
-        "list",
-        "connect",
-        "transport-stats (simulated data)",
-    ];
+    // Everything is built. `gang tui` (the dashboard atop the same event
+    // subscription API) is the next milestone.
+    let wip: [&str; 0] = [];
 
     match format {
         OutputFormat::Json => {
@@ -227,10 +202,12 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
             for cmd in &available {
                 println!("  gang {cmd}");
             }
-            println!();
-            println!("WIP commands (need the presence/streaming layer):");
-            for cmd in &wip {
-                println!("  gang {cmd}  [WIP]");
+            if !wip.is_empty() {
+                println!();
+                println!("WIP commands:");
+                for cmd in &wip {
+                    println!("  gang {cmd}  [WIP]");
+                }
             }
         }
     }
@@ -1466,6 +1443,65 @@ async fn remote_dispatch_inner(
     rpc_timeout: std::time::Duration,
 ) -> anyhow::Result<gang_core::message::ControlMessage> {
     use gang_core::message::{ControlMessage, decode_message, encode_message};
+
+    let display = target.display();
+    let conn = establish_remote_connection(target, rpc_timeout).await?;
+
+    let result = async {
+        let request = encode_message(&message)
+            .map_err(|e| anyhow::anyhow!("failed to encode control message: {e}"))?;
+        let response_bytes = conn
+            .transport
+            .send_rpc_with_timeout(&target.gang_id, request, rpc_timeout)
+            .await
+            .map_err(|e| anyhow::anyhow!("control request to '{display}' failed: {e}"))?;
+
+        if response_bytes.is_empty() {
+            anyhow::bail!(
+                "robot '{display}' sent no response on /ganglion/control/1.0 — is the agent \
+                 actually serving (started with `gang agent -r <relay>`)?"
+            );
+        }
+        let (response, _) = decode_message::<ControlMessage>(&response_bytes)
+            .map_err(|e| anyhow::anyhow!("could not decode response from '{display}': {e}"))?;
+        Ok(response)
+    }
+    .await;
+
+    conn.close().await;
+    result
+}
+
+/// A live operator transport connected to a robot through its relay circuit.
+///
+/// Holds the swarm worker's `JoinHandle` so callers can tear it down cleanly
+/// via [`RemoteConnection::close`] once the exchange (dispatch, subscription
+/// poll loop, …) is done.
+struct RemoteConnection {
+    transport: std::sync::Arc<gang_libp2p::Libp2pTransportAdapter>,
+    event_loop: tokio::task::JoinHandle<Result<(), gang_libp2p::TransportError>>,
+}
+
+impl RemoteConnection {
+    /// Shut the transport down and abort the swarm worker.
+    async fn close(self) {
+        let _ = gang_core::transport::TransportAdapter::shutdown(self.transport.as_ref()).await;
+        self.event_loop.abort();
+    }
+}
+
+/// Build an outbound operator transport and connect it to `target` through the
+/// relay circuit, bounded by `connect_timeout`.
+///
+/// This is the single circuit-dial path shared by remote dispatch, the event
+/// subscription commands (`logs`, `connect`), and `transport-stats`. It reuses
+/// the same relay-dial → wait → circuit-dial → redial-until-connected sequence
+/// (a failed circuit dial is never retried by the swarm, so we re-dial until
+/// the robot's reservation is accepted).
+async fn establish_remote_connection(
+    target: &RemoteTarget,
+    connect_timeout: std::time::Duration,
+) -> anyhow::Result<RemoteConnection> {
     use std::sync::Arc;
 
     let display = target.display();
@@ -1485,73 +1521,76 @@ async fn remote_dispatch_inner(
     let loop_transport = Arc::clone(&transport);
     let event_loop = tokio::spawn(async move { loop_transport.run_event_loop().await });
 
-    // Everything below must release the transport on exit; run in a block and
-    // shut down afterwards.
-    let result = async {
-        // Dial the relay itself first, for a clear error when the relay is
-        // down, and wait for that connection before requesting the circuit —
-        // a circuit dial racing the in-flight relay dial can fail spuriously.
-        transport
-            .dial_multiaddr(&target.relay_addr)
-            .await
-            .map_err(|e| anyhow::anyhow!("cannot reach relay {}: {e}", target.relay_addr))?;
-        loop {
-            if !transport.connected_peers().await.is_empty() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let connect = connect_via_circuit(&transport, target);
+    match tokio::time::timeout(connect_timeout, connect).await {
+        Ok(Ok(())) => Ok(RemoteConnection {
+            transport,
+            event_loop,
+        }),
+        Ok(Err(e)) => {
+            let _ = gang_core::transport::TransportAdapter::shutdown(transport.as_ref()).await;
+            event_loop.abort();
+            Err(e)
         }
-
-        // Dial the robot through the relay circuit, then wait for the
-        // authenticated connection. The dial itself only queues; the poll below
-        // (bounded by the caller's overall timeout) observes the outcome. A
-        // circuit dial can fail transiently — most notably with NO_RESERVATION
-        // when the robot is connected to the relay but its reservation is not
-        // accepted yet — and a failed dial is never retried by the swarm, so
-        // re-dial periodically instead of waiting forever on the first attempt.
-        let circuit = circuit_addr(&target.relay_addr, &target.libp2p_id);
-        transport.dial_multiaddr(&circuit).await.map_err(|e| {
-            anyhow::anyhow!("failed to dial '{display}' via relay circuit {circuit}: {e}")
-        })?;
-
-        let redial_every = std::time::Duration::from_secs(2);
-        let mut last_dial = std::time::Instant::now();
-        loop {
-            let connected = transport.connected_peers().await;
-            if connected.iter().any(|(id, _)| *id == target.gang_id) {
-                break;
-            }
-            if last_dial.elapsed() >= redial_every {
-                last_dial = std::time::Instant::now();
-                // Errors here are non-fatal: the outer timeout bounds the
-                // whole exchange and the next tick re-dials again.
-                let _ = transport.dial_multiaddr(&circuit).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
-
-        let request = encode_message(&message)
-            .map_err(|e| anyhow::anyhow!("failed to encode control message: {e}"))?;
-        let response_bytes = transport
-            .send_rpc_with_timeout(&target.gang_id, request, rpc_timeout)
-            .await
-            .map_err(|e| anyhow::anyhow!("control request to '{display}' failed: {e}"))?;
-
-        if response_bytes.is_empty() {
+        Err(_) => {
+            let _ = gang_core::transport::TransportAdapter::shutdown(transport.as_ref()).await;
+            event_loop.abort();
             anyhow::bail!(
-                "robot '{display}' sent no response on /ganglion/control/1.0 — is the agent \
-                 actually serving (started with `gang agent -r <relay>`)?"
-            );
+                "timed out connecting to '{display}' via relay {} (is the agent running, and \
+                 did it connect to that relay?)",
+                target.relay_addr
+            )
         }
-        let (response, _) = decode_message::<ControlMessage>(&response_bytes)
-            .map_err(|e| anyhow::anyhow!("could not decode response from '{display}': {e}"))?;
-        Ok(response)
     }
-    .await;
+}
 
-    let _ = gang_core::transport::TransportAdapter::shutdown(transport.as_ref()).await;
-    event_loop.abort();
-    result
+/// Dial `target`'s relay and then the robot through the relay circuit, waiting
+/// until the authenticated connection to the robot is up. Re-dials the circuit
+/// periodically (a failed circuit dial is never retried by the swarm).
+async fn connect_via_circuit(
+    transport: &gang_libp2p::Libp2pTransportAdapter,
+    target: &RemoteTarget,
+) -> anyhow::Result<()> {
+    let display = target.display();
+
+    // Dial the relay first for a clear error when it is down, and wait for that
+    // connection before requesting the circuit (a circuit dial racing the
+    // in-flight relay dial can fail spuriously).
+    transport
+        .dial_multiaddr(&target.relay_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot reach relay {}: {e}", target.relay_addr))?;
+    loop {
+        if !transport.connected_peers().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let circuit = circuit_addr(&target.relay_addr, &target.libp2p_id);
+    transport.dial_multiaddr(&circuit).await.map_err(|e| {
+        anyhow::anyhow!("failed to dial '{display}' via relay circuit {circuit}: {e}")
+    })?;
+
+    let redial_every = std::time::Duration::from_secs(2);
+    let mut last_dial = std::time::Instant::now();
+    loop {
+        if transport
+            .connected_peers()
+            .await
+            .iter()
+            .any(|(id, _)| *id == target.gang_id)
+        {
+            break;
+        }
+        if last_dial.elapsed() >= redial_every {
+            last_dial = std::time::Instant::now();
+            // Non-fatal: the caller's timeout bounds the wait; re-dial each tick.
+            let _ = transport.dial_multiaddr(&circuit).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(())
 }
 
 /// Print a capability's output bytes honestly: JSON is pretty-printed (with
@@ -3941,70 +3980,498 @@ pub async fn diagnose(robot: Option<&str>, format: &crate::OutputFormat) -> anyh
     Ok(())
 }
 
-/// `gang transport-stats` — show per-transport statistics for a peer.
-pub async fn transport_stats(robot: &str, format: &crate::OutputFormat) -> anyhow::Result<()> {
-    // For now, show simulated stats since we don't have a live connection.
-    // In full implementation, this queries the transport adapter for the
-    // connected peer's stats.
+/// `gang transport-stats` — show REAL per-transport statistics for the live
+/// circuit to a robot (from the operator transport's connected-peer counters).
+pub async fn transport_stats(
+    robot: &str,
+    explicit_peer: Option<&str>,
+    explicit_relay: Option<&str>,
+    timeout_secs: Option<u64>,
+    format: &crate::OutputFormat,
+) -> anyhow::Result<()> {
+    let target = resolve_target(robot, explicit_peer, explicit_relay)?;
+    if target.is_local {
+        anyhow::bail!(
+            "transport-stats needs a live network connection; '{robot}' resolved to a local \
+             agent. Point at a remote robot (registered name, peer id, or --peer/--relay)."
+        );
+    }
+    let remote = prepare_remote(&target)?;
+    let display = remote.display();
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(CONTROL_TIMEOUT_SECS));
 
-    let example_stats = gang_core::transport::TransportStats {
-        transport: "quic".into(),
-        via_relay: false,
-        connect_time_ms: 145,
-        messages_sent: 42,
-        messages_received: 38,
-        bytes_sent: 12_480,
-        bytes_received: 156_320,
-        last_rtt_ms: Some(23),
-        dcutr_attempted: true,
-        dcutr_succeeded: true,
-        uptime_secs: 3600,
-        reconnections: 0,
-    };
+    let conn = establish_remote_connection(&remote, timeout).await?;
+    // Exchange one control message so the counters reflect real traffic, then
+    // read the operator's per-connection stats for this circuit.
+    let _ = conn
+        .transport
+        .send_rpc_with_timeout(
+            &remote.gang_id,
+            gang_core::message::encode_message(&gang_core::message::ControlMessage::ListCapabilities)
+                .map_err(|e| anyhow::anyhow!("encode: {e}"))?,
+            timeout,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("probe request to '{display}' failed: {e}"))?;
+
+    let stats = gang_core::transport::TransportAdapter::transport_stats(
+        conn.transport.as_ref(),
+        &remote.gang_id,
+    )
+    .await;
+    conn.close().await;
+
+    let stats = stats.ok_or_else(|| {
+        anyhow::anyhow!("no live connection statistics available for '{display}'")
+    })?;
 
     match format {
         crate::OutputFormat::Json => {
-            // Mark the payload as simulated so machine consumers cannot mistake
-            // it for live data (CLI-03).
-            let mut json = serde_json::to_value(&example_stats)?;
+            let mut json = serde_json::to_value(&stats)?;
             if let Some(obj) = json.as_object_mut() {
-                obj.insert("simulated".into(), serde_json::json!(true));
-                obj.insert("peer".into(), serde_json::json!(robot));
+                obj.insert("peer".into(), serde_json::json!(remote.gang_id.as_str()));
             }
             println!("{}", serde_json::to_string_pretty(&json)?);
         }
         crate::OutputFormat::Text => {
-            println!("Transport statistics for: {robot}  [WIP]");
-            println!("(No live connection — showing SIMULATED example output.)");
-            println!();
-            println!("  Transport:       {}", example_stats.transport);
-            println!("  Via relay:       {}", example_stats.via_relay);
-            println!("  Connect time:    {}ms", example_stats.connect_time_ms);
+            println!("Transport statistics for '{display}' (live circuit):");
+            println!("  Transport:       {}", stats.transport);
+            println!("  Via relay:       {}", stats.via_relay);
+            println!("  Connect time:    {}ms", stats.connect_time_ms);
             println!(
                 "  Messages:        {} sent, {} received",
-                example_stats.messages_sent, example_stats.messages_received
+                stats.messages_sent, stats.messages_received
             );
             println!(
                 "  Bytes:           {} sent, {} received",
-                format_bytes(example_stats.bytes_sent),
-                format_bytes(example_stats.bytes_received)
+                format_bytes(stats.bytes_sent),
+                format_bytes(stats.bytes_received)
             );
-            if let Some(rtt) = example_stats.last_rtt_ms {
+            if let Some(rtt) = stats.last_rtt_ms {
                 println!("  Last RTT:        {rtt}ms");
             }
             println!(
                 "  DCUtR:           attempted={}, succeeded={}",
-                example_stats.dcutr_attempted, example_stats.dcutr_succeeded
+                stats.dcutr_attempted, stats.dcutr_succeeded
             );
-            println!(
-                "  Uptime:          {}",
-                format_duration(example_stats.uptime_secs)
-            );
-            println!("  Reconnections:   {}", example_stats.reconnections);
+            println!("  Uptime:          {}", format_duration(stats.uptime_secs));
+            println!("  Reconnections:   {}", stats.reconnections);
         }
     }
 
     Ok(())
+}
+
+// --- Event subscription commands (logs / connect / list) ---
+
+/// How often `--follow` / `connect` re-polls the robot's event feed. The feed
+/// rides request-response (see `ControlMessage::SubscribeEvents`), so a live
+/// tail is a bounded poll rather than a persistent push; a genuine push stream
+/// is the reserved `/ganglion/events/1.0` direct-substream path.
+const EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Parse a short duration like `30s`, `5m`, `2h`, `1d` into a `chrono::Duration`.
+fn parse_since(spec: &str) -> anyhow::Result<chrono::Duration> {
+    let spec = spec.trim();
+    let (num, unit) = spec.split_at(
+        spec.find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(spec.len()),
+    );
+    let value: i64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid --since '{spec}': expected e.g. 30s, 5m, 2h, 1d"))?;
+    let dur = match unit {
+        "s" | "" => chrono::Duration::seconds(value),
+        "m" => chrono::Duration::minutes(value),
+        "h" => chrono::Duration::hours(value),
+        "d" => chrono::Duration::days(value),
+        other => anyhow::bail!("invalid --since unit '{other}': use s, m, h, or d"),
+    };
+    Ok(dur)
+}
+
+/// The timestamp carried by an event, if any (snapshot/gap have none).
+fn event_ts(ev: &gang_core::events::AgentEvent) -> Option<chrono::DateTime<chrono::Utc>> {
+    use gang_core::events::AgentEvent::*;
+    match ev {
+        PolicyDecision { ts, .. } | ConnectionChanged { ts, .. } | Heartbeat { ts, .. } => {
+            Some(*ts)
+        }
+        AuditAppended { record, .. } => Some(record.ended_at),
+        PresenceSnapshot { .. } | Gap { .. } => None,
+        _ => None,
+    }
+}
+
+/// Whether this event is a log-relevant line (`gang logs` shows audit + policy).
+fn is_log_event(ev: &gang_core::events::AgentEvent) -> bool {
+    use gang_core::events::AgentEvent::*;
+    matches!(ev, AuditAppended { .. } | PolicyDecision { .. } | Gap { .. })
+}
+
+/// Render one event as a human-readable line.
+fn event_human_line(ev: &gang_core::events::AgentEvent) -> String {
+    use gang_core::events::{AgentEvent::*, ConnectionState, PolicyOutcome};
+    match ev {
+        PresenceSnapshot {
+            ganglion_version,
+            uptime_secs,
+            archetype,
+            installed_capabilities,
+            ..
+        } => format!(
+            "presence  v{ganglion_version}  up {}  archetype={}  caps=[{}]",
+            format_duration(*uptime_secs),
+            archetype.as_deref().unwrap_or("unknown"),
+            installed_capabilities.join(", ")
+        ),
+        PolicyDecision {
+            ts,
+            operator_peer,
+            capability_group,
+            decision,
+            reason,
+            ..
+        } => {
+            let verdict = match decision {
+                PolicyOutcome::Allow => "ALLOW",
+                PolicyOutcome::Deny => "DENY ",
+                _ => "?????",
+            };
+            format!(
+                "{}  policy {verdict}  {capability_group}  by {}  ({reason})",
+                ts.format("%Y-%m-%dT%H:%M:%SZ"),
+                short_peer(operator_peer)
+            )
+        }
+        AuditAppended { record, .. } => format!(
+            "{}  audit  {} v{}  by {}  -> {}  caps=[{}]",
+            record.ended_at.format("%Y-%m-%dT%H:%M:%SZ"),
+            record.component_name,
+            record.component_version,
+            short_peer(&record.operator_peer),
+            record.exit,
+            record.capabilities_used.join(", ")
+        ),
+        ConnectionChanged {
+            ts,
+            peer,
+            transport,
+            via_relay,
+            state,
+            ..
+        } => {
+            let dir = match state {
+                ConnectionState::Up => "UP  ",
+                ConnectionState::Down => "DOWN",
+                _ => "????",
+            };
+            format!(
+                "{}  conn {dir}  {}  transport={transport} via_relay={via_relay}",
+                ts.format("%Y-%m-%dT%H:%M:%SZ"),
+                short_peer(peer)
+            )
+        }
+        Heartbeat {
+            ts, uptime_secs, ..
+        } => format!(
+            "{}  heartbeat  up {}",
+            ts.format("%Y-%m-%dT%H:%M:%SZ"),
+            format_duration(*uptime_secs)
+        ),
+        Gap { dropped } => format!("--- gap: {dropped} event(s) dropped (fell behind) ---"),
+        _ => "unknown event".to_string(),
+    }
+}
+
+/// Abbreviate a peer id for a compact log line.
+fn short_peer(p: &gang_core::identity::PeerId) -> String {
+    let s = p.as_str();
+    if s.len() > 13 {
+        format!("{}…", &s[..13])
+    } else {
+        s.to_string()
+    }
+}
+
+/// `gang logs <robot> [--follow] [--since <dur>]` — print AuditAppended (+
+/// PolicyDecision) events. Without `--follow`, prints the recent context from
+/// the presence snapshot and exits; with `--follow`, tails live.
+pub async fn logs(
+    robot: &str,
+    follow: bool,
+    since: Option<&str>,
+    explicit_peer: Option<&str>,
+    explicit_relay: Option<&str>,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    let cutoff = match since {
+        Some(spec) => Some(chrono::Utc::now() - parse_since(spec)?),
+        None => None,
+    };
+
+    let target = resolve_target(robot, explicit_peer, explicit_relay)?;
+    if target.is_local {
+        anyhow::bail!(
+            "`gang logs` needs a live connection; '{robot}' resolved to a local agent. \
+             Point at a remote robot (name, peer id, or --peer/--relay)."
+        );
+    }
+    let remote = prepare_remote(&target)?;
+    let display = remote.display();
+    let timeout = std::time::Duration::from_secs(CONTROL_TIMEOUT_SECS);
+    let conn = establish_remote_connection(&remote, timeout).await?;
+
+    let print = |ev: &gang_core::events::AgentEvent| {
+        if let Some(cut) = cutoff
+            && let Some(ts) = event_ts(ev)
+            && ts < cut
+        {
+            return;
+        }
+        match format {
+            OutputFormat::Json => {
+                if let Ok(line) = serde_json::to_string(ev) {
+                    println!("{line}");
+                }
+            }
+            OutputFormat::Text => println!("{}", event_human_line(ev)),
+        }
+    };
+
+    // Initial fresh subscription: presence snapshot + recent context.
+    let batch = conn
+        .transport
+        .subscribe_events(&remote.gang_id, None, timeout)
+        .await
+        .map_err(|e| anyhow::anyhow!("subscribing to '{display}' failed: {e}"))?;
+
+    let mut cursor: u64 = 0;
+    for ev in &batch {
+        if let Some(s) = ev.seq() {
+            cursor = cursor.max(match ev {
+                gang_core::events::AgentEvent::PresenceSnapshot { .. } => s,
+                _ => s + 1,
+            });
+        }
+        if is_log_event(ev) {
+            print(ev);
+        }
+    }
+
+    if !follow {
+        conn.close().await;
+        return Ok(());
+    }
+
+    if let OutputFormat::Text = format {
+        eprintln!("--- following '{display}' (Ctrl-C to stop) ---");
+    }
+    let result = follow_events(&conn, &remote, cursor, timeout, is_log_event, &print).await;
+    conn.close().await;
+    result
+}
+
+/// `gang connect <robot>` — attach a live status view (presence + heartbeat +
+/// connection state + a live tail of policy/audit) as scrolling text until
+/// Ctrl-C. The non-TUI precursor to the dashboard; reuses the subscription API.
+pub async fn connect(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
+    let target = resolve_target(robot, None, None)?;
+    if target.is_local {
+        anyhow::bail!(
+            "`gang connect` needs a live connection; '{robot}' resolved to a local agent. \
+             Point at a remote robot (name, peer id)."
+        );
+    }
+    let remote = prepare_remote(&target)?;
+    let display = remote.display();
+    let timeout = std::time::Duration::from_secs(CONTROL_TIMEOUT_SECS);
+    let conn = establish_remote_connection(&remote, timeout).await?;
+
+    let print = |ev: &gang_core::events::AgentEvent| match format {
+        OutputFormat::Json => {
+            if let Ok(line) = serde_json::to_string(ev) {
+                println!("{line}");
+            }
+        }
+        OutputFormat::Text => println!("{}", event_human_line(ev)),
+    };
+
+    if let OutputFormat::Text = format {
+        println!("Connected to '{display}'. Live status (Ctrl-C to detach):");
+    }
+
+    let batch = conn
+        .transport
+        .subscribe_events(&remote.gang_id, None, timeout)
+        .await
+        .map_err(|e| anyhow::anyhow!("connecting to '{display}' failed: {e}"))?;
+
+    let mut cursor: u64 = 0;
+    for ev in &batch {
+        if let Some(s) = ev.seq() {
+            cursor = cursor.max(match ev {
+                gang_core::events::AgentEvent::PresenceSnapshot { .. } => s,
+                _ => s + 1,
+            });
+        }
+        print(ev);
+    }
+
+    // Show everything in the live view.
+    let all = |_ev: &gang_core::events::AgentEvent| true;
+    let result = follow_events(&conn, &remote, cursor, timeout, all, &print).await;
+    conn.close().await;
+    result
+}
+
+/// Poll the robot's event feed, printing new events until Ctrl-C. `keep`
+/// filters which events to print; `cursor` is the next-expected sequence.
+async fn follow_events(
+    conn: &RemoteConnection,
+    remote: &RemoteTarget,
+    mut cursor: u64,
+    timeout: std::time::Duration,
+    keep: impl Fn(&gang_core::events::AgentEvent) -> bool,
+    print: &impl Fn(&gang_core::events::AgentEvent),
+) -> anyhow::Result<()> {
+    let mut ticker = tokio::time::interval(EVENT_POLL_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                return Ok(());
+            }
+            _ = ticker.tick() => {
+                // A cursor of 0 means "nothing seen yet" — re-request fresh.
+                let since = cursor.checked_sub(1);
+                let batch = match conn
+                    .transport
+                    .subscribe_events(&remote.gang_id, since, timeout)
+                    .await
+                {
+                    Ok(b) => b,
+                    // Transient failure while tailing: report on stderr, keep going.
+                    Err(e) => {
+                        eprintln!("warning: event poll failed: {e}");
+                        continue;
+                    }
+                };
+                for ev in &batch {
+                    // A fresh re-request (since == None) re-sends the snapshot;
+                    // skip re-printing it while following.
+                    if since.is_none()
+                        && matches!(ev, gang_core::events::AgentEvent::PresenceSnapshot { .. })
+                    {
+                        if let Some(s) = ev.seq() {
+                            cursor = cursor.max(s);
+                        }
+                        continue;
+                    }
+                    if let Some(s) = ev.seq() {
+                        cursor = cursor.max(s + 1);
+                    }
+                    if keep(ev) {
+                        print(ev);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `gang list` — list registered robot-agent peers with live reachability from
+/// a quick presence probe over each peer's relay circuit.
+pub async fn list(format: &OutputFormat) -> anyhow::Result<()> {
+    use gang_core::identity::{PeerRegistry, Role, default_registry_path};
+
+    let registry = PeerRegistry::load(&default_registry_path()).unwrap_or_default();
+    let robots: Vec<(String, gang_core::identity::PeerEntry)> = registry
+        .list()
+        .filter(|(_, e)| matches!(e.role, Role::RobotAgent))
+        .map(|(n, e)| (n.to_string(), e.clone()))
+        .collect();
+
+    if robots.is_empty() {
+        match format {
+            OutputFormat::Json => println!("[]"),
+            OutputFormat::Text => println!(
+                "No robot-agent peers registered. Add one with `gang peer add <name> <id> --relay <multiaddr>`."
+            ),
+        }
+        return Ok(());
+    }
+
+    // Probe each robot with a short per-peer timeout, reusing a single operator
+    // transport. A probe = connect over the circuit + a fresh presence subscribe.
+    let probe_timeout = std::time::Duration::from_secs(10);
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+
+    for (name, entry) in &robots {
+        let target = ResolvedTarget {
+            peer_id: Some(entry.peer_id.clone()),
+            libp2p_id: entry.libp2p_id.clone(),
+            relay_addr: entry.relay_addrs.first().cloned(),
+            name: Some(name.clone()),
+            is_local: false,
+        };
+        let (reachable, detail) = match prepare_remote(&target) {
+            Ok(remote) => match probe_presence(&remote, probe_timeout).await {
+                Ok(Some((version, uptime))) => (
+                    true,
+                    format!("v{version}, up {}", format_duration(uptime)),
+                ),
+                Ok(None) => (false, "no presence snapshot".to_string()),
+                Err(e) => (false, format!("unreachable: {e}")),
+            },
+            Err(e) => (false, format!("not dispatchable: {e}")),
+        };
+
+        match format {
+            OutputFormat::Json => rows.push(serde_json::json!({
+                "name": name,
+                "peer_id": entry.peer_id.as_str(),
+                "reachable": reachable,
+                "detail": detail,
+            })),
+            OutputFormat::Text => {
+                let mark = if reachable { "up  " } else { "down" };
+                println!("  [{mark}] {name}  {}  {detail}", entry.peer_id);
+            }
+        }
+    }
+
+    if let OutputFormat::Json = format {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    }
+    Ok(())
+}
+
+/// Connect to a robot and fetch its presence snapshot; returns the version and
+/// uptime when reachable and authorized.
+async fn probe_presence(
+    remote: &RemoteTarget,
+    timeout: std::time::Duration,
+) -> anyhow::Result<Option<(String, u64)>> {
+    let conn = establish_remote_connection(remote, timeout).await?;
+    let batch = conn
+        .transport
+        .subscribe_events(&remote.gang_id, None, timeout)
+        .await;
+    conn.close().await;
+
+    let batch = batch.map_err(|e| anyhow::anyhow!("{e}"))?;
+    for ev in batch {
+        if let gang_core::events::AgentEvent::PresenceSnapshot {
+            ganglion_version,
+            uptime_secs,
+            ..
+        } = ev
+        {
+            return Ok(Some((ganglion_version, uptime_secs)));
+        }
+    }
+    Ok(None)
 }
 
 fn format_bytes(bytes: u64) -> String {
