@@ -485,9 +485,23 @@ Capabilities on 'robot-a':
 Subscribe to a robot's event feed over the relay circuit and print its
 `AuditAppended` and `PolicyDecision` events. Without `--follow`, prints the
 recent context from the robot's retained window and exits; with `--follow`,
-tails live over a genuine server-push substream — events print the instant the
-robot emits them, no poll cadence (Ctrl-C to stop). Honest non-zero exit if the
-robot is unreachable or refuses the subscription.
+tails live (Ctrl-C to stop). Honest non-zero exit if the robot is unreachable or
+refuses the subscription.
+
+The feed transport is selectable with `--events-transport <auto|push|poll>`
+(default `auto`, ADR-024):
+
+- `auto` — prefer the genuine server-push substream (events print the instant
+  the robot emits them); fall back automatically to the request-response poll
+  when push is unavailable (older/alpha-free agent, protocol-not-supported) or
+  if a push stream drops mid-session.
+- `push` — force push; error clearly if the stream cannot be opened.
+- `poll` — force the request-response poll on a ~1.5 s cadence (configurable via
+  the operator config's `events_poll_interval_ms`).
+
+`gang logs`/`connect`/`tui` share this flag; the operator config field
+`events_transport` sets the default. `logs` prints a `--- feed: push ---` /
+`--- feed: poll (1.5s) ---` line so the active transport is visible.
 
 ```bash
 $ gang logs up-robot
@@ -1029,9 +1043,12 @@ presence  v2.1.0  up 12s  archetype=unknown  caps=[diagnostics]
 The **live fleet dashboard** — a full-screen [ratatui](https://ratatui.rs)
 view built on the same event subscription API as `gang logs`/`connect`
 ([ADR-022](adr/ADR-022-event-subscription-layer.md)). It subscribes to every
-registered robot's event feed and folds it into four panes. The feed is a
-genuine server-push substream ([ADR-024](adr/ADR-024-event-push-stream.md)), so
-events land the instant the robot emits them (no poll cadence):
+registered robot's event feed and folds it into four panes. The feed defaults to
+a genuine server-push substream ([ADR-024](adr/ADR-024-event-push-stream.md)), so
+events land the instant the robot emits them, with automatic fallback to the
+request-response poll when push is unavailable (`--events-transport
+auto|push|poll`). The title bar shows a `feed push` / `feed poll(1.5s)`
+indicator for the active transport:
 
 - **Peers** — name, status dot (`●` live / `◐` transitional / `○` offline),
   transport, and RTT.
@@ -1084,8 +1101,9 @@ even on panic (a panic hook + RAII guard).
 | Flag | Description |
 |------|-------------|
 | `--robot <name>` | Focus a single registered robot instead of the whole fleet. |
-| `--frames <n>` | Headless snapshot: fold the live push feed for `n` cycles (~1 s each), print the rendered frame as text, then exit. No raw terminal — safe for CI, pipes, and capturing a static frame. |
+| `--frames <n>` | Headless snapshot: fold the live feed for `n` cycles (~1 s each), print the rendered frame as text, then exit. No raw terminal — safe for CI, pipes, and capturing a static frame. |
 | `--no-input` | Run the live dashboard but ignore keyboard input (unattended recording); Ctrl-C still quits. |
+| `--events-transport <mode>` | Feed transport: `auto` (default; push with poll fallback), `push` (force push), or `poll` (force the request-response poll). See ADR-024. |
 | `--data-dir <path>` | (global) Point at a `gang up` fleet directory. |
 
 #### NO_COLOR

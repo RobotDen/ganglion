@@ -1,20 +1,29 @@
-# ADR-024: True server-push event stream over libp2p-stream
+# ADR-024: True server-push event stream (with poll fallback) over libp2p-stream
 
 **Status:** Accepted; implemented
 **Date:** 2026-08-06
-**Supersedes:** the transport mechanism of [ADR-022](ADR-022-event-subscription-layer.md) (poll-multiplex over the control protocol). The wire model, trust rule, and bounded resource model of ADR-022 are unchanged.
+**Supersedes:** the *default* transport mechanism of [ADR-022](ADR-022-event-subscription-layer.md) (poll-multiplex over the control protocol). The poll path is **retained as a selectable fallback**, not removed. The wire model, trust rule, and bounded resource model of ADR-022 are unchanged.
 
-> **Implementation status.** Landed. The robot→operator event feed is now a
+> **Implementation status.** Landed. The robot→operator event feed defaults to a
 > genuine persistent push substream on `/ganglion/events/1.0`, carried by
 > `libp2p-stream`. The robot accepts inbound event substreams, authenticates
 > each subscriber, sends the `PresenceSnapshot` + retained catch-up, then pushes
 > framed `AgentEvent`s live from the bounded `EventBus` broadcast until the
-> stream closes. The operator's `subscribe_events` opens the substream over the
-> relay circuit and returns a live `Stream<AgentEvent>`. The
-> `ControlMessage::SubscribeEvents`/`Events` request-response path and the CLI's
-> ~1.5 s poll loop are deleted. Measured push latency over a real relay circuit:
-> ~2 ms (asserted `< 500 ms` in `tests/event_subscription.rs`), versus the old
-> ~1.5 s poll cadence.
+> stream closes. It also still serves the `ControlMessage::SubscribeEvents` poll
+> on the control protocol. The operator's `subscribe_events` returns a live
+> `Stream<AgentEvent>` (an [`EventFeed`]) carried by EITHER transport, chosen by
+> an `events_transport` selector (`auto`/`push`/`poll`, default `auto`) with a
+> per-command CLI flag override. `auto` prefers push and falls back to poll when
+> push is unavailable (or drops mid-session). Measured push latency over a real
+> relay circuit: ~2 ms (asserted `< 500 ms` in `tests/event_subscription.rs`),
+> versus the ~1.5 s poll cadence.
+>
+> **Why keep the poll?** `libp2p-stream` is a pre-release (0.4.0-alpha). Keeping
+> the request-response poll — which shipped in ADR-022 and needs no new
+> dependency — means an operator is never left without a feed if the alpha
+> misbehaves, if it is disabled, or if the peer runs an older/alpha-free agent.
+> `auto` de-risks the alpha transparently; `push`/`poll` force a path for
+> debugging or policy.
 
 ## Context
 
@@ -96,15 +105,41 @@ memory. No secrets on the wire (the `AgentEvent` model is unchanged).
 
 ### Operator side (open + decode)
 
-`Libp2pTransportAdapter::subscribe_events` now returns a live
-`Stream<AgentEvent>` instead of a `Vec`. It opens a `/ganglion/events/1.0`
-substream to the robot (over the relay circuit, same path as control RPC via
-`Control::open_stream`), writes one `EventSubscribeRequest` frame, and reads the
-first frame within the handshake timeout — a clean EOF there means the robot
-refused the subscription (surfaced as a typed `TransportError`, not a silently
-empty stream). It then decodes length-prefixed CBOR `AgentEvent`s as they are
-pushed, until the robot closes the stream. `gang logs`/`connect`/`tui` consume
-the stream directly; the poll loop and its ~1.5 s timer are gone.
+`Libp2pTransportAdapter::subscribe_events` now returns a live [`EventFeed`] (a
+`Stream<AgentEvent>`) instead of a `Vec`. On the **push** path it opens a
+`/ganglion/events/1.0` substream (over the relay circuit, same path as control
+RPC via `Control::open_stream`), writes one `EventSubscribeRequest` frame, and
+reads the first frame within the handshake timeout — a clean EOF there means the
+robot refused the subscription (unauthorized), surfaced as a typed
+`TransportError`. It then decodes length-prefixed CBOR `AgentEvent`s as they are
+pushed. `gang logs`/`connect`/`tui` consume the `Stream` without caring which
+transport is live; `EventFeed::active_transport()` reports the current one.
+
+### Transport selection and automatic fallback
+
+The `events_transport` selector (`Libp2pConfig::events_transport`, overridable
+per command with `--events-transport`) chooses:
+
+- **`push`** — force the substream; if it cannot be opened, error clearly (never
+  a silent poll).
+- **`poll`** — never open a stream; run the retained `SubscribeEvents`
+  request-response loop on `events_poll_interval_ms` (default 1500 ms).
+- **`auto`** (default) — try push; classify the outcome:
+  - open fails with `OpenStreamError::UnsupportedProtocol` (multistream
+    `NegotiationFailed`), any other open error, or a handshake io/timeout →
+    **push unavailable** → fall back to poll and log it.
+  - the stream opens but the robot returns a clean EOF on the first frame →
+    **refusal** (unauthorized) → surface the error; poll would refuse
+    identically, so no fallback.
+  - success → push, and if the push substream **drops mid-session** the returned
+    `EventFeed` transitions to poll (resuming from the last cursor) so the feed
+    is never left dead.
+
+The push-open failure is classified in `open_push` into `Unavailable` / `Fatal`
+/ `Refused`; the poll loop is a `Stream` built by `poll_loop`, so both transports
+present the identical `Stream<AgentEvent>` shape. An eager first exchange on both
+paths makes a refusal surface at `subscribe_events` time rather than as a
+silently empty stream.
 
 ### Framing
 
@@ -123,7 +158,10 @@ buffered path. No second codec.
 - The TUI `♥ live` / `[stale feed]` indicator is still driven by the 15 s
   heartbeats: liveness detection is unchanged; only feed latency changed.
 - One new dependency (`libp2p-stream`), pinned to a pre-release, is the cost.
-  `cargo deny` is clean, so no policy exception was needed.
+  `cargo deny` is clean, so no policy exception was needed. Because the poll
+  fallback is retained, the alpha is never a single point of failure for the
+  feed: `auto` degrades to poll transparently, and operators can force `poll` to
+  avoid the alpha entirely.
 - The single-owner swarm architecture, the `AgentEvent` wire model, the
   subscriber trust rule (SEC-03), and the bounded resource model (broadcast lag
   and ring eviction → `Gap`) are all **unchanged** from ADR-022 — this ADR
@@ -131,6 +169,11 @@ buffered path. No second codec.
 - Coverage: `tests/event_subscription.rs` keeps the ADR-022 assertions
   (authorized subscribe → `PresenceSnapshot`; deny → `PolicyDecision{Deny}`;
   invoke → `AuditAppended` + `PolicyDecision{Allow}`; unauthorized refused) and
-  adds a push-latency assertion (`< 500 ms` over a real relay circuit). The
-  broadcast-lag → `Gap` and ring-eviction → `Gap` paths remain covered by unit
-  tests in `gang_ros::events`.
+  adds, over a real relay circuit: push-latency (`< 500 ms`, forced `push`);
+  `poll` mode delivers events; `auto` falls back to poll against a **poll-only
+  robot** (`serve_poll_only`, which does not accept the push protocol) and still
+  delivers events; and forced `push` against a poll-only robot errors rather
+  than silently polling. The broadcast-lag → `Gap` and ring-eviction → `Gap`
+  paths remain covered by unit tests in `gang_ros::events`.
+
+[`EventFeed`]: ../../crates/gang-libp2p/src/adapter.rs
