@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-gang-core = { path = "../gang-core", version = "2.0.0" }
+gang-core = { path = "../gang-core", version = "2.1.0" }
 libp2p = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }

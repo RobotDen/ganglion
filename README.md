@@ -24,7 +24,11 @@ Five steps: install, prove the pipeline locally, stand up a relay, connect a rob
 ### 1. Install (workstation and robot)
 
 ```bash
-# From crates.io (Rust 1.88+; Debian/Ubuntu system deps: pkg-config libssl-dev)
+# Prebuilt binary (no Rust toolchain needed) — Linux & macOS, x86_64 & arm64.
+# Downloads the latest release and verifies its SHA-256 before installing.
+curl -fsSL https://raw.githubusercontent.com/RobotDen/ganglion/main/scripts/install.sh | sh
+
+# ...or from crates.io (Rust 1.88+; Debian/Ubuntu system deps: pkg-config libssl-dev)
 cargo install gang
 
 # ...or build from source (see CONTRIBUTING.md):
