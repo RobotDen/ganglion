@@ -147,6 +147,37 @@ pub enum ControlMessage {
         /// The installed capabilities.
         capabilities: Vec<CapabilityInfo>,
     },
+    /// Robot → operator enrollment request over a pairing session (`gang join`).
+    ///
+    /// Rides the control protocol so it reuses the same authenticated circuit
+    /// the rest of the fleet uses. The operator authenticates the *robot* from
+    /// the wire (the Ed25519 key libp2p proved on this stream), never from this
+    /// message — `libp2p_id` here is only a convenience the operator accepts
+    /// solely after confirming its embedded key derives to the wire-authenticated
+    /// gang id. `token_secret` is the single-use bearer secret from the pairing
+    /// token; it proves the robot was invited.
+    Enroll {
+        /// The pairing token's bearer secret (see `gang_core::pairing`).
+        token_secret: Vec<u8>,
+        /// The robot's requested registry name.
+        name: String,
+        /// The robot's self-reported dialable base58 libp2p id. Accepted only
+        /// when its embedded key derives to the wire-authenticated gang id.
+        libp2p_id: String,
+    },
+    /// Operator → robot enrollment acknowledgement.
+    ///
+    /// Lets the robot confirm which operator identity recorded it (the robot
+    /// already cryptographically reached the operator its token named; this
+    /// echoes it back for a clear success message).
+    Enrolled {
+        /// The operator's gang id that recorded the robot.
+        operator_id: PeerId,
+        /// The robot's gang id as recorded (the wire-authenticated one).
+        robot_id: PeerId,
+        /// The name the robot was registered under.
+        name: String,
+    },
     /// Error response.
     Error {
         /// Correlation ID of the request that failed, if any.

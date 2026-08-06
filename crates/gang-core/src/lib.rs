@@ -38,6 +38,8 @@ pub mod identity;
 pub mod manifest;
 /// Wire message framing and control/tool/bulk protocol messages.
 pub mod message;
+/// One-line robot enrollment: the pairing-token trust model (`gang pair`).
+pub mod pairing;
 /// The default-deny capability policy engine.
 pub mod policy;
 /// Stream protocol identifiers.
