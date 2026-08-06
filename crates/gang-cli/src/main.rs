@@ -1,4 +1,5 @@
 mod commands;
+mod tui;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -378,6 +379,32 @@ enum Commands {
     /// List registered robots with live reachability from a presence probe.
     #[command(display_order = 33)]
     List,
+
+    /// Live fleet dashboard: peers, tunnels, policy decisions, audit tail.
+    ///
+    /// A full-screen ratatui dashboard that subscribes to every registered
+    /// robot's event feed and folds it into four live panes — connected peers
+    /// (status · transport · RTT), active tunnels (direct/relay · byte
+    /// counters), policy allow/deny decisions, and a tailing audit log.
+    ///
+    /// Keys: ↑↓/j k select a peer · ⏎ inspect it · p pause the feed (for a
+    /// clean capture) · / filter · a audit-only fullscreen · ? help · q/Esc
+    /// quit. The feed is a bounded ~1.5s poll (ADR-022); a live pulse shows it
+    /// is fresh. Honors NO_COLOR (monochrome/ASCII) and resizes gracefully.
+    #[command(display_order = 32)]
+    Tui {
+        /// Focus a single registered robot instead of the whole fleet.
+        #[arg(long, value_name = "NAME")]
+        robot: Option<String>,
+        /// Headless snapshot: fold the feed for N poll cycles, print the
+        /// rendered frame as text, and exit (no raw terminal — for CI/capture).
+        #[arg(long, value_name = "N")]
+        frames: Option<usize>,
+        /// Run the live dashboard but ignore keyboard input (for unattended
+        /// recording); Ctrl-C still quits.
+        #[arg(long)]
+        no_input: bool,
+    },
 
     /// Attach a live status view to a robot (presence + heartbeat + audit tail).
     #[command(display_order = 32)]
@@ -811,6 +838,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Status => commands::status(&cli.format).await?,
         Commands::List => commands::list(&cli.format).await?,
+        Commands::Tui {
+            robot,
+            frames,
+            no_input,
+        } => tui::tui(robot.as_deref(), frames, no_input, &cli.format).await?,
         Commands::Connect {
             robot,
             prefer_transport: _,

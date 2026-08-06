@@ -1312,22 +1312,22 @@ pub fn verify_host_key(
 /// megabytes travelling over a relay circuit.
 const DEPLOY_TIMEOUT_SECS: u64 = 60;
 /// Default whole-dispatch timeout for `gang run` / `gang caps`.
-const CONTROL_TIMEOUT_SECS: u64 = 30;
+pub(crate) const CONTROL_TIMEOUT_SECS: u64 = 30;
 
 /// A fully-resolved remote robot target, ready to dial through its relay.
-struct RemoteTarget {
+pub(crate) struct RemoteTarget {
     /// Canonical gang identity (trust store / policy / audit key).
-    gang_id: gang_core::identity::PeerId,
+    pub(crate) gang_id: gang_core::identity::PeerId,
     /// Dialable base58 libp2p id (embeds the same Ed25519 key).
-    libp2p_id: String,
+    pub(crate) libp2p_id: String,
     /// The relay to route through (must end in `/p2p/<relay-libp2p-id>`).
-    relay_addr: String,
+    pub(crate) relay_addr: String,
     /// Registered name, when the target was resolved by name.
-    name: Option<String>,
+    pub(crate) name: Option<String>,
 }
 
 impl RemoteTarget {
-    fn display(&self) -> String {
+    pub(crate) fn display(&self) -> String {
         self.name
             .clone()
             .unwrap_or_else(|| self.gang_id.to_string())
@@ -1336,7 +1336,7 @@ impl RemoteTarget {
 
 /// Validate a resolved (non-local) target for remote dispatch and run the
 /// SSH-style host-key verification gate before any connection is attempted.
-fn prepare_remote(target: &ResolvedTarget) -> anyhow::Result<RemoteTarget> {
+pub(crate) fn prepare_remote(target: &ResolvedTarget) -> anyhow::Result<RemoteTarget> {
     let gang_id = target
         .peer_id
         .clone()
@@ -1470,14 +1470,14 @@ async fn remote_dispatch_inner(
 /// Holds the swarm worker's `JoinHandle` so callers can tear it down cleanly
 /// via [`RemoteConnection::close`] once the exchange (dispatch, subscription
 /// poll loop, …) is done.
-struct RemoteConnection {
-    transport: std::sync::Arc<gang_libp2p::Libp2pTransportAdapter>,
+pub(crate) struct RemoteConnection {
+    pub(crate) transport: std::sync::Arc<gang_libp2p::Libp2pTransportAdapter>,
     event_loop: tokio::task::JoinHandle<Result<(), gang_libp2p::TransportError>>,
 }
 
 impl RemoteConnection {
     /// Shut the transport down and abort the swarm worker.
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         let _ = gang_core::transport::TransportAdapter::shutdown(self.transport.as_ref()).await;
         self.event_loop.abort();
     }
@@ -1491,7 +1491,7 @@ impl RemoteConnection {
 /// the same relay-dial → wait → circuit-dial → redial-until-connected sequence
 /// (a failed circuit dial is never retried by the swarm, so we re-dial until
 /// the robot's reservation is accepted).
-async fn establish_remote_connection(
+pub(crate) async fn establish_remote_connection(
     target: &RemoteTarget,
     connect_timeout: std::time::Duration,
 ) -> anyhow::Result<RemoteConnection> {
@@ -4063,7 +4063,7 @@ pub async fn transport_stats(
 /// rides request-response (see `ControlMessage::SubscribeEvents`), so a live
 /// tail is a bounded poll rather than a persistent push; a genuine push stream
 /// is the reserved `/ganglion/events/1.0` direct-substream path.
-const EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+pub(crate) const EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Parse a short duration like `30s`, `5m`, `2h`, `1d` into a `chrono::Duration`.
 fn parse_since(spec: &str) -> anyhow::Result<chrono::Duration> {
@@ -4471,7 +4471,7 @@ async fn probe_presence(
     Ok(None)
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     if bytes >= 1_048_576 {
         format!("{:.1} MB", bytes as f64 / 1_048_576.0)
     } else if bytes >= 1_024 {
@@ -5365,7 +5365,7 @@ pub async fn relay(
     Ok(())
 }
 
-fn format_duration(secs: u64) -> String {
+pub(crate) fn format_duration(secs: u64) -> String {
     if secs >= 3600 {
         let h = secs / 3600;
         let m = (secs % 3600) / 60;
