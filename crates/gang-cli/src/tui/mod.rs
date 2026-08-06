@@ -15,9 +15,11 @@
 //!   runs the crossterm input + render loop. The UI thread never blocks on the
 //!   network — a slow or dead robot only delays its own task.
 //!
-//! Feed cadence follows ADR-022: the subscription is a bounded ~1.5 s poll, not
-//! true push. The title bar shows a live-pulse / `[stale feed]` indicator so a
-//! stalled feed is visible rather than silently frozen.
+//! Feed delivery follows ADR-024: the subscription is a genuine server-push
+//! substream, so events reach the dashboard the instant the robot emits them
+//! (no poll cadence). Heartbeats (every 15 s) still drive the title bar's
+//! live-pulse / `[stale feed]` indicator, so a stalled or dead feed is visible
+//! rather than silently frozen; only the feed latency changed, not liveness.
 
 mod render;
 mod state;
@@ -41,13 +43,22 @@ use self::state::{DashboardState, FeedMsg, View};
 use self::theme::Theme;
 use crate::OutputFormat;
 use crate::commands::{
-    CONTROL_TIMEOUT_SECS, EVENT_POLL_INTERVAL, RemoteTarget, ResolvedTarget,
-    establish_remote_connection, prepare_remote,
+    CONTROL_TIMEOUT_SECS, RemoteTarget, ResolvedTarget, establish_remote_connection, prepare_remote,
 };
 
 /// The dashboard's redraw tick — drives the heartbeat pulse and staleness
 /// readout independent of feed arrivals.
 const UI_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How often each feed task re-reads its robot's transport stats for the
+/// tunnel/RTT panes. The event feed itself is push (no cadence); only the
+/// stats side-channel is sampled.
+const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Per-cycle fold duration for the headless `--frames N` snapshot. With push
+/// delivery there is no poll cycle, so a "cycle" is a fixed slice of wall-clock
+/// time the feed is folded for before the frame is rendered.
+const SNAPSHOT_CYCLE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Default frame size for the headless snapshot (`--frames`).
 const SNAPSHOT_W: u16 = 108;
@@ -187,73 +198,79 @@ async fn feed_task(name: String, target: RemoteTarget, tx: mpsc::Sender<FeedMsg>
             return;
         }
 
-        // Poll loop: fresh subscribe, then resume from the cursor each tick,
-        // plus a transport-stats read for the tunnel/RTT panes.
-        let mut cursor: u64 = 0;
-        let mut ticker = tokio::time::interval(EVENT_POLL_INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut healthy = true;
-        while healthy {
-            ticker.tick().await;
-            let since = cursor.checked_sub(1);
-            match conn
-                .transport
-                .subscribe_events(&target.gang_id, since, timeout)
-                .await
-            {
-                Ok(batch) => {
-                    for ev in &batch {
-                        if since.is_none()
-                            && matches!(ev, gang_core::events::AgentEvent::PresenceSnapshot { .. })
-                        {
-                            if let Some(s) = ev.seq() {
-                                cursor = cursor.max(s);
-                            }
-                        } else if let Some(s) = ev.seq() {
-                            cursor = cursor.max(s + 1);
-                        }
+        // Open the live push feed once; events then arrive instantly. A
+        // separate ticker samples transport stats for the tunnel/RTT panes.
+        let mut stream = match conn
+            .transport
+            .subscribe_events(&target.gang_id, None, timeout)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx
+                    .send(FeedMsg::Disconnected {
+                        robot: name.clone(),
+                        reason: e.to_string(),
+                    })
+                    .await;
+                conn.close().await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let mut stats_tick = tokio::time::interval(STATS_INTERVAL);
+        stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                next = stream.next() => match next {
+                    Some(event) => {
                         if tx
                             .send(FeedMsg::Event {
                                 robot: name.clone(),
-                                event: ev.clone(),
+                                event,
                             })
                             .await
                             .is_err()
                         {
+                            drop(stream);
                             conn.close().await;
                             return;
                         }
                     }
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(FeedMsg::Disconnected {
-                            robot: name.clone(),
-                            reason: e.to_string(),
-                        })
-                        .await;
-                    healthy = false;
-                    continue;
-                }
-            }
-
-            if let Some(stats) = gang_core::transport::TransportAdapter::transport_stats(
-                conn.transport.as_ref(),
-                &target.gang_id,
-            )
-            .await
-                && tx
-                    .send(FeedMsg::Stats {
-                        robot: name.clone(),
-                        stats,
-                    })
+                    None => {
+                        // The robot closed the feed; reconnect after a pause.
+                        let _ = tx
+                            .send(FeedMsg::Disconnected {
+                                robot: name.clone(),
+                                reason: "event feed closed".into(),
+                            })
+                            .await;
+                        break;
+                    }
+                },
+                _ = stats_tick.tick() => {
+                    if let Some(stats) = gang_core::transport::TransportAdapter::transport_stats(
+                        conn.transport.as_ref(),
+                        &target.gang_id,
+                    )
                     .await
-                    .is_err()
-            {
-                conn.close().await;
-                return;
+                        && tx
+                            .send(FeedMsg::Stats {
+                                robot: name.clone(),
+                                stats,
+                            })
+                            .await
+                            .is_err()
+                    {
+                        drop(stream);
+                        conn.close().await;
+                        return;
+                    }
+                }
             }
         }
+        drop(stream);
         conn.close().await;
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
@@ -266,7 +283,7 @@ async fn snapshot(
     rx: &mut mpsc::Receiver<FeedMsg>,
     cycles: usize,
 ) -> anyhow::Result<()> {
-    let budget = EVENT_POLL_INTERVAL * (cycles.max(1) as u32) + std::time::Duration::from_secs(3);
+    let budget = SNAPSHOT_CYCLE * (cycles.max(1) as u32) + std::time::Duration::from_secs(3);
     let deadline = tokio::time::Instant::now() + budget;
     loop {
         tokio::select! {

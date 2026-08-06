@@ -4059,11 +4059,12 @@ pub async fn transport_stats(
 
 // --- Event subscription commands (logs / connect / list) ---
 
-/// How often `--follow` / `connect` re-polls the robot's event feed. The feed
-/// rides request-response (see `ControlMessage::SubscribeEvents`), so a live
-/// tail is a bounded poll rather than a persistent push; a genuine push stream
-/// is the reserved `/ganglion/events/1.0` direct-substream path.
-pub(crate) const EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Idle window that marks the end of the initial snapshot + retained catch-up
+/// burst on a freshly-opened push feed (ADR-024). The catch-up frames arrive
+/// back-to-back; once this long passes with no new frame, non-follow `gang
+/// logs` has the full recent context and stops. Heartbeats (every 15 s) are far
+/// enough apart that this never truncates a live burst.
+pub(crate) const CATCHUP_IDLE: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Parse a short duration like `30s`, `5m`, `2h`, `1d` into a `chrono::Duration`.
 fn parse_since(spec: &str) -> anyhow::Result<chrono::Duration> {
@@ -4237,27 +4238,23 @@ pub async fn logs(
         }
     };
 
-    // Initial fresh subscription: presence snapshot + recent context.
-    let batch = conn
+    // Open the live push feed: the snapshot + retained context arrive first,
+    // then the feed stays open for the live tail.
+    let mut stream = conn
         .transport
         .subscribe_events(&remote.gang_id, None, timeout)
         .await
         .map_err(|e| anyhow::anyhow!("subscribing to '{display}' failed: {e}"))?;
 
-    let mut cursor: u64 = 0;
-    for ev in &batch {
-        if let Some(s) = ev.seq() {
-            cursor = cursor.max(match ev {
-                gang_core::events::AgentEvent::PresenceSnapshot { .. } => s,
-                _ => s + 1,
-            });
-        }
-        if is_log_event(ev) {
-            print(ev);
+    // Drain the initial snapshot + retained catch-up burst.
+    for ev in drain_catchup(&mut stream, CATCHUP_IDLE).await {
+        if is_log_event(&ev) {
+            print(&ev);
         }
     }
 
     if !follow {
+        drop(stream);
         conn.close().await;
         return Ok(());
     }
@@ -4265,7 +4262,8 @@ pub async fn logs(
     if let OutputFormat::Text = format {
         eprintln!("--- following '{display}' (Ctrl-C to stop) ---");
     }
-    let result = follow_events(&conn, &remote, cursor, timeout, is_log_event, &print).await;
+    let result = tail_events(&mut stream, is_log_event, &print).await;
+    drop(stream);
     conn.close().await;
     result
 }
@@ -4299,80 +4297,55 @@ pub async fn connect(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
         println!("Connected to '{display}'. Live status (Ctrl-C to detach):");
     }
 
-    let batch = conn
+    let mut stream = conn
         .transport
         .subscribe_events(&remote.gang_id, None, timeout)
         .await
         .map_err(|e| anyhow::anyhow!("connecting to '{display}' failed: {e}"))?;
 
-    let mut cursor: u64 = 0;
-    for ev in &batch {
-        if let Some(s) = ev.seq() {
-            cursor = cursor.max(match ev {
-                gang_core::events::AgentEvent::PresenceSnapshot { .. } => s,
-                _ => s + 1,
-            });
-        }
-        print(ev);
-    }
-
-    // Show everything in the live view.
+    // Show everything in the live view: the initial snapshot + retained context
+    // arrive first, then the feed pushes live events until Ctrl-C.
     let all = |_ev: &gang_core::events::AgentEvent| true;
-    let result = follow_events(&conn, &remote, cursor, timeout, all, &print).await;
+    let result = tail_events(&mut stream, all, &print).await;
+    drop(stream);
     conn.close().await;
     result
 }
 
-/// Poll the robot's event feed, printing new events until Ctrl-C. `keep`
-/// filters which events to print; `cursor` is the next-expected sequence.
-async fn follow_events(
-    conn: &RemoteConnection,
-    remote: &RemoteTarget,
-    mut cursor: u64,
-    timeout: std::time::Duration,
+/// Drain the initial snapshot + retained catch-up burst from a freshly-opened
+/// push feed: collect events until [`CATCHUP_IDLE`] elapses with nothing new
+/// (the burst is contiguous), or the robot closes the feed.
+async fn drain_catchup(
+    stream: &mut gang_libp2p::EventStream,
+    idle: std::time::Duration,
+) -> Vec<gang_core::events::AgentEvent> {
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    while let Ok(Some(ev)) = tokio::time::timeout(idle, stream.next()).await {
+        out.push(ev);
+    }
+    out
+}
+
+/// Tail a live push feed, printing new events as the robot pushes them (true
+/// push — no polling, no cadence) until Ctrl-C or the robot closes the feed.
+/// `keep` filters which events to print.
+async fn tail_events(
+    stream: &mut gang_libp2p::EventStream,
     keep: impl Fn(&gang_core::events::AgentEvent) -> bool,
     print: &impl Fn(&gang_core::events::AgentEvent),
 ) -> anyhow::Result<()> {
-    let mut ticker = tokio::time::interval(EVENT_POLL_INTERVAL);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    use futures::StreamExt;
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                return Ok(());
-            }
-            _ = ticker.tick() => {
-                // A cursor of 0 means "nothing seen yet" — re-request fresh.
-                let since = cursor.checked_sub(1);
-                let batch = match conn
-                    .transport
-                    .subscribe_events(&remote.gang_id, since, timeout)
-                    .await
-                {
-                    Ok(b) => b,
-                    // Transient failure while tailing: report on stderr, keep going.
-                    Err(e) => {
-                        eprintln!("warning: event poll failed: {e}");
-                        continue;
-                    }
-                };
-                for ev in &batch {
-                    // A fresh re-request (since == None) re-sends the snapshot;
-                    // skip re-printing it while following.
-                    if since.is_none()
-                        && matches!(ev, gang_core::events::AgentEvent::PresenceSnapshot { .. })
-                    {
-                        if let Some(s) = ev.seq() {
-                            cursor = cursor.max(s);
-                        }
-                        continue;
-                    }
-                    if let Some(s) = ev.seq() {
-                        cursor = cursor.max(s + 1);
-                    }
-                    if keep(ev) {
-                        print(ev);
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            next = stream.next() => match next {
+                Some(ev) => {
+                    if keep(&ev) {
+                        print(&ev);
                     }
                 }
+                None => return Ok(()), // robot closed the feed
             }
         }
     }
@@ -4450,25 +4423,33 @@ async fn probe_presence(
     remote: &RemoteTarget,
     timeout: std::time::Duration,
 ) -> anyhow::Result<Option<(String, u64)>> {
+    use futures::StreamExt;
     let conn = establish_remote_connection(remote, timeout).await?;
-    let batch = conn
+    let stream = conn
         .transport
         .subscribe_events(&remote.gang_id, None, timeout)
         .await;
-    conn.close().await;
 
-    let batch = batch.map_err(|e| anyhow::anyhow!("{e}"))?;
-    for ev in batch {
-        if let gang_core::events::AgentEvent::PresenceSnapshot {
-            ganglion_version,
-            uptime_secs,
-            ..
-        } = ev
-        {
-            return Ok(Some((ganglion_version, uptime_secs)));
+    let result = async {
+        let mut stream = stream.map_err(|e| anyhow::anyhow!("{e}"))?;
+        // A fresh subscription leads with the presence snapshot; read the head
+        // of the feed until we see it (bounded by the connection timeout).
+        while let Ok(Some(ev)) = tokio::time::timeout(timeout, stream.next()).await {
+            if let gang_core::events::AgentEvent::PresenceSnapshot {
+                ganglion_version,
+                uptime_secs,
+                ..
+            } = ev
+            {
+                return Ok(Some((ganglion_version, uptime_secs)));
+            }
         }
+        Ok(None)
     }
-    Ok(None)
+    .await;
+
+    conn.close().await;
+    result
 }
 
 pub(crate) fn format_bytes(bytes: u64) -> String {

@@ -389,8 +389,9 @@ enum Commands {
     ///
     /// Keys: ↑↓/j k select a peer · ⏎ inspect it · p pause the feed (for a
     /// clean capture) · / filter · a audit-only fullscreen · ? help · q/Esc
-    /// quit. The feed is a bounded ~1.5s poll (ADR-022); a live pulse shows it
-    /// is fresh. Honors NO_COLOR (monochrome/ASCII) and resizes gracefully.
+    /// quit. The feed is a genuine server-push substream (ADR-024) — events
+    /// land instantly; a live pulse shows it is fresh. Honors NO_COLOR
+    /// (monochrome/ASCII) and resizes gracefully.
     #[command(display_order = 32)]
     Tui {
         /// Focus a single registered robot instead of the whole fleet.

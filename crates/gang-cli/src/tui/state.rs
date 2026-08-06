@@ -282,8 +282,8 @@ impl DashboardState {
                     }
                     // A fresh stats read is direct evidence the circuit is alive
                     // now — heartbeats are only every 15s (agent
-                    // HEARTBEAT_INTERVAL), so the ~1.5s stats poll is what keeps
-                    // a healthy peer showing "live" between beats.
+                    // HEARTBEAT_INTERVAL), so the periodic (~2s) stats sample is
+                    // what keeps a healthy peer showing "live" between beats.
                     p.conn_down = false;
                     p.connected = true;
                     p.last_seen = Some(now);
@@ -518,7 +518,9 @@ impl DashboardState {
         (now - self.started_at).num_seconds().max(0) as u64
     }
 
-    /// Whether the feed looks stale (no activity within the poll cadence * 3).
+    /// Whether the feed looks stale: no activity (event or ~2s stats sample)
+    /// within 4.5s. The event feed is push (instant), so staleness reflects a
+    /// dead/stalled connection rather than a missed poll.
     pub fn feed_stale(&self, now: DateTime<Utc>) -> bool {
         match self.last_activity {
             None => true,
