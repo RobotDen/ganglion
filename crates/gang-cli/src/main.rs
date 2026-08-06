@@ -82,6 +82,63 @@ enum Commands {
         json: bool,
     },
 
+    /// Enroll a robot with one copy-paste line — the `gang up` for robots.
+    ///
+    /// Run on the OPERATOR machine. Mints a short-lived, single-use pairing
+    /// token bound to the relay and this operator's identity, prints ONE line to
+    /// run on the robot (`gang join gang1_…`), then waits: when the robot dials
+    /// out and enrolls, the operator records it — under the identity libp2p
+    /// authenticated on the wire, never a self-report — and it appears in
+    /// `gang peer list`, ready for `gang deploy`/`gang run`. Needs a relay
+    /// (`--relay`, else `default_relay` from config).
+    #[command(display_order = 8)]
+    Pair {
+        /// Relay multiaddr the robot should dial (default: `default_relay`).
+        #[arg(long, short = 'r', value_name = "MULTIADDR")]
+        relay: Option<String>,
+        /// Name to register the paired robot under (default: `robot-<short-id>`).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Token lifetime, e.g. `15m`, `1h`, `90s` (default: 15m).
+        #[arg(long, value_name = "DURATION")]
+        expires: Option<String>,
+        /// Also render the robot line as a QR code (when supported).
+        #[arg(long)]
+        qr: bool,
+        /// Give up waiting for the robot after this many seconds (default: 300).
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
+        /// Emit the token/relay/operator facts as JSON, then wait as usual.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Join a fleet from a pairing token — the ONE line you run on the robot.
+    ///
+    /// Run on the ROBOT. Decodes the `gang join gang1_…` token from `gang pair`,
+    /// loads or generates this robot's identity, dials out to the relay, reserves
+    /// a circuit, and enrolls with the operator the token names (whose identity
+    /// libp2p authenticates end-to-end). Then it keeps serving as the agent so
+    /// the operator can deploy — exactly like `gang agent`. Pass `--once` to
+    /// enroll and exit instead of staying online.
+    #[command(display_order = 9)]
+    Join {
+        /// The pairing token printed by `gang pair` (`gang1_…`).
+        token: String,
+        /// Name to request from the operator (default: `robot-<short-id>`).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Enroll and exit instead of staying online as the agent.
+        #[arg(long)]
+        once: bool,
+        /// Overall timeout in seconds for the enrollment exchange (default: 60).
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
+        /// Emit the enrollment result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage peer identity.
     #[command(display_order = 10, visible_alias = "id")]
     Identity {
@@ -514,6 +571,32 @@ async fn main() -> anyhow::Result<()> {
         Commands::Init { force, yes, json } => {
             commands::init(cli.data_dir.as_deref(), force, yes, json, &cli.format).await?
         }
+        Commands::Pair {
+            relay,
+            name,
+            expires,
+            qr,
+            timeout,
+            json,
+        } => {
+            commands::pair(
+                relay.as_deref(),
+                name.as_deref(),
+                expires.as_deref(),
+                qr,
+                timeout,
+                json,
+                &cli.format,
+            )
+            .await?
+        }
+        Commands::Join {
+            token,
+            name,
+            once,
+            timeout,
+            json,
+        } => commands::join(&token, name.as_deref(), once, timeout, json, &cli.format).await?,
         Commands::Identity { action } => {
             reject_json(&cli.format, "identity")?;
             match action {

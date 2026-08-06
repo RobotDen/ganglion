@@ -145,6 +145,8 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
 
     let available = [
         "init",
+        "pair",
+        "join",
         "identity show",
         "identity generate",
         "sign",
@@ -2780,6 +2782,683 @@ where
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+// --- Pairing / one-line enrollment (issue #5) ---
+
+/// Default time `gang pair` waits for a robot to enroll before giving up.
+const PAIR_WAIT_SECS: u64 = 300;
+/// Default overall budget for the `gang join` enrollment exchange.
+const JOIN_TIMEOUT_SECS: u64 = 60;
+
+/// Parse a short human duration like `15m`, `1h`, `90s`, or a bare number of
+/// seconds. Used for `gang pair --expires`.
+fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
+    let s = s.trim();
+    let (num, unit_secs): (&str, u64) = if let Some(v) = s.strip_suffix("ms") {
+        // Sub-second precision is pointless for a token TTL; treat as an error
+        // rather than silently rounding to zero.
+        let _ = v;
+        anyhow::bail!("token lifetime must be at least one second (got '{s}')");
+    } else if let Some(v) = s.strip_suffix('s') {
+        (v, 1)
+    } else if let Some(v) = s.strip_suffix('m') {
+        (v, 60)
+    } else if let Some(v) = s.strip_suffix('h') {
+        (v, 3600)
+    } else {
+        (s, 1)
+    };
+    let n: u64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration '{s}' (use e.g. 15m, 1h, 90s)"))?;
+    if n == 0 {
+        anyhow::bail!("token lifetime must be greater than zero");
+    }
+    Ok(std::time::Duration::from_secs(n * unit_secs))
+}
+
+/// A short, human-friendly default robot name derived from a gang id, e.g.
+/// `robot-a1b2c3d4` from `12D3-a1b2c3d4…`.
+fn default_robot_name(gang_id: &gang_core::identity::PeerId) -> String {
+    let tail = gang_id
+        .as_str()
+        .strip_prefix("12D3-")
+        .unwrap_or(gang_id.as_str());
+    format!("robot-{}", &tail[..tail.len().min(8)])
+}
+
+/// Print the robot line as a terminal QR when asked. No `qrcode` crate is in the
+/// workspace dependency table, so QR rendering is deferred rather than pulled in
+/// without approval; this prints an honest note and the copy-paste line instead.
+fn maybe_render_qr(requested: bool, robot_line: &str) {
+    if !requested {
+        return;
+    }
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        eprintln!(
+            "note: --qr is not available in this build (a terminal-QR dependency is not yet \
+             in the workspace; tracked as a follow-up). Use the copy-paste line below:"
+        );
+    }
+    // Whether or not a tty, the line itself is always the reliable path.
+    println!("{robot_line}");
+}
+
+/// `gang pair` — mint a single-use token, print the one robot line, and wait
+/// for the robot to dial out and enroll (design A: full auto-registration over
+/// the relay circuit). The robot's identity is recorded from the wire, never a
+/// self-report.
+#[allow(clippy::too_many_arguments)]
+pub async fn pair(
+    relay: Option<&str>,
+    name: Option<&str>,
+    expires: Option<&str>,
+    qr: bool,
+    timeout: Option<u64>,
+    json_flag: bool,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_core::identity::default_registry_path;
+    use gang_core::message::{ControlMessage, decode_message, encode_message};
+    use gang_core::pairing::{DEFAULT_TTL, PairingToken, authorize_enrollment};
+    use gang_core::transport::{StreamHandler, TransportAdapter};
+    use std::sync::Arc;
+
+    let json_output = json_flag || matches!(format, OutputFormat::Json);
+
+    // 1. Resolve the relay: flag > config default. Refuse to guess.
+    let config = OperatorConfig::load();
+    let relay_addr = relay
+        .map(String::from)
+        .or_else(|| config.default_relay.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no relay to pair through. Pass --relay <multiaddr> (the dialable relay id \
+                 printed by `gang relay`/`gang up`), or set one with \
+                 `gang config set default_relay <multiaddr>`."
+            )
+        })?;
+
+    let ttl = match expires {
+        Some(s) => parse_duration(s)?,
+        None => DEFAULT_TTL,
+    };
+    let wait = std::time::Duration::from_secs(timeout.unwrap_or(PAIR_WAIT_SECS));
+
+    // 2. Operator identity + a transport that reserves a circuit on the relay,
+    //    so the robot can dial the operator *through* the relay (outbound-only
+    //    on both ends — the Tailscale move).
+    let key_path = gang_core::identity::default_key_path();
+    // Ensure the operator identity exists on disk before the transport loads it.
+    let operator_id = gang_core::identity::Keypair::load_or_generate(&key_path)?.peer_id();
+
+    let transport = Arc::new(
+        gang_libp2p::Libp2pTransportAdapter::new(gang_libp2p::Libp2pConfig {
+            key_path: key_path.clone(),
+            listen_addrs: vec![],
+            relay_addrs: vec![relay_addr.clone()],
+            ..Default::default()
+        })
+        .await
+        .context("building the operator pairing transport")?,
+    );
+    let operator_libp2p_id = transport.libp2p_peer_id().to_string();
+
+    // 3. Mint the token and render the one robot line.
+    let now_ms = gang_core::message::unix_millis_now();
+    let token = PairingToken::mint(&relay_addr, &operator_libp2p_id, now_ms, ttl);
+    let encoded = token.encode();
+    let robot_line = format!("gang join {encoded}");
+
+    // Shared state: the minted token, a one-shot flag so a token enrolls exactly
+    // once, and a channel to hand the recorded identity back to this task.
+    let token = Arc::new(token);
+    let consumed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done_tx, mut done_rx) =
+        tokio::sync::mpsc::channel::<(String, gang_core::identity::PeerId, String)>(1);
+
+    // 4. Register the enrollment handler on the control protocol. It reads the
+    //    wire-authenticated gang id off the stream — never trusting a claim —
+    //    verifies the token, records the robot, and acknowledges.
+    let name_hint = name.map(String::from);
+    let registry_path = default_registry_path();
+    let trust_path = gang_core::identity::default_trust_store_path();
+    let handler_token = Arc::clone(&token);
+    let handler_consumed = Arc::clone(&consumed);
+    let handler_operator_id = operator_id.clone();
+
+    let handler: StreamHandler = Box::new(move |mut stream| {
+        let token = Arc::clone(&handler_token);
+        let consumed = Arc::clone(&handler_consumed);
+        let done_tx = done_tx.clone();
+        let registry_path = registry_path.clone();
+        let trust_path = trust_path.clone();
+        let name_hint = name_hint.clone();
+        let operator_id = handler_operator_id.clone();
+        Box::pin(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+            let wire_gang_id = stream.remote_peer.clone();
+            let mut buf = Vec::new();
+            if stream.inner.read_to_end(&mut buf).await.is_err() {
+                return;
+            }
+            let msg: ControlMessage = match decode_message(&buf) {
+                Ok((m, _)) => m,
+                Err(_) => return,
+            };
+            let (token_secret, req_name, reported_libp2p_id) = match msg {
+                ControlMessage::Enroll {
+                    token_secret,
+                    name,
+                    libp2p_id,
+                } => (token_secret, name, libp2p_id),
+                _ => {
+                    let err = ControlMessage::Error {
+                        request_id: None,
+                        code: "unexpected".into(),
+                        message: "pairing session expects an enroll message".into(),
+                    };
+                    if let Ok(b) = encode_message(&err) {
+                        let _ = stream.inner.write_all(&b).await;
+                    }
+                    return;
+                }
+            };
+
+            // Derive the gang id from the robot's *claimed* dialable id, so we
+            // can prove it embeds the same key libp2p authenticated on the wire.
+            let derived = gang_libp2p::identity_from_libp2p_str(&reported_libp2p_id);
+            let now_ms = gang_core::message::unix_millis_now();
+
+            let reject = |code: &str, message: String| -> ControlMessage {
+                ControlMessage::Error {
+                    request_id: None,
+                    code: code.into(),
+                    message,
+                }
+            };
+
+            let response = match derived {
+                None => reject(
+                    "bad_identity",
+                    "reported libp2p id is not a valid Ed25519 peer id".into(),
+                ),
+                Some(ident) => {
+                    match authorize_enrollment(
+                        &token,
+                        &token_secret,
+                        &wire_gang_id,
+                        &ident.gang_id,
+                        now_ms,
+                    ) {
+                        Err(e) => reject("rejected", e.to_string()),
+                        Ok(()) => {
+                            // Single-use: claim the token; a racing/replayed
+                            // enrollment loses here and is rejected.
+                            if consumed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                reject("already_used", "pairing token already used".into())
+                            } else {
+                                let robot_name = if req_name.trim().is_empty() {
+                                    name_hint
+                                        .clone()
+                                        .unwrap_or_else(|| default_robot_name(&wire_gang_id))
+                                } else {
+                                    req_name.clone()
+                                };
+                                // Record the robot BY ITS WIRE-AUTHENTICATED id.
+                                let recorded = record_paired_robot(
+                                    &registry_path,
+                                    &trust_path,
+                                    &robot_name,
+                                    &wire_gang_id,
+                                    &ident.libp2p_id,
+                                    &ident.ed25519_pubkey,
+                                    &token.relay_addr,
+                                );
+                                match recorded {
+                                    Err(e) => {
+                                        // Undo the consume so a retry can succeed.
+                                        consumed.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        reject("record_failed", format!("{e}"))
+                                    }
+                                    Ok(()) => {
+                                        let _ = done_tx
+                                            .send((
+                                                robot_name.clone(),
+                                                wire_gang_id.clone(),
+                                                ident.libp2p_id.clone(),
+                                            ))
+                                            .await;
+                                        ControlMessage::Enrolled {
+                                            operator_id: operator_id.clone(),
+                                            robot_id: wire_gang_id.clone(),
+                                            name: robot_name,
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            if let Ok(b) = encode_message(&response) {
+                let _ = stream.inner.write_all(&b).await;
+                let _ = stream.inner.flush().await;
+            }
+        })
+    });
+
+    transport
+        .listen(gang_core::protocol::ProtocolId::control(), handler)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to register pairing handler: {e}"))?;
+
+    // 5. Run the swarm and dial the relay so the operator becomes reachable.
+    let loop_transport = Arc::clone(&transport);
+    let event_loop = tokio::spawn(async move { loop_transport.run_event_loop().await });
+    transport
+        .dial_multiaddr(&relay_addr)
+        .await
+        .with_context(|| format!("dialing relay {relay_addr}"))?;
+    wait_for(
+        std::time::Duration::from_secs(20),
+        "the operator's relay circuit reservation",
+        || {
+            let t = Arc::clone(&transport);
+            async move {
+                t.listen_addrs()
+                    .await
+                    .into_iter()
+                    .find(|a| a.contains("p2p-circuit"))
+            }
+        },
+    )
+    .await?;
+
+    // 6. Show the operator what to do.
+    let expiry_iso =
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(token.expires_at_ms as i64)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default();
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "waiting",
+                "relay_addr": relay_addr,
+                "operator_id": operator_id.as_str(),
+                "operator_libp2p_id": operator_libp2p_id,
+                "robot_command": robot_line,
+                "token": encoded,
+                "expires_at": expiry_iso,
+                "wait_secs": wait.as_secs(),
+            }))?
+        );
+    } else {
+        println!("=== gang pair — enroll a robot in one line ===");
+        println!();
+        println!("Relay:    {relay_addr}");
+        println!("Operator: {operator_id}");
+        println!("Expires:  {expiry_iso}");
+        println!();
+        println!("Run this ONE line on the robot:");
+        println!();
+        println!("    {robot_line}");
+        println!();
+        if qr {
+            maybe_render_qr(true, &robot_line);
+            println!();
+        }
+        println!(
+            "Waiting up to {}s for the robot to dial out and enroll… (Ctrl-C to cancel)",
+            wait.as_secs()
+        );
+    }
+
+    // 7. Block until the robot enrolls, the wait elapses, or Ctrl-C.
+    let outcome = tokio::select! {
+        biased;
+        recv = done_rx.recv() => recv,
+        _ = tokio::time::sleep(wait) => None,
+        _ = tokio::signal::ctrl_c() => {
+            if !json_output { println!("\nPairing cancelled."); }
+            let _ = TransportAdapter::shutdown(transport.as_ref()).await;
+            event_loop.abort();
+            anyhow::bail!("pairing cancelled before a robot enrolled");
+        }
+    };
+
+    let _ = TransportAdapter::shutdown(transport.as_ref()).await;
+    event_loop.abort();
+
+    match outcome {
+        Some((robot_name, robot_id, libp2p_id)) => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "paired",
+                        "name": robot_name,
+                        "robot_id": robot_id.as_str(),
+                        "libp2p_id": libp2p_id,
+                        "relay_addr": relay_addr,
+                    }))?
+                );
+            } else {
+                println!();
+                println!("  ✔ paired: {robot_name}  ({robot_id})");
+                println!();
+                println!("The robot is now in your fleet. Drive it:");
+                println!("  gang deploy {robot_name} <signed.wasm>");
+                println!("  gang run {robot_name} <capability>");
+                println!("  gang peer list");
+            }
+            Ok(())
+        }
+        None => {
+            anyhow::bail!(
+                "no robot enrolled within {}s. The token has not been consumed; \
+                 re-run `gang pair` to mint a fresh one.",
+                wait.as_secs()
+            );
+        }
+    }
+}
+
+/// Record a freshly-paired robot in the operator's peer registry and pre-provision
+/// its host key in the operator trust store, both keyed on the WIRE-AUTHENTICATED
+/// identity. Called from inside the pairing handler.
+fn record_paired_robot(
+    registry_path: &Path,
+    trust_path: &Path,
+    name: &str,
+    gang_id: &gang_core::identity::PeerId,
+    libp2p_id: &str,
+    ed25519_pubkey: &[u8; 32],
+    relay_addr: &str,
+) -> anyhow::Result<()> {
+    use gang_core::identity::{PeerEntry, PeerRegistry, Role};
+    use gang_core::manifest::{TrustStore, TrustedPeer};
+
+    let mut registry = PeerRegistry::load(registry_path)?;
+    registry.register(
+        name.to_string(),
+        PeerEntry {
+            peer_id: gang_id.clone(),
+            role: Role::RobotAgent,
+            relay_addrs: vec![relay_addr.to_string()],
+            libp2p_id: Some(libp2p_id.to_string()),
+        },
+    );
+    registry.save(registry_path)?;
+
+    // Pre-provision the robot's host key so subsequent `gang deploy` connects
+    // under the default "strict" policy without a TOFU prompt — safe because the
+    // key was just cryptographically authenticated during enrollment.
+    let mut trust = TrustStore::load(trust_path)?;
+    trust.add(TrustedPeer {
+        peer_id: gang_id.clone(),
+        name: name.to_string(),
+        public_key: ed25519_pubkey.to_vec(),
+    });
+    trust.save(trust_path)?;
+    Ok(())
+}
+
+/// `gang join` — the ONE line run on the robot. Decodes the token, dials out,
+/// reserves a circuit, enrolls with the operator, then (unless `--once`) stays
+/// online serving the control protocol so the operator can deploy.
+pub async fn join(
+    token_str: &str,
+    name: Option<&str>,
+    once: bool,
+    timeout: Option<u64>,
+    json_flag: bool,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_core::manifest::{TrustStore, TrustedPeer};
+    use gang_core::message::{ControlMessage, decode_message, encode_message};
+    use gang_core::pairing::PairingToken;
+    use gang_core::transport::TransportAdapter;
+    use gang_ros::agent::{AgentConfig, RobotAgent};
+    use gang_ros::filesystem::FsRule;
+    use std::sync::Arc;
+
+    let json_output = json_flag || matches!(format, OutputFormat::Json);
+    let budget = std::time::Duration::from_secs(timeout.unwrap_or(JOIN_TIMEOUT_SECS));
+
+    // 1. Decode and pre-check the token (friendly error before any network I/O).
+    let token = PairingToken::decode(token_str)
+        .map_err(|e| anyhow::anyhow!("invalid pairing token: {e}"))?;
+    let now_ms = gang_core::message::unix_millis_now();
+    if token.is_expired(now_ms) {
+        anyhow::bail!("this pairing token has expired. Ask the operator to run `gang pair` again.");
+    }
+    let operator = gang_libp2p::identity_from_libp2p_str(&token.operator_libp2p_id)
+        .ok_or_else(|| anyhow::anyhow!("pairing token names an invalid operator id"))?;
+
+    // 2. Robot identity + data dir (honors global --data-dir via GANG_HOME).
+    let data_dir = gang_core::identity::default_config_dir();
+    std::fs::create_dir_all(&data_dir)?;
+    let key_path = data_dir.join("identity.key");
+    let robot_gang_id = gang_core::identity::Keypair::load_or_generate(&key_path)?.peer_id();
+
+    // 3. Trust the operator so its later deploys are authorized (SEC-03): the
+    //    operator's key is the one the token names and libp2p will authenticate.
+    let trust_path = data_dir.join("trusted_peers.json");
+    let mut trust = TrustStore::load(&trust_path)?;
+    trust.add(TrustedPeer {
+        peer_id: operator.gang_id.clone(),
+        name: "pair-operator".into(),
+        public_key: operator.ed25519_pubkey.to_vec(),
+    });
+    trust.save(&trust_path)?;
+
+    // 4. Agent + transport that reserves a circuit on the relay. The agent runs
+    //    with a permissive dev policy (policy_path: None), matching `gang agent`;
+    //    a production robot would ship a default-deny policy.toml.
+    let agent = Arc::new(RobotAgent::new(AgentConfig {
+        key_path: key_path.clone(),
+        policy_path: None,
+        trust_store_path: trust_path.clone(),
+        capabilities_dir: data_dir.join("capabilities"),
+        audit_log_path: data_dir.join("audit.log"),
+        audit_max_size_bytes: 50 * 1024 * 1024,
+        fs_allowed_patterns: vec![FsRule {
+            pattern: format!("{}/**", data_dir.display()),
+            read: true,
+            write: true,
+        }],
+        log_allowed_sources: vec!["**".into()],
+    })?);
+
+    let transport = Arc::new(
+        gang_libp2p::Libp2pTransportAdapter::new(gang_libp2p::Libp2pConfig {
+            key_path: key_path.clone(),
+            listen_addrs: vec![],
+            relay_addrs: vec![token.relay_addr.clone()],
+            ..Default::default()
+        })
+        .await
+        .context("building the robot transport")?,
+    );
+    let robot_libp2p_id = transport.libp2p_peer_id().to_string();
+
+    agent
+        .serve(transport.as_ref())
+        .await
+        .context("agent failed to serve the control protocol")?;
+    let loop_transport = Arc::clone(&transport);
+    let event_loop = tokio::spawn(async move { loop_transport.run_event_loop().await });
+
+    if !json_output {
+        println!("Joining fleet via {}…", token.relay_addr);
+    }
+
+    // 5. Dial the relay, reserve our own circuit, then dial the operator.
+    let enroll = async {
+        transport
+            .dial_multiaddr(&token.relay_addr)
+            .await
+            .with_context(|| format!("dialing relay {}", token.relay_addr))?;
+        wait_for(
+            std::time::Duration::from_secs(20),
+            "the robot's relay circuit reservation",
+            || {
+                let t = Arc::clone(&transport);
+                async move {
+                    t.listen_addrs()
+                        .await
+                        .into_iter()
+                        .find(|a| a.contains("p2p-circuit"))
+                }
+            },
+        )
+        .await?;
+
+        let circuit = circuit_addr(&token.relay_addr, &operator.libp2p_id);
+        transport
+            .dial_multiaddr(&circuit)
+            .await
+            .with_context(|| format!("dialing operator via circuit {circuit}"))?;
+
+        // Wait until the operator (its gang id) is a connected, authenticated
+        // peer — this is where libp2p proves we reached the operator the token
+        // named, before we hand over the bearer secret.
+        let redial = std::time::Duration::from_secs(2);
+        let mut last = std::time::Instant::now();
+        wait_for(
+            std::time::Duration::from_secs(25),
+            "an authenticated connection to the operator",
+            || {
+                let t = Arc::clone(&transport);
+                let op = operator.gang_id.clone();
+                let circuit = circuit.clone();
+                let redial_due = last.elapsed() >= redial;
+                if redial_due {
+                    last = std::time::Instant::now();
+                }
+                async move {
+                    if redial_due {
+                        let _ = t.dial_multiaddr(&circuit).await;
+                    }
+                    t.connected_peers()
+                        .await
+                        .into_iter()
+                        .find(|(id, _)| *id == op)
+                        .map(|_| ())
+                }
+            },
+        )
+        .await?;
+
+        let req = ControlMessage::Enroll {
+            token_secret: token.secret.to_vec(),
+            name: name.map(String::from).unwrap_or_default(),
+            libp2p_id: robot_libp2p_id.clone(),
+        };
+        let req_bytes =
+            encode_message(&req).map_err(|e| anyhow::anyhow!("encoding enroll: {e}"))?;
+        let resp_bytes = transport
+            .send_rpc_with_timeout(&operator.gang_id, req_bytes, budget)
+            .await
+            .map_err(|e| anyhow::anyhow!("enrollment request failed: {e}"))?;
+        if resp_bytes.is_empty() {
+            anyhow::bail!("operator sent no enrollment response");
+        }
+        let (resp, _) = decode_message::<ControlMessage>(&resp_bytes)
+            .map_err(|e| anyhow::anyhow!("decoding enrollment response: {e}"))?;
+        match resp {
+            ControlMessage::Enrolled {
+                operator_id, name, ..
+            } => {
+                // Defence in depth: the operator that answered must be the one
+                // the token named (libp2p already enforced this on the wire).
+                if operator_id != operator.gang_id {
+                    anyhow::bail!(
+                        "operator identity mismatch: token named {} but {} answered",
+                        operator.gang_id,
+                        operator_id
+                    );
+                }
+                Ok(name)
+            }
+            ControlMessage::Error { code, message, .. } => {
+                anyhow::bail!("operator rejected enrollment [{code}]: {message}")
+            }
+            _ => anyhow::bail!("unexpected enrollment response from operator"),
+        }
+    };
+
+    let registered_name = match tokio::time::timeout(budget, enroll).await {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = TransportAdapter::shutdown(transport.as_ref()).await;
+            event_loop.abort();
+            anyhow::bail!(
+                "timed out after {}s enrolling with the operator (is `gang pair` still \
+                 waiting on the operator machine?)",
+                budget.as_secs()
+            );
+        }
+    };
+
+    let registered_name = match registered_name {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = TransportAdapter::shutdown(transport.as_ref()).await;
+            event_loop.abort();
+            return Err(e);
+        }
+    };
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "joined",
+                "name": registered_name,
+                "robot_id": robot_gang_id.as_str(),
+                "libp2p_id": robot_libp2p_id,
+                "operator_id": operator.gang_id.as_str(),
+                "relay_addr": token.relay_addr,
+                "serving": !once,
+            }))?
+        );
+    } else {
+        println!();
+        println!(
+            "  ✔ joined: registered with operator {} as '{registered_name}'",
+            operator.gang_id
+        );
+        println!("    this robot: {robot_gang_id}");
+    }
+
+    if once {
+        let _ = TransportAdapter::shutdown(transport.as_ref()).await;
+        event_loop.abort();
+        return Ok(());
+    }
+
+    // 6. Stay online as the agent so the operator can deploy immediately.
+    if !json_output {
+        println!();
+        println!("Serving on the relay circuit. Press Ctrl-C to stop.");
+    }
+    let mut event_loop = event_loop;
+    tokio::select! {
+        r = &mut event_loop => {
+            if let Ok(Err(e)) = r { eprintln!("transport event loop error: {e}"); }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            if !json_output { println!("\nRobot stopped."); }
+        }
+    }
+    event_loop.abort();
+    Ok(())
 }
 
 /// `gang test-archetype`
