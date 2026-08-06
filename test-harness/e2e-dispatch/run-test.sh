@@ -63,14 +63,19 @@ RELAY_ADDR="$(cat "$ADDR_FILE")"
 echo "robot: dialing relay $RELAY_ADDR"
 
 LOG=/tmp/agent.log
-gang agent --data-dir /data -r "$RELAY_ADDR" > "$LOG" 2>&1 &
+# Create the log before tail starts: tail -f racing the agent's first write
+# dies with "cannot open" and the agent output never reaches the container log.
+: > "$LOG"
+gang agent --data-dir /data -r "$RELAY_ADDR" >> "$LOG" 2>&1 &
 AGENT_PID=$!
 
 # Stream agent output to the container log as well
 tail -f "$LOG" &
 
-# Wait for the agent to report its relay connection
-for _ in $(seq 1 30); do
+# Wait for the agent to report its relay connection. The agent only prints
+# this once its circuit reservation is held (i.e. it is actually dialable
+# through the relay), so publishing the id below really means "ready".
+for _ in $(seq 1 60); do
     grep -q "Connected to relay" "$LOG" && break
     sleep 1
 done
