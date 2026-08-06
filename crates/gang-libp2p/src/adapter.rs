@@ -356,6 +356,22 @@ impl Libp2pTransportAdapter {
         request_bytes: Vec<u8>,
         timeout: Duration,
     ) -> Result<Vec<u8>, TransportError> {
+        self.send_rpc_on(peer, ProtocolId::control(), request_bytes, timeout)
+            .await
+    }
+
+    /// Like [`Libp2pTransportAdapter::send_rpc_with_timeout`] but on an
+    /// explicit protocol, so callers can address `/ganglion/events/1.0` (or any
+    /// registered protocol) rather than only the control plane. The request
+    /// still rides the shared request-response behaviour; the negotiated
+    /// protocol determines which handler the robot dispatches to.
+    pub async fn send_rpc_on(
+        &self,
+        peer: &PeerId,
+        protocol: ProtocolId,
+        request_bytes: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, TransportError> {
         let libp2p_peer_id = self.resolve_peer(peer).await?;
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -363,7 +379,7 @@ impl Libp2pTransportAdapter {
             .send(SwarmCommand::SendRpc {
                 peer: peer.clone(),
                 libp2p_peer: libp2p_peer_id,
-                protocol: ProtocolId::control(),
+                protocol,
                 request: request_bytes,
                 timeout,
                 reply: reply_tx,
@@ -372,6 +388,37 @@ impl Libp2pTransportAdapter {
             .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))?;
 
         await_reply_within(peer, reply_rx, timeout).await
+    }
+
+    /// Subscribe to a robot's `/ganglion/events/1.0` feed and return the batch
+    /// of [`AgentEvent`]s the robot streams in response.
+    ///
+    /// A fresh subscription (`since_seq == None`) yields a
+    /// [`AgentEvent::PresenceSnapshot`] followed by the robot's retained recent
+    /// events; a resume (`since_seq == Some(cursor)`) yields only newer events.
+    /// The response is decoded with the shared framed CBOR codec
+    /// ([`gang_core::events::decode_events`]); an empty response means the robot
+    /// refused the subscription (unauthorized) or produced nothing.
+    ///
+    /// Local buffering is bounded: the whole batch is bounded by the robot's
+    /// retention window, and the request-response ceiling bounds the wire size.
+    pub async fn subscribe_events(
+        &self,
+        peer: &PeerId,
+        since_seq: Option<u64>,
+        timeout: Duration,
+    ) -> Result<Vec<gang_core::events::AgentEvent>, TransportError> {
+        let req = match since_seq {
+            Some(cursor) => gang_core::events::EventSubscribeRequest::since(cursor),
+            None => gang_core::events::EventSubscribeRequest::fresh(),
+        };
+        let request_bytes = gang_core::message::encode_message(&req)
+            .map_err(|e| TransportError::ProtocolNegotiation(format!("encode subscribe: {e}")))?;
+        let response = self
+            .send_rpc_on(peer, ProtocolId::events(), request_bytes, timeout)
+            .await?;
+        gang_core::events::decode_events(&response)
+            .map_err(|e| TransportError::ProtocolNegotiation(format!("decode events: {e}")))
     }
 
     /// Look up the libp2p peer id for a connected gang peer.
