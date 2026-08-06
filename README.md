@@ -61,6 +61,43 @@ System Information:
   12D3-c2ace1a32fd67c0c8c66976336bceead invoked 'diagnostics' v0.1.0 at 18:47:54 -> Success
 ```
 
+### 2a. Configure in one command: `gang init`
+
+Before standing up a fleet, get from *installed* to *configured* in one step. `gang init` detects your network archetype (like `gang diagnose`), generates your operator identity, writes a **default-deny** `policy.toml` with commented example rules, and an operator `config.toml`, then prints exactly what to run next:
+
+```bash
+gang init          # add -y/--yes for non-interactive; --json to script it
+```
+
+```console
+$ gang init --yes
+=== gang init — configuring Ganglion ===
+
+Data dir: /home/you/.gang
+
+[1/4] Network archetype
+  Detected:  regulated-facility (80% confidence)
+  Transport: No network connectivity detected — use offline signed bundles
+
+[2/4] Operator identity
+  Generated: 12D3-56e26108b7dd14c146597c33e5ffa839
+  Key file:  /home/you/.gang/identity.key
+
+[3/4] Policy + config
+  Wrote default-deny policy: /home/you/.gang/policy.toml
+  Wrote operator config:     /home/you/.gang/config.toml  (host_key_policy = strict)
+
+[4/4] You're configured. What to run next
+
+  # Try a live local fleet on loopback right now:
+  gang up
+  ...
+```
+
+The detected archetype (here `regulated-facility`, because the machine capturing this had no network) drives the tailored next-steps panel — a relay/agent/`peer add` sequence for a networked deployment, or a `gang sign` + sneakernet path when air-gapped.
+
+It is interactive on a TTY (a couple of skippable prompts with safe defaults) and fully non-interactive in CI or a pipe. Re-running it never clobbers your identity, policy, or config without `--force` — it reports what already exists and moves on.
+
 ### 2b. One command to a real local fleet: `gang up`
 
 `gang demo` runs the whole pipeline in a single process and then tears itself down — nothing is left running to talk to. `gang up` is the next step: it stands up a **real** local fleet you can drive with real `gang` commands, and it is a pure composition of the pieces documented below (relay + agent + sign + peer add).
@@ -197,6 +234,7 @@ ganglion/
 ## CLI commands
 
 ```
+gang init [-y] [--force] [--json]     Guided first-run setup (archetype, identity, policy, config)
 gang identity show                    Show your PeerId and public key
 gang identity generate [--force]      Generate a new Ed25519 keypair
 gang sign <wasm> [--capabilities C]   Sign a WASM component, produce .manifest.cbor

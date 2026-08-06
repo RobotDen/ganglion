@@ -28,6 +28,123 @@ Three frequently-typed subcommands have short aliases:
 pointer to the self-contained demo: `Run 'gang demo' for a self-contained
 end-to-end demo. Docs: docs/QUICKSTART.md`.
 
+## First-run setup
+
+### `gang init`
+
+Guided first-run setup — take a fresh install to *configured* in one command.
+It collapses the read-the-architecture-docs phase into a single step:
+
+1. **Archetype detection** — runs the same network probes as `gang diagnose`
+   and prints the detected archetype plus its transport implication.
+2. **Identity** — generates the operator identity if none exists (never
+   clobbers an existing key without `--force`).
+3. **Policy + config** — writes a genuinely default-deny `policy.toml` (no
+   capability group permitted; commented example rules to uncomment) plus an
+   operator `config.toml` (defaults, incl. `host_key_policy = strict`).
+4. **Next steps** — prints a short, correctly-ordered panel of real commands
+   tailored to the detected archetype.
+
+Interactive on a TTY (a couple of skippable `[Y/n]` prompts with safe
+defaults); fully non-interactive when stdin is a pipe/CI or `--yes` is given.
+Re-running is idempotent: existing files are reported and kept, never
+overwritten without `--force`.
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--data-dir <path>` | Global flag: point setup at this directory instead of `~/.gang` (identity, policy, config land here). |
+| `--force` | Overwrite an existing identity, policy, or config. Regenerating the identity rotates your peer id. |
+| `-y`, `--yes` (alias `--non-interactive`) | Skip prompts and use safe defaults. Implied when stdin is not a TTY. |
+| `--json` | Emit the resulting setup (identity id, archetype, paths, next commands) as a single JSON object instead of the text panel. |
+
+```console
+$ gang init --yes
+=== gang init — configuring Ganglion ===
+
+Data dir: /home/you/.gang
+
+[1/4] Network archetype
+  Detected:  regulated-facility (80% confidence)
+  Transport: No network connectivity detected — use offline signed bundles
+
+[2/4] Operator identity
+  Generated: 12D3-56e26108b7dd14c146597c33e5ffa839
+  Key file:  /home/you/.gang/identity.key
+
+[3/4] Policy + config
+  Wrote default-deny policy: /home/you/.gang/policy.toml
+  Wrote operator config:     /home/you/.gang/config.toml  (host_key_policy = strict)
+
+[4/4] You're configured. What to run next
+
+  # Try a live local fleet on loopback right now:
+  gang up
+
+  # For a real deployment (regulated-facility):
+  #   Air-gapped: skip the relay. Sign capabilities here with `gang sign` and move the signed bundle to the robot over approved media.
+  gang sign <component.wasm> --capabilities <groups> # on this workstation
+  # transfer <component>.wasm + .manifest.cbor over approved media
+  gang deploy <name> <signed.wasm>       # on the robot host
+
+  # Enrol a robot (gang pair is coming; today use peer add):
+  gang peer add <name> <robot-libp2p-id> --relay <relay-multiaddr>
+
+Run `gang status` to review your configuration.
+```
+
+The next-steps panel adapts to the archetype: on a networked archetype it prints
+a `gang relay` / `gang agent` / `gang peer add` / `gang deploy` sequence (with the
+relay pinned to TCP 443 for `enterprise-dmz`); on `regulated-facility` it prints
+the offline `gang sign` + transfer path shown above.
+
+Re-running without `--force` is non-destructive:
+
+```console
+$ gang init --yes
+...
+[2/4] Operator identity
+  Already present: 12D3-56e26108b7dd14c146597c33e5ffa839
+  Key file:        /home/you/.gang/identity.key
+  (use --force to regenerate — this rotates your peer id)
+
+[3/4] Policy + config
+  Policy exists, kept:   /home/you/.gang/policy.toml
+  Config exists, kept:   /home/you/.gang/config.toml
+...
+```
+
+With `--json`:
+
+```console
+$ gang init --json
+{
+  "archetype": {
+    "confidence": 0.8,
+    "name": "regulated-facility",
+    "transport": "No network connectivity detected — use offline signed bundles"
+  },
+  "config_created": true,
+  "config_path": "/home/you/.gang/config.toml",
+  "data_dir": "/home/you/.gang",
+  "identity": {
+    "created": true,
+    "existed": false,
+    "id": "12D3-674dcd7773b8dc307afa077bc49efd5d",
+    "key_path": "/home/you/.gang/identity.key"
+  },
+  "next_commands": [
+    "gang up",
+    "gang sign <component.wasm> --capabilities <groups>",
+    "gang deploy <name> <signed.wasm>"
+  ],
+  "policy_created": true,
+  "policy_path": "/home/you/.gang/policy.toml",
+  "status": "configured"
+}
+```
+
 ## Status
 
 ### `gang status`

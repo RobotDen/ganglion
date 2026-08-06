@@ -6,6 +6,19 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **`gang init` — guided first-run setup.** Takes a fresh install from
+  *installed* to *configured* in one command: runs the same archetype probes as
+  `gang diagnose` and prints the detected network archetype plus its transport
+  implication; generates the operator identity if none exists; writes a
+  genuinely **default-deny** `policy.toml` (no capability group permitted, with
+  clearly-commented example rules to uncomment) and an operator `config.toml`
+  (defaults incl. `host_key_policy = strict`); and prints a short,
+  correctly-ordered next-steps panel tailored to the archetype (every printed
+  command is real and runnable). Interactive on a TTY with skippable `[Y/n]`
+  prompts, and degrades cleanly to non-interactive on a pipe/CI or with `--yes`.
+  Idempotent: re-running reports and keeps existing files, never clobbering an
+  identity, policy, or config without `--force`. Flags: `--data-dir`, `--force`,
+  `-y`/`--yes` (alias `--non-interactive`), `--json`.
 - **`gang up` — one command to a real local fleet.** Bridges the gap between
   `gang demo` (self-contained, tears itself down) and a hand-wired
   relay/agent/deploy. In one foreground command it stands up a loopback circuit

@@ -42,6 +42,58 @@ cd ganglion
 cargo install --path crates/gang-cli
 ```
 
+## 1b. Configure in one command: `gang init`
+
+Before wiring anything by hand, go from *installed* to *configured* in one step.
+`gang init` detects your network archetype (the same probes as `gang diagnose`),
+generates your operator identity, writes a **default-deny** `policy.toml` with
+commented example rules and an operator `config.toml`, and prints exactly what to
+run next. It is interactive on a terminal and fully non-interactive in CI or a
+pipe (or with `-y`); re-running never clobbers an existing identity, policy, or
+config without `--force`.
+
+```console
+$ gang init --yes
+=== gang init — configuring Ganglion ===
+
+Data dir: /home/you/.gang
+
+[1/4] Network archetype
+  Detected:  regulated-facility (80% confidence)
+  Transport: No network connectivity detected — use offline signed bundles
+
+[2/4] Operator identity
+  Generated: 12D3-56e26108b7dd14c146597c33e5ffa839
+  Key file:  /home/you/.gang/identity.key
+
+[3/4] Policy + config
+  Wrote default-deny policy: /home/you/.gang/policy.toml
+  Wrote operator config:     /home/you/.gang/config.toml  (host_key_policy = strict)
+
+[4/4] You're configured. What to run next
+
+  # Try a live local fleet on loopback right now:
+  gang up
+
+  # For a real deployment (regulated-facility):
+  #   Air-gapped: skip the relay. Sign capabilities here with `gang sign` and move the signed bundle to the robot over approved media.
+  gang sign <component.wasm> --capabilities <groups> # on this workstation
+  # transfer <component>.wasm + .manifest.cbor over approved media
+  gang deploy <name> <signed.wasm>       # on the robot host
+
+  # Enrol a robot (gang pair is coming; today use peer add):
+  gang peer add <name> <robot-libp2p-id> --relay <relay-multiaddr>
+
+Run `gang status` to review your configuration.
+```
+
+The archetype above is `regulated-facility` only because the machine capturing
+this transcript had no network; on a networked host the panel prints a
+`gang relay` / `gang agent` / `gang peer add` / `gang deploy` sequence instead.
+The manual steps in sections 3–8 are exactly what that panel points at, wired by
+hand. Full flag reference: [`gang init` in the CLI
+reference](CLI_REFERENCE.md#gang-init).
+
 ## 2. Run the demo
 
 The fastest way to see the whole pipeline — keygen, signing, deploy, policy
