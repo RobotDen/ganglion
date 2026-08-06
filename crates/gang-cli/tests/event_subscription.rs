@@ -13,15 +13,19 @@
 //!   `PolicyDecision{Deny}` on the feed;
 //! - a legit deploy+invoke puts `AuditAppended` + `PolicyDecision{Allow}` on
 //!   the feed;
-//! - an UNAUTHORIZED operator (not in the robot's trust store) is refused.
+//! - an UNAUTHORIZED operator (not in the robot's trust store) is refused;
+//! - PUSH latency (ADR-024): an event emitted on the robot reaches the operator
+//!   over the real relay circuit in well under the old 1.5 s poll cadence
+//!   (asserted `< 500 ms`).
 //!
 //! The bounded broadcast-lag → `Gap` path and the ring-eviction → `Gap` path
 //! are covered deterministically by unit tests in `gang_ros::events`.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use gang_core::capability::CapabilityGroup;
 use gang_core::events::AgentEvent;
 use gang_core::identity::{Keypair, PeerId};
@@ -50,6 +54,16 @@ where
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Collect events from a live push feed until `idle` passes with nothing new
+/// (the snapshot + retained catch-up burst arrives back-to-back).
+async fn drain(stream: &mut gang_libp2p::EventStream, idle: Duration) -> Vec<AgentEvent> {
+    let mut out = Vec::new();
+    while let Ok(Some(ev)) = tokio::time::timeout(idle, stream.next()).await {
+        out.push(ev);
+    }
+    out
 }
 
 async fn start_adapter(config: Libp2pConfig) -> Arc<Libp2pTransportAdapter> {
@@ -287,14 +301,16 @@ can_deploy = true
     let robot = robot_id(&robot_transport);
 
     // A fresh subscription yields a presence snapshot at its head.
-    let batch = operator
+    let mut stream = operator
         .subscribe_events(&robot, None, Duration::from_secs(WAIT_SECS))
         .await
         .expect("subscribe");
+    let first = stream.next().await;
     assert!(
-        matches!(batch.first(), Some(AgentEvent::PresenceSnapshot { .. })),
-        "fresh subscribe must start with a presence snapshot: {batch:?}"
+        matches!(first, Some(AgentEvent::PresenceSnapshot { .. })),
+        "fresh subscribe must start with a presence snapshot: {first:?}"
     );
+    drop(stream);
 
     // Deny path: deploy a process/spawn capability the policy forbids.
     let denied = deploy(
@@ -331,11 +347,13 @@ can_deploy = true
     invoke(&operator, &robot, "diag").await;
 
     // Re-subscribe (fresh): the feed now carries the deny, the allow, and the
-    // audit append over the real circuit.
-    let batch = operator
+    // audit append over the real circuit (delivered in the catch-up burst).
+    let mut stream = operator
         .subscribe_events(&robot, None, Duration::from_secs(WAIT_SECS))
         .await
         .expect("resubscribe");
+    let batch = drain(&mut stream, Duration::from_millis(500)).await;
+    drop(stream);
 
     let has = |pred: fn(&AgentEvent) -> bool| batch.iter().any(pred);
     assert!(
@@ -392,9 +410,74 @@ async fn circuit_subscription_rejects_unauthorized_operator() {
     let result = operator
         .subscribe_events(&robot, None, Duration::from_secs(WAIT_SECS))
         .await;
-    let err = result.expect_err("an unauthorized operator must be refused");
+    // `EventStream` is not `Debug`, so match rather than `expect_err`.
+    let err = match result {
+        Ok(_) => panic!("an unauthorized operator must be refused, but a feed opened"),
+        Err(e) => e,
+    };
     assert!(
-        err.to_string().contains("refused") || err.to_string().contains("unauthorized"),
+        err.to_string().contains("refused")
+            || err.to_string().contains("unauthorized")
+            || err.to_string().contains("refused the event subscription"),
         "refusal should be explicit: {err}"
+    );
+}
+
+/// ADR-024 PUSH latency: with the subscription open and its catch-up drained,
+/// an event emitted on the robot must reach the operator over the real relay
+/// circuit promptly — far under the old 1.5 s poll cadence. We assert < 500 ms.
+#[tokio::test(flavor = "multi_thread")]
+async fn circuit_push_delivers_event_under_500ms() {
+    let dirs = tempfile::TempDir::new().unwrap();
+    let (_relay, relay_addr) = start_relay(&dirs.path().join("relay")).await;
+
+    // Empty trust store → dev-permissive: any operator may subscribe.
+    let robot_dir = dirs.path().join("robot");
+    let (agent, robot_transport) =
+        start_robot(&robot_dir, &relay_addr, base_agent_config(&robot_dir)).await;
+    let (operator, _operator_kp) =
+        connect_operator(&dirs.path().join("operator"), &relay_addr, &robot_transport).await;
+    let robot = robot_id(&robot_transport);
+
+    // Open the live push feed and drain the snapshot + retained catch-up.
+    let mut stream = operator
+        .subscribe_events(&robot, None, Duration::from_secs(WAIT_SECS))
+        .await
+        .expect("subscribe");
+    let head = stream.next().await;
+    assert!(
+        matches!(head, Some(AgentEvent::PresenceSnapshot { .. })),
+        "fresh subscribe must start with a presence snapshot: {head:?}"
+    );
+    let _ = drain(&mut stream, Duration::from_millis(400)).await;
+
+    // Emit a distinctive sentinel event on the robot and time its arrival at
+    // the operator. Nothing else emits in this window (heartbeats are 15 s
+    // apart), but match the sentinel to be robust against a stray beat.
+    const SENTINEL_UPTIME: u64 = 4_242_424;
+    let t0 = Instant::now();
+    agent.event_bus().publish(|seq| AgentEvent::Heartbeat {
+        seq,
+        ts: chrono::Utc::now(),
+        uptime_secs: SENTINEL_UPTIME,
+    });
+
+    let mut latency = None;
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(Duration::from_secs(WAIT_SECS), stream.next()).await
+    {
+        if matches!(ev, AgentEvent::Heartbeat { uptime_secs, .. } if uptime_secs == SENTINEL_UPTIME)
+        {
+            latency = Some(t0.elapsed());
+            break;
+        }
+    }
+    drop(stream);
+
+    let latency = latency.expect("the pushed sentinel event must arrive");
+    eprintln!("measured push latency over relay circuit: {latency:?}");
+    assert!(
+        latency < Duration::from_millis(500),
+        "push latency {latency:?} must be under 500ms (old poll was ~1.5s)"
     );
 }
