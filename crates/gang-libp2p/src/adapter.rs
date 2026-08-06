@@ -400,7 +400,8 @@ impl Libp2pTransportAdapter {
     /// [`gang_core::events::AgentEvent::Gap`] if the cursor predated the
     /// retained window.
     ///
-    /// The subscription is carried as a [`ControlMessage::SubscribeEvents`]
+    /// The subscription is carried as a
+    /// [`gang_core::message::ControlMessage::SubscribeEvents`]
     /// over the control protocol (see that message's docs for why). A robot
     /// that refuses the subscription (e.g. the operator is not trusted) returns
     /// an error, surfaced here as a typed [`TransportError`].

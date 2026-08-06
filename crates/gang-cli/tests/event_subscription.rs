@@ -89,7 +89,10 @@ async fn start_relay(dir: &Path) -> (Arc<Libp2pTransportAdapter>, String) {
         }
     })
     .await;
-    (relay.clone(), format!("{tcp_addr}/p2p/{}", relay.libp2p_peer_id()))
+    (
+        relay.clone(),
+        format!("{tcp_addr}/p2p/{}", relay.libp2p_peer_id()),
+    )
 }
 
 fn base_agent_config(dir: &Path) -> AgentConfig {
@@ -165,7 +168,10 @@ async fn connect_operator(
         use gang_core::transport::TransportAdapter;
         robot.local_peer_id()
     };
-    let circuit = format!("{relay_dial_addr}/p2p-circuit/p2p/{}", robot.libp2p_peer_id());
+    let circuit = format!(
+        "{relay_dial_addr}/p2p-circuit/p2p/{}",
+        robot.libp2p_peer_id()
+    );
     operator
         .dial_multiaddr(&circuit)
         .await
@@ -186,7 +192,12 @@ fn robot_id(robot: &Libp2pTransportAdapter) -> PeerId {
     robot.local_peer_id()
 }
 
-fn signed_manifest(author: &Keypair, name: &str, group: CapabilityGroup, component: &[u8]) -> Vec<u8> {
+fn signed_manifest(
+    author: &Keypair,
+    name: &str,
+    group: CapabilityGroup,
+    component: &[u8],
+) -> Vec<u8> {
     let manifest = ComponentManifest {
         schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
         name: name.into(),
@@ -314,10 +325,7 @@ can_deploy = true
     )
     .await;
     assert!(
-        matches!(
-            ok,
-            gang_core::message::ControlMessage::InvokeResult { .. }
-        ),
+        matches!(ok, gang_core::message::ControlMessage::InvokeResult { .. }),
         "diagnostics deploy must succeed: {ok:?}"
     );
     invoke(&operator, &robot, "diag").await;

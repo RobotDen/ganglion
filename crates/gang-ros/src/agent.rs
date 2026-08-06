@@ -256,30 +256,35 @@ impl RobotAgent {
             .map(|g| g.name())
             .collect::<Vec<_>>()
             .join(",");
-        match self.policy.evaluate(&manifest.declared_capabilities, deployer) {
+        match self
+            .policy
+            .evaluate(&manifest.declared_capabilities, deployer)
+        {
             Ok(()) => {
                 let deployer = deployer.clone();
                 let group_summary = group_summary.clone();
-                self.event_bus.publish(move |seq| AgentEvent::PolicyDecision {
-                    seq,
-                    ts: chrono::Utc::now(),
-                    operator_peer: deployer,
-                    capability_group: group_summary,
-                    decision: PolicyOutcome::Allow,
-                    reason: "capabilities permitted by policy".into(),
-                });
+                self.event_bus
+                    .publish(move |seq| AgentEvent::PolicyDecision {
+                        seq,
+                        ts: chrono::Utc::now(),
+                        operator_peer: deployer,
+                        capability_group: group_summary,
+                        decision: PolicyOutcome::Allow,
+                        reason: "capabilities permitted by policy".into(),
+                    });
             }
             Err(e) => {
                 let reason = e.to_string();
                 let deployer_ev = deployer.clone();
-                self.event_bus.publish(move |seq| AgentEvent::PolicyDecision {
-                    seq,
-                    ts: chrono::Utc::now(),
-                    operator_peer: deployer_ev,
-                    capability_group: group_summary,
-                    decision: PolicyOutcome::Deny,
-                    reason,
-                });
+                self.event_bus
+                    .publish(move |seq| AgentEvent::PolicyDecision {
+                        seq,
+                        ts: chrono::Utc::now(),
+                        operator_peer: deployer_ev,
+                        capability_group: group_summary,
+                        decision: PolicyOutcome::Deny,
+                        reason,
+                    });
                 return Err(e.into());
             }
         }
@@ -574,23 +579,25 @@ impl RobotAgent {
             let operator = record.operator_peer_id.clone();
             let group = record.capabilities_used.join(",");
             let reason = reason.clone();
-            self.event_bus.publish(move |seq| AgentEvent::PolicyDecision {
-                seq,
-                ts: chrono::Utc::now(),
-                operator_peer: operator,
-                capability_group: group,
-                decision: PolicyOutcome::Deny,
-                reason,
-            });
+            self.event_bus
+                .publish(move |seq| AgentEvent::PolicyDecision {
+                    seq,
+                    ts: chrono::Utc::now(),
+                    operator_peer: operator,
+                    capability_group: group,
+                    decision: PolicyOutcome::Deny,
+                    reason,
+                });
         }
 
         // Every appended record is announced on the feed (secret-free
         // projection) so `gang logs` and live viewers see it.
         let projection = AuditProjection::from(&record);
-        self.event_bus.publish(move |seq| AgentEvent::AuditAppended {
-            seq,
-            record: projection,
-        });
+        self.event_bus
+            .publish(move |seq| AgentEvent::AuditAppended {
+                seq,
+                record: projection,
+            });
     }
 
     /// Access the agent's in-process event bus (for live in-process consumers
@@ -888,11 +895,13 @@ impl RobotAgent {
             loop {
                 ticker.tick().await;
                 let uptime = hb_agent.uptime_secs();
-                hb_agent.event_bus.publish(move |seq| AgentEvent::Heartbeat {
-                    seq,
-                    ts: chrono::Utc::now(),
-                    uptime_secs: uptime,
-                });
+                hb_agent
+                    .event_bus
+                    .publish(move |seq| AgentEvent::Heartbeat {
+                        seq,
+                        ts: chrono::Utc::now(),
+                        uptime_secs: uptime,
+                    });
             }
         });
 
@@ -910,7 +919,11 @@ impl RobotAgent {
                             seq,
                             ts: chrono::Utc::now(),
                             peer: peer_id,
-                            transport: if via_relay { "relay".into() } else { "direct".into() },
+                            transport: if via_relay {
+                                "relay".into()
+                            } else {
+                                "direct".into()
+                            },
                             via_relay,
                             state: ConnectionState::Up,
                         });
@@ -1159,7 +1172,10 @@ mod tests {
             .build_event_subscription(&trusted.peer_id(), &EventSubscribeRequest::fresh())
             .await
             .expect("trusted operator may subscribe");
-        assert!(matches!(ok.first(), Some(AgentEvent::PresenceSnapshot { .. })));
+        assert!(matches!(
+            ok.first(),
+            Some(AgentEvent::PresenceSnapshot { .. })
+        ));
     }
 
     #[tokio::test]
@@ -1239,7 +1255,10 @@ can_deploy = true
                 }
             )
         });
-        assert!(denied, "a PolicyDecision Deny should be on the feed: {batch:?}");
+        assert!(
+            denied,
+            "a PolicyDecision Deny should be on the feed: {batch:?}"
+        );
     }
 
     #[tokio::test]

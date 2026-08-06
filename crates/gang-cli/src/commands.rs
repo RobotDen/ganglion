@@ -202,13 +202,6 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
             for cmd in &available {
                 println!("  gang {cmd}");
             }
-            if !wip.is_empty() {
-                println!();
-                println!("WIP commands:");
-                for cmd in &wip {
-                    println!("  gang {cmd}  [WIP]");
-                }
-            }
         }
     }
 
@@ -4007,8 +4000,10 @@ pub async fn transport_stats(
         .transport
         .send_rpc_with_timeout(
             &remote.gang_id,
-            gang_core::message::encode_message(&gang_core::message::ControlMessage::ListCapabilities)
-                .map_err(|e| anyhow::anyhow!("encode: {e}"))?,
+            gang_core::message::encode_message(
+                &gang_core::message::ControlMessage::ListCapabilities,
+            )
+            .map_err(|e| anyhow::anyhow!("encode: {e}"))?,
             timeout,
         )
         .await
@@ -4106,7 +4101,10 @@ fn event_ts(ev: &gang_core::events::AgentEvent) -> Option<chrono::DateTime<chron
 /// Whether this event is a log-relevant line (`gang logs` shows audit + policy).
 fn is_log_event(ev: &gang_core::events::AgentEvent) -> bool {
     use gang_core::events::AgentEvent::*;
-    matches!(ev, AuditAppended { .. } | PolicyDecision { .. } | Gap { .. })
+    matches!(
+        ev,
+        AuditAppended { .. } | PolicyDecision { .. } | Gap { .. }
+    )
 }
 
 /// Render one event as a human-readable line.
@@ -4417,10 +4415,9 @@ pub async fn list(format: &OutputFormat) -> anyhow::Result<()> {
         };
         let (reachable, detail) = match prepare_remote(&target) {
             Ok(remote) => match probe_presence(&remote, probe_timeout).await {
-                Ok(Some((version, uptime))) => (
-                    true,
-                    format!("v{version}, up {}", format_duration(uptime)),
-                ),
+                Ok(Some((version, uptime))) => {
+                    (true, format!("v{version}, up {}", format_duration(uptime)))
+                }
                 Ok(None) => (false, "no presence snapshot".to_string()),
                 Err(e) => (false, format!("unreachable: {e}")),
             },

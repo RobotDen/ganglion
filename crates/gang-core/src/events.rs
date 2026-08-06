@@ -2,9 +2,11 @@
 //!
 //! Ganglion exposes a long-lived, authenticated event feed on
 //! [`crate::protocol::PROTOCOL_EVENTS`] (`/ganglion/events/1.0`). A subscriber
-//! sends a single [`EventSubscribeRequest`] and receives a length-prefixed CBOR
-//! sequence of [`AgentEvent`]s, framed with the SAME codec used for control
-//! messages ([`crate::message::encode_message`] / [`decode_message`]).
+//! sends a single [`EventSubscribeRequest`](crate::events::EventSubscribeRequest)
+//! and receives a length-prefixed CBOR sequence of
+//! [`AgentEvent`](crate::events::AgentEvent)s, framed with the SAME codec used
+//! for control messages ([`crate::message::encode_message`] /
+//! [`decode_message`](crate::message::decode_message)).
 //!
 //! # What this module is (and is not)
 //!
@@ -15,7 +17,7 @@
 //!
 //! # No secrets on the wire
 //!
-//! Every [`AgentEvent`] variant is constrained to non-secret material:
+//! Every [`AgentEvent`](crate::events::AgentEvent) variant is constrained to non-secret material:
 //! identities (public peer ids), capability-group names, policy verdicts and
 //! human-readable reasons, and byte/timing counters. There is deliberately no
 //! variant carrying private keys, pairing-token secrets, component bytes, or

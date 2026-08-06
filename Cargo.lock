@@ -1591,6 +1591,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "futures",
  "gang-core",
  "gang-libp2p",
  "gang-wasm-host",

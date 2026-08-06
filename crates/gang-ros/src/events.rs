@@ -110,11 +110,7 @@ impl EventBus {
     /// oldest retained event: that many events were evicted from the window
     /// before the caller could see them, and the caller should surface a
     /// [`AgentEvent::Gap`] before the returned events.
-    pub fn recent_since(
-        &self,
-        since: Option<EventSeq>,
-        max: usize,
-    ) -> RecentBatch {
+    pub fn recent_since(&self, since: Option<EventSeq>, max: usize) -> RecentBatch {
         let ring = self.ring.lock().expect("event ring poisoned");
 
         let oldest_retained = ring.front().and_then(|e| e.seq());

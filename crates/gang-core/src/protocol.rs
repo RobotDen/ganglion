@@ -17,8 +17,12 @@ pub const PROTOCOL_BULK: &str = "/ganglion/bulk/1.0";
 pub const PROTOCOL_EVENTS: &str = "/ganglion/events/1.0";
 
 /// All known Ganglion stream protocols.
-pub const ALL_PROTOCOLS: &[&str] =
-    &[PROTOCOL_CONTROL, PROTOCOL_TOOL, PROTOCOL_BULK, PROTOCOL_EVENTS];
+pub const ALL_PROTOCOLS: &[&str] = &[
+    PROTOCOL_CONTROL,
+    PROTOCOL_TOOL,
+    PROTOCOL_BULK,
+    PROTOCOL_EVENTS,
+];
 
 /// Protocol identifier type for type safety.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
