@@ -10,8 +10,15 @@ pub const PROTOCOL_TOOL: &str = "/ganglion/tool/1.0";
 /// High-volume artifact transfer (log bundles, rosbags, diagnostic tarballs).
 pub const PROTOCOL_BULK: &str = "/ganglion/bulk/1.0";
 
+/// Authenticated robot→operator event subscription (presence, policy
+/// decisions, audit appends, connection state, heartbeats). See
+/// [`crate::events`]. A subscriber opens this protocol and receives a
+/// length-prefixed CBOR sequence of [`crate::events::AgentEvent`]s.
+pub const PROTOCOL_EVENTS: &str = "/ganglion/events/1.0";
+
 /// All known Ganglion stream protocols.
-pub const ALL_PROTOCOLS: &[&str] = &[PROTOCOL_CONTROL, PROTOCOL_TOOL, PROTOCOL_BULK];
+pub const ALL_PROTOCOLS: &[&str] =
+    &[PROTOCOL_CONTROL, PROTOCOL_TOOL, PROTOCOL_BULK, PROTOCOL_EVENTS];
 
 /// Protocol identifier type for type safety.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -41,6 +48,11 @@ impl ProtocolId {
     /// The bulk-transfer protocol identifier (`/ganglion/bulk/1.0`).
     pub fn bulk() -> Self {
         Self(PROTOCOL_BULK.into())
+    }
+
+    /// The event-subscription protocol identifier (`/ganglion/events/1.0`).
+    pub fn events() -> Self {
+        Self(PROTOCOL_EVENTS.into())
     }
 }
 

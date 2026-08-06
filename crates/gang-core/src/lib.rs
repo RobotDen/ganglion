@@ -32,6 +32,8 @@ pub mod broker;
 pub mod capability;
 /// Error types shared across the crate.
 pub mod error;
+/// The robot→operator event subscription wire model.
+pub mod events;
 /// Peer identity, keypairs, and the local peer registry.
 pub mod identity;
 /// Signed component manifests and the trust store.
