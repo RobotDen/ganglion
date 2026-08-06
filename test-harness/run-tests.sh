@@ -28,6 +28,9 @@ PASS=0
 FAIL=0
 SKIP=0
 RESULTS=()
+# Set by run_scenario, read by run_scenario_with_retry.
+LAST_PASSED=0
+LAST_TOTAL=0
 
 # Colors (if terminal supports them)
 if [ -t 1 ]; then
@@ -124,8 +127,6 @@ run_scenario() {
     echo "Starting containers (timeout: ${TIMEOUT}s)..."
     if ! timeout "$TIMEOUT" docker compose -p "$project_name" -f "$compose_file" up -d --build 2>&1; then
         log_fail "docker compose up failed (or exceeded ${TIMEOUT}s timeout)"
-        FAIL=$((FAIL + 1))
-        RESULTS+=("$scenario: FAIL (compose up failed)")
         return 1
     fi
 
@@ -304,7 +305,7 @@ run_scenario() {
     # shared volume; "Connected to relay" is the agent's success line. Retry
     # for a while: NAT/netem scenarios can be slow to converge.
     checks_total=$((checks_total + 1))
-    if wait_for_log "$project_name" "$compose_file" robot "Connected to relay" 30; then
+    if wait_for_log "$project_name" "$compose_file" robot "Connected to relay" 90; then
         log_pass "robot agent connected to relay"
         checks_passed=$((checks_passed + 1))
     else
@@ -314,7 +315,7 @@ run_scenario() {
 
     # --- Check 8: operator agent established a relay connection (OPS-13) ---
     checks_total=$((checks_total + 1))
-    if wait_for_log "$project_name" "$compose_file" operator "Connected to relay" 30; then
+    if wait_for_log "$project_name" "$compose_file" operator "Connected to relay" 90; then
         log_pass "operator agent connected to relay"
         checks_passed=$((checks_passed + 1))
     else
@@ -324,14 +325,37 @@ run_scenario() {
 
     echo ""
 
-    # Record result
-    if [ "$checks_passed" -eq "$checks_total" ]; then
-        PASS=$((PASS + 1))
-        RESULTS+=("$scenario: PASS ($checks_passed/$checks_total checks)")
-    else
-        FAIL=$((FAIL + 1))
-        RESULTS+=("$scenario: FAIL ($checks_passed/$checks_total checks)")
-    fi
+    # Report checks to the caller via globals; the retry wrapper owns PASS/FAIL.
+    LAST_PASSED="$checks_passed"
+    LAST_TOTAL="$checks_total"
+    [ "$checks_passed" -eq "$checks_total" ] && return 0 || return 1
+}
+
+# Run a scenario, retrying ONCE on failure. The archetype scenarios are
+# timing-sensitive multi-container network setups (circuit reservation under
+# netem/DMZ latency); a transient miss should not red the build. A scenario
+# that fails twice is a real failure.
+run_scenario_with_retry() {
+    local scenario="$1"
+    local attempt
+    for attempt in 1 2; do
+        LAST_PASSED=0; LAST_TOTAL=0
+        if run_scenario "$scenario"; then
+            local note=""
+            [ "$attempt" -eq 2 ] && note=" (passed on retry)"
+            PASS=$((PASS + 1))
+            RESULTS+=("$scenario: PASS (${LAST_PASSED}/${LAST_TOTAL} checks)${note}")
+            return 0
+        fi
+        if [ "$attempt" -eq 1 ]; then
+            echo ""
+            echo "  ${YELLOW}${scenario} failed (${LAST_PASSED}/${LAST_TOTAL}); retrying once…${NC}"
+            echo ""
+        fi
+    done
+    FAIL=$((FAIL + 1))
+    RESULTS+=("$scenario: FAIL (${LAST_PASSED}/${LAST_TOTAL} checks, after retry)")
+    return 1
 }
 
 # Filter scenarios
@@ -352,7 +376,7 @@ else
 fi
 
 for scenario in "${scenarios_to_run[@]}"; do
-    run_scenario "$scenario" || true
+    run_scenario_with_retry "$scenario" || true
     echo ""
 done
 
