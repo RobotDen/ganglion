@@ -189,9 +189,9 @@ gang peer add robot-a 12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2 \
 
 ### Fleet status: what works today
 
-> **Built and verified:** everything local plus the connectivity layer AND the dispatch hop — `gang demo`, identity, component signing, the policy/audit pipeline, the relay server, robot agents that dial out, hold a circuit reservation, and stay connected (with retry), the peer registry, and **remote `deploy`/`run`/`caps` over the relay circuit** with SSH-style TOFU host-key verification, replay-protected control messages, and honest non-zero exits on failure. In-process integration tests drive the full Deploy→Invoke→List round-trip through a real relay circuit.
+> **Built and verified:** everything local plus the connectivity layer AND the dispatch hop — `gang demo`, identity, component signing, the policy/audit pipeline, the relay server, robot agents that dial out, hold a circuit reservation, and stay connected (with retry), the peer registry, and **remote `deploy`/`run`/`caps` over the relay circuit** with SSH-style TOFU host-key verification, replay-protected control messages, and honest non-zero exits on failure. **The presence/streaming layer is built too:** an authenticated, bounded robot→operator event feed (presence, policy decisions, audit appends, connection changes, heartbeats) powers **`gang logs` (`--follow`/`--since`/JSONL), `gang connect` (live status view), `gang transport-stats` (real live-circuit counters), and `gang list` (live reachability from a presence probe)** — see [ADR-022](docs/adr/ADR-022-event-subscription-layer.md). In-process integration tests drive the full Deploy→Invoke→List round-trip AND the event subscription (authorized subscribe → presence snapshot; policy deny → `PolicyDecision{Deny}`; invoke → `AuditAppended`; unauthorized subscribe refused) through a real relay circuit.
 >
-> **In progress:** the presence/streaming layer — fleet discovery and long-lived robot sessions. `logs`, `list`, `connect`, and `transport-stats` depend on it and remain stubs (they exit non-zero with a `[WIP]` message; `transport-stats` prints clearly-labeled simulated data). Tracked in [ADR-020](docs/adr/ADR-020-remote-dispatch-and-e2e-test.md) and the roadmap issues.
+> **In progress:** `gang tui` — a full-screen fleet dashboard rendering the same event subscription API. A genuine push substream (today the feed rides the control protocol as a bounded poll; a distinct `/ganglion/events/1.0` substream is reserved) awaits a libp2p-stream dependency. Tracked in [ADR-022](docs/adr/ADR-022-event-subscription-layer.md) and the roadmap issues.
 
 See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full walkthrough with real transcripts, including how peer IDs, relays, and multiaddrs fit together.
 
@@ -264,12 +264,13 @@ gang agent [--data-dir] [-r relay]    Run a robot agent (local or remote mode)
 gang deploy <robot> <wasm>            Deploy a signed capability to a robot
 gang run <robot> <cap> [args...]      Invoke an installed capability
 gang caps <robot>                     List capabilities installed on a robot
-gang logs <robot> [--follow]          Stream robot logs [WIP]
+gang logs <robot> [--follow]          Stream a robot's audit + policy events
+        [--since <dur>]               (--format json for JSONL; --follow to tail)
 gang demo                             Self-contained end-to-end demo
 gang up [--data-dir] [--port]         Stand up a real local fleet (relay+agent+signed sample)
         [--force] [--json]
 gang diagnose [robot]                 Detect network archetype, recommend transport config
-gang transport-stats <robot>          Show per-transport connection statistics [WIP: simulated]
+gang transport-stats <robot>          Real per-transport stats for the live circuit
 gang test-archetype <archetype>       Launch a Docker network scenario
 gang fetch <cid> [-o path]            Retrieve an artifact by CID
 gang push <path> [--content-type T]   Publish a file to the content store
@@ -290,11 +291,11 @@ gang config set <key> <value>         Set a configuration value
 gang config init [--force]            Initialize default config file
 gang completions <shell>              Generate shell completions (bash/zsh/fish)
 gang relay [--port P]                 Run a circuit relay v2 server
-gang list                             List reachable robots in the fleet [WIP]
-gang connect <robot>                  Establish a session via relay [WIP]
+gang list                             List registered robots + live reachability
+gang connect <robot>                  Live status view (presence + audit tail)
 ```
 
-Commands tagged `[WIP]` wait on the presence/streaming layer — see [Fleet status](#fleet-status-what-works-today) above. See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full details, flags, and examples.
+See [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) for full details, flags, and examples.
 
 ## Capability groups
 

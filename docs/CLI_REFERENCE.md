@@ -248,11 +248,11 @@ registration (air-gapped or scripted), `gang peer add` remains the fallback.
 
 ### `gang status`
 
-Show Ganglion version, identity status, available commands, and WIP commands.
+Show Ganglion version, identity status, and available commands.
 
 ```bash
 $ gang status
-Ganglion v2.0.0
+Ganglion v2.1.0
 
 Identity:   12D3-a1b2c3d4e5f67890a1b2c3d4e5f67890
 Key file:   /home/user/.gang/identity.key
@@ -268,12 +268,10 @@ Available commands:
   gang sign
   gang agent
   ...
-
-WIP commands (need the presence/streaming layer):
-  gang logs  [WIP]
-  gang list  [WIP]
-  gang connect  [WIP]
-  gang transport-stats (simulated data)  [WIP]
+  gang logs
+  gang connect
+  gang list
+  gang transport-stats
 ```
 
 Supports `--format json` for structured output.
@@ -481,19 +479,36 @@ Capabilities on 'robot-a':
 
 ## Log streaming
 
-### `gang logs <robot>` [WIP]
+### `gang logs <robot>`
 
-Stream logs from a robot.
+Subscribe to a robot's event feed over the relay circuit and print its
+`AuditAppended` and `PolicyDecision` events. Without `--follow`, prints the
+recent context from the robot's retained window and exits; with `--follow`,
+tails live (bounded poll; Ctrl-C to stop). Honest non-zero exit if the robot is
+unreachable or refuses the subscription.
 
 ```bash
-$ gang logs robot-42 --follow
+$ gang logs up-robot
+2026-08-06T04:42:35Z  policy ALLOW  ganglion:diagnostics/collect  by 12D3-715cfb78…  (capabilities permitted by policy)
+2026-08-06T04:42:36Z  audit  diagnostics v0.1.0  by 12D3-715cfb78…  -> success  caps=[ganglion:diagnostics/collect@1.0]
+
+$ gang --format json logs up-robot
+{"type":"policy_decision","seq":3,"ts":"2026-08-06T04:42:35.666895790Z","operator_peer":"12D3-715cfb78…","capability_group":"ganglion:diagnostics/collect","decision":"allow","reason":"capabilities permitted by policy"}
+{"type":"audit_appended","seq":6,"record":{"operator_peer":"12D3-715cfb78…","component_name":"diagnostics","component_version":"0.1.0","capabilities_used":["ganglion:diagnostics/collect@1.0"],"exit":"success","started_at":"2026-08-06T04:42:35.993907211Z","ended_at":"2026-08-06T04:42:36.004347163Z"}}
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--follow` | Continuously stream new log entries (like `tail -f`). |
+| `--follow` | Continuously tail new events (like `tail -f`); Ctrl-C to stop. |
+| `--since <dur>` | Only show events newer than this (e.g. `30s`, `5m`, `2h`, `1d`). |
+| `-p, --peer <id>` | Explicit peer id (bypasses name/prefix resolution). |
+| `-r, --relay <multiaddr>` | Relay multiaddr (overrides registry and config defaults). |
 
-> Note: `[WIP]` — requires the presence/streaming layer (fleet discovery and long-lived robot sessions), which is not yet implemented. The command exits non-zero with a WIP message (with `--format json` it first prints a `{"status":"unavailable",...}` object). Remote deploy/run/caps work today; see `gang status`.
+The global `--format json` prints one JSON object per event (JSONL).
+
+> The feed is authenticated: when the robot has a trust store configured, only
+> trusted operators may subscribe (the same rule as deploy). Events carry no
+> secret material. See [ADR-022](adr/ADR-022-event-subscription-layer.md).
 
 ## Diagnostics
 
@@ -638,27 +653,34 @@ Recommendations:
 
 If `robot` is specified, probes are run on the remote robot. If omitted, probes the local network.
 
-### `gang transport-stats <robot>` [WIP: simulated]
+### `gang transport-stats <robot>`
 
-Show per-transport connection statistics for a connected peer. There is no live
-connection yet, so the command prints a clearly-labeled SIMULATED example. With
-`--format json` the payload includes `"simulated": true`.
+Show REAL per-transport statistics for the live circuit to a robot, read from
+the operator transport's connected-peer counters after a probe request. Errors
+if the robot is unreachable.
 
 ```bash
-$ gang transport-stats robot-42
-Transport statistics for: robot-42  [WIP]
-(No live connection — showing SIMULATED example output.)
-
-  Transport:       quic
-  Via relay:       false
-  Connect time:    145ms
-  Messages:        42 sent, 38 received
-  Bytes:           12.2 KB sent, 152.7 KB received
-  Last RTT:        23ms
-  DCUtR:           attempted=true, succeeded=true
-  Uptime:          1h 0m
+$ gang transport-stats up-robot
+Transport statistics for 'up-robot' (live circuit):
+  Transport:       relay
+  Via relay:       true
+  Connect time:    187ms
+  Messages:        1 sent, 1 received
+  Bytes:           0 B sent, 173 B received
+  Last RTT:        2ms
+  DCUtR:           attempted=false, succeeded=false
+  Uptime:          0s
   Reconnections:   0
 ```
+
+| Flag | Description |
+|------|-------------|
+| `-p, --peer <id>` | Explicit peer id (bypasses name/prefix resolution). |
+| `-r, --relay <multiaddr>` | Relay multiaddr (overrides registry and config defaults). |
+| `--timeout <secs>` | Overall timeout in seconds (default 30). |
+
+With `--format json` the payload is the raw `TransportStats` plus the resolved
+`peer`.
 
 ### `gang test-archetype <archetype>`
 
@@ -964,25 +986,41 @@ Supported shells: bash, zsh, fish, elvish, powershell.
 
 ## Fleet management
 
-### `gang list` [WIP]
+### `gang list`
 
-List reachable robots in the fleet.
-
-> Note: `[WIP]` — requires the presence/streaming layer, which is not yet implemented. The command exits non-zero with a WIP message (`--format json` prints `{"status":"unavailable",...}` first). Remote deploy/run/caps work today; see `gang status`.
-
-### `gang connect <robot>` [WIP]
-
-Establish a session with a robot via relay.
+List registered robot-agent peers with live reachability from a quick presence
+probe over each peer's relay circuit. Reachable robots show their version and
+uptime.
 
 ```bash
-$ gang connect robot-42 --prefer-transport quic,tcp
+$ gang list
+  [up  ] up-robot  12D3-9a5912fe7fc1bfe9393eda322180ccee  v2.1.0, up 12s
+```
+
+With `--format json`, prints an array of `{name, peer_id, reachable, detail}`.
+Robots with no dialable id / relay, or that are unreachable, are marked `down`
+with the reason in `detail`.
+
+### `gang connect <robot>`
+
+Attach a live status view to a robot — presence, heartbeats, connection-state
+changes, and a live tail of policy/audit events — as scrolling text. Ctrl-C
+detaches. The non-TUI precursor to the `gang tui` dashboard, built on the same
+event subscription API.
+
+```bash
+$ gang connect up-robot
+Connected to 'up-robot'. Live status (Ctrl-C to detach):
+presence  v2.1.0  up 12s  archetype=unknown  caps=[diagnostics]
+2026-08-06T04:42:46Z  heartbeat  up 0s
+2026-08-06T04:42:46Z  conn UP    12D3-463492a3…  transport=direct via_relay=false
+2026-08-06T04:42:58Z  policy ALLOW  ganglion:diagnostics/collect  by 12D3-ebbc6e31…  (capabilities permitted by policy)
+2026-08-06T04:42:59Z  audit  diagnostics v0.1.0  by 12D3-ebbc6e31…  -> success  caps=[ganglion:diagnostics/collect@1.0]
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--prefer-transport <t1,t2>` | Preferred transport order for happy-eyeballs selection. |
-
-> Note: `[WIP]` — requires the presence/streaming layer, which is not yet implemented. The command exits non-zero with a WIP message (`--format json` prints `{"status":"unavailable",...}` first). Remote deploy/run/caps work today; see `gang status`.
+| `--prefer-transport <t1,t2>` | Preferred transport order (accepted; reserved for happy-eyeballs selection). |
 
 ## Exit codes
 

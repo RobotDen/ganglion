@@ -535,6 +535,35 @@ The `[log lines]` include the same permissive-policy and empty-trust-store
 warnings as step 6 — expected in this dev flow. Clean up with
 `rm -rf /tmp/gang-agent-my-robot` when done.
 
+## 8b. Watch your fleet
+
+Once a robot is reachable, you can observe it live over the same relay circuit —
+presence, every policy decision, and every audit append — without opening a
+shell on it:
+
+```bash
+# Which registered robots are reachable right now?
+$ gang list
+  [up  ] up-robot  12D3-9a5912fe7fc1bfe9393eda322180ccee  v2.1.0, up 12s
+
+# Print the robot's recent policy/audit events (add --follow to tail live,
+# --since 5m to bound the window, --format json for JSONL).
+$ gang logs up-robot
+2026-…Z  policy ALLOW  ganglion:diagnostics/collect  by 12D3-715cfb78…  (capabilities permitted by policy)
+2026-…Z  audit  diagnostics v0.1.0  by 12D3-715cfb78…  -> success  caps=[ganglion:diagnostics/collect@1.0]
+
+# Attach a live status view (presence + heartbeat + connection + audit tail);
+# Ctrl-C detaches.
+$ gang connect up-robot
+
+# Real per-transport counters for the live circuit.
+$ gang transport-stats up-robot
+```
+
+The feed is authenticated the same way as deploy: when the robot has a trust
+store configured, only trusted operators may subscribe. Events carry no secret
+material. See [ADR-022](adr/ADR-022-event-subscription-layer.md).
+
 ## 9. Author a real capability
 
 The repo's eight `gang-capability-*` crates (including the diagnostics

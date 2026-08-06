@@ -6,6 +6,40 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **Presence & event-streaming layer — `gang logs`/`connect`/`transport-stats`/`list`
+  are now real.** An authenticated, bounded robot→operator event feed carries
+  presence, policy decisions (allow and deny), audit appends, connection changes,
+  and heartbeats. A versioned, `#[non_exhaustive]` `AgentEvent` enum lives in
+  `gang_core::events`, framed with the existing CBOR length-prefixed codec (no
+  second codec). The robot side (`gang_ros::events`) is a bounded event bus: a
+  `tokio::sync::broadcast` channel (capacity 256) for live consumers where a
+  lagging subscriber degrades to a `Gap{dropped}` marker instead of growing
+  memory, plus a 256-entry recent-events ring for polling/late subscribers.
+  Emission is wired at the real sites — `PolicyDecision` at every deploy
+  `policy.evaluate` and at sandbox policy-denied invokes, `AuditAppended` on
+  every audit append, a `PresenceSnapshot` per subscription, a 15 s `Heartbeat`,
+  and `ConnectionChanged` from transport events. Subscribing is authenticated by
+  the **same trust rule as deploy** (only trusted operators when a trust store is
+  configured; loud dev-permissive when empty); an unauthorized peer is never
+  streamed to, and events carry **no secret material**. `gang logs <robot>
+  [--follow] [--since <dur>]` prints audit + policy events as human lines or
+  JSONL; `gang connect <robot>` is a live scrolling status view (the non-TUI
+  precursor to the dashboard); `gang transport-stats <robot>` returns **real**
+  live-circuit counters (the simulated data is gone); `gang list` shows
+  registered robots with live reachability from a presence probe. The operator
+  API is `Libp2pTransportAdapter::subscribe_events`. A distinct
+  `/ganglion/events/1.0` protocol id is reserved (and served) for a future push
+  substream; today the feed rides the control protocol as a bounded poll because
+  libp2p 0.56's request-response always negotiates the first protocol and
+  `libp2p-stream` is not in the workspace dependency table. Full design and
+  trust/resource model in
+  [ADR-022](docs/adr/ADR-022-event-subscription-layer.md); coverage is unit tests
+  for the bounded bus (lag→`Gap`, ring eviction→`Gap`, subscriber auth) plus an
+  in-process integration test over a real relay circuit (authorized subscribe →
+  snapshot; deny → `PolicyDecision{Deny}`; invoke → `AuditAppended`; unauthorized
+  refused). No new workspace dependencies (`futures` — already in the table — is
+  added to `gang-ros`).
+
 - **`gang pair` / `gang join` — one-line robot enrollment.** The Tailscale move
   for robots: the operator runs `gang pair` and gets ONE copy-paste line; the
   robot runs `gang join gang1_…`, dials out, and appears in `gang peer list`

@@ -59,3 +59,9 @@ Each ADR follows a consistent format:
 | # | Title | Status |
 |---|-------|--------|
 | 021 | [Pairing-token enrollment (`gang pair` / `gang join`)](ADR-021-pairing-token-enrollment.md) | Accepted; implemented |
+
+### Presence & streaming (v0.8)
+
+| # | Title | Status |
+|---|-------|--------|
+| 022 | [Robot→operator event subscription layer](ADR-022-event-subscription-layer.md) | Accepted; implemented |
