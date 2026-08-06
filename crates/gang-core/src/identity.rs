@@ -345,7 +345,16 @@ impl PeerRegistry {
 }
 
 /// Default path for the gang config directory.
+///
+/// Honors the `GANG_HOME` environment variable when set (used by
+/// `gang up --data-dir` and `gang --data-dir …` to point the whole CLI at a
+/// self-contained fleet directory), falling back to `~/.gang`.
 pub fn default_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("GANG_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".gang")
@@ -556,6 +565,32 @@ mod tests {
         if let Some(v) = prev {
             unsafe {
                 std::env::set_var("GANG_KEY_PATH", v);
+            }
+        }
+    }
+
+    #[test]
+    fn default_config_dir_honors_gang_home() {
+        let prev = std::env::var_os("GANG_HOME");
+
+        unsafe {
+            std::env::set_var("GANG_HOME", "/custom/fleet");
+        }
+        assert_eq!(default_config_dir(), PathBuf::from("/custom/fleet"));
+        // The registry and trust-store paths derive from it.
+        assert_eq!(
+            default_registry_path(),
+            PathBuf::from("/custom/fleet/peers.json")
+        );
+
+        unsafe {
+            std::env::remove_var("GANG_HOME");
+        }
+        assert!(default_config_dir().ends_with(".gang"));
+
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var("GANG_HOME", v);
             }
         }
     }
