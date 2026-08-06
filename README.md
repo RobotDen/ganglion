@@ -157,20 +157,35 @@ gang agent --data-dir /var/lib/gang-agent \
 
 The agent requests a circuit reservation on the relay (that reservation is what makes the robot reachable), retries the relay every 5 seconds until it logs `Connected to relay. Waiting for operator connections...` — printed only once the reservation is actually held, so seeing it means the robot is dialable — and prints its dialable id (`Peer ID (libp2p/dial): 12D3KooW…`) plus the exact `gang peer add` line to run on your workstation.
 
-### 5. Register, deploy, run (workstation)
+### 5. Enrol in one line, then deploy and run (workstation)
+
+Skip the copy-paste of ids. On your workstation, `gang pair` prints one line to run on the robot; the robot dials out and enrols itself:
 
 ```bash
-gang identity show   # created on first use — `gang demo` in step 2 already made one
-gang peer add robot-a 12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2 \
-    --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk \
-    --role robot-agent
+# workstation — prints a `gang join gang1_…` line and waits:
+gang pair --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk --name robot-a
 
+# robot — the ONE line gang pair printed:
+gang join gang1_pWd2ZXJzaW9uAWpyZWxheV9hZGRyeFEvaXA0…
+```
+
+The operator records the robot under the identity **libp2p authenticated on the wire** — never a self-report — so a robot can only enrol as an identity whose key it holds. The pairing token is single-use and expiring. Now drive it:
+
+```bash
 gang deploy robot-a my-tool.wasm   # DeployCapability over the relay circuit
 gang run robot-a my-tool           # InvokeCapability; prints the tool's output
 gang caps robot-a                  # ListCapabilities
 ```
 
-`robot-a` is a **local alias** stored in `~/.gang/peers.json`. Register the robot with the **dialable libp2p id** (`12D3KooW…`) the agent prints at startup — the Ed25519-derived gang trust id is embedded in it and stored alongside. Name resolution never touches DNS.
+**Manual fallback** (air-gapped or scripted): register by hand with the **dialable libp2p id** (`12D3KooW…`) the agent prints at startup — the Ed25519-derived gang trust id is embedded in it and stored alongside:
+
+```bash
+gang peer add robot-a 12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2 \
+    --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk \
+    --role robot-agent
+```
+
+`robot-a` is a **local alias** stored in `~/.gang/peers.json`. Name resolution never touches DNS. See [ADR-021](docs/adr/ADR-021-pairing-token-enrollment.md) for the pairing trust model.
 
 ### Fleet status: what works today
 
@@ -237,6 +252,10 @@ ganglion/
 
 ```
 gang init [-y] [--force] [--json]     Guided first-run setup (archetype, identity, policy, config)
+gang pair [-r relay] [--name N]       Enrol a robot in one line (operator side; prints the robot's `gang join` line)
+          [--expires D] [--qr] [--timeout S] [--json]
+gang join <token> [--name N]          Join a fleet from a pairing token (robot side; the one line gang pair prints)
+          [--once] [--timeout S] [--json]
 gang identity show                    Show your PeerId and public key
 gang identity generate [--force]      Generate a new Ed25519 keypair
 gang sign <wasm> [--capabilities C]   Sign a WASM component, produce .manifest.cbor

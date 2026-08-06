@@ -145,6 +145,105 @@ $ gang init --json
 }
 ```
 
+## Robot enrollment
+
+One-line robot onboarding — the operator runs one command, the robot runs one
+copy-paste line, and the robot appears in `gang peer list` ready to drive. See
+[ADR-021](adr/ADR-021-pairing-token-enrollment.md) for the trust model.
+
+### `gang pair`
+
+Run on the **operator** machine. Mints a short-lived, single-use *pairing token*
+bound to the relay and this operator's identity, prints ONE line to run on the
+robot, then waits: when the robot dials out and enrolls, the operator records it —
+under the identity libp2p authenticated on the wire, never a self-report — so it
+appears in `gang peer list` ready for `gang deploy`/`gang run`.
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--relay <multiaddr>` (`-r`) | Relay the robot should dial (default: `default_relay` from config). The dialable form printed by `gang relay`/`gang up`. |
+| `--name <name>` | Name to register the robot under (default: `robot-<short-id>`). The robot may also request a name via `gang join --name`. |
+| `--expires <duration>` | Token lifetime: `90s`, `15m`, `1h`, or a bare number of seconds (default: `15m`). |
+| `--qr` | Also render the robot line as a QR code (currently prints a note that QR is a follow-up; see ADR-021). |
+| `--timeout <secs>` | Give up waiting for the robot after this many seconds (default: `300`). |
+| `--json` | Emit the token/relay/operator facts as JSON, then wait as usual. |
+
+```console
+$ gang pair --relay /ip4/127.0.0.1/tcp/45633/p2p/12D3KooWM3tJywVGi7MjE4g6RWEGhxK6C2iSyeomoCeyN8RVEoRU --name field-01
+=== gang pair — enroll a robot in one line ===
+
+Relay:    /ip4/127.0.0.1/tcp/45633/p2p/12D3KooWM3tJywVGi7MjE4g6RWEGhxK6C2iSyeomoCeyN8RVEoRU
+Operator: 12D3-74aded42b4ed2b3e88d1a4cedd8ec501
+Expires:  2026-08-06T03:50:13.922+00:00
+
+Run this ONE line on the robot:
+
+    gang join gang1_pWd2ZXJzaW9uAWpyZWxheV9hZGRyeFEvaXA0LzEyNy4wLjAuMS90Y3AvNDU2MzMvcDJwLzEyRDNLb29XTTN0Snl3VkdpN01qRTRnNlJXRUdoeEs2QzJpU3llb21vQ2V5TjhSVkVvUlVyb3BlcmF0b3JfbGlicDJwX2lkeDQxMkQzS29vV0FzTjIz...
+
+Waiting up to 300s for the robot to dial out and enroll… (Ctrl-C to cancel)
+
+  ✔ paired: field-01  (12D3-d0d9d07c0b8480d876a10cf1e05750c2)
+
+The robot is now in your fleet. Drive it:
+  gang deploy field-01 <signed.wasm>
+  gang run field-01 <capability>
+  gang peer list
+```
+
+> The token line is long — it self-describes the relay and operator so the robot
+> needs no other configuration. QR output is a documented follow-up (ADR-021):
+> `--qr` prints the copy-paste line rather than adding an unapproved dependency.
+
+### `gang join <token>`
+
+Run on the **robot** — the ONE line printed by `gang pair`. Decodes the token,
+loads or generates this robot's identity, dials out to the relay, reserves a
+circuit, and enrolls with the operator the token names (whose identity libp2p
+authenticates end-to-end). Then it keeps serving as the agent so the operator can
+deploy immediately — exactly like `gang agent`.
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--name <name>` | Name to request from the operator (default: `robot-<short-id>`). |
+| `--once` | Enroll and exit instead of staying online as the agent. |
+| `--timeout <secs>` | Overall budget for the enrollment exchange (default: `60`). |
+| `--json` | Emit the enrollment result as JSON. |
+
+```console
+$ gang join gang1_pWd2ZXJzaW9uAWpyZWxheV9hZGRy… --name field-01
+Joining fleet via /ip4/127.0.0.1/tcp/45633/p2p/12D3KooWM3tJywVGi7MjE4g6RWEGhxK6C2iSyeomoCeyN8RVEoRU…
+
+  ✔ joined: registered with operator 12D3-74aded42b4ed2b3e88d1a4cedd8ec501 as 'field-01'
+    this robot: 12D3-d0d9d07c0b8480d876a10cf1e05750c2
+
+Serving on the relay circuit. Press Ctrl-C to stop.
+```
+
+Back on the operator, the robot is now a normal fleet member:
+
+```console
+$ gang peer list
+NAME             PEER ID          DIAL ID          ROLE           RELAY
+field-01         12D3-d0d9d07c0b8 12D3KooWG32VJCM1 robot-agent /ip4/127.0.0.1/tcp/45633/p2p/12D3KooWM3tJywVGi7MjE4g6RWEGhxK6C2iSyeomoCeyN8RVEoRU
+
+$ gang deploy field-01 diagnostics.wasm
+Deployed 'diagnostics' to robot 'field-01' (via relay)
+
+$ gang run field-01 diagnostics
+System Information:
+  Hostname:  vm
+  ...
+```
+
+The token is single-use and expiring: a reused or expired token is rejected, and
+the operator only ever records the id libp2p authenticated on the wire — a robot
+cannot enroll as an identity whose key it does not hold. If you prefer manual
+registration (air-gapped or scripted), `gang peer add` remains the fallback.
+
 ## Status
 
 ### `gang status`

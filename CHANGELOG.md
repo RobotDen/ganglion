@@ -6,6 +6,29 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **`gang pair` / `gang join` — one-line robot enrollment.** The Tailscale move
+  for robots: the operator runs `gang pair` and gets ONE copy-paste line; the
+  robot runs `gang join gang1_…`, dials out, and appears in `gang peer list`
+  ready for `gang deploy`/`run`/`caps` — no manual id copying in either
+  direction. `gang pair` mints a short-lived, single-use **pairing token** bound
+  to the relay and the operator's identity (versioned, URL-safe, self-describing
+  with expiry), reserves a relay circuit, and waits; `gang join` decodes the
+  token, loads/generates the robot identity, trusts the operator, dials the
+  operator through the circuit, enrolls, and then stays online as the agent
+  (`--once` to enroll and exit). The operator records the robot under the
+  identity **libp2p authenticates on the wire** — never a self-report — and
+  accepts a self-reported dialable id only after confirming it embeds that same
+  key; tokens are single-use and expiring, and forged/tampered/expired/reused
+  tokens are rejected. Full trust model in
+  [ADR-021](docs/adr/ADR-021-pairing-token-enrollment.md); token mint/verify
+  logic (with base64url + CBOR encoding, no new dependencies) lives in
+  `gang_core::pairing` with unit tests, and loopback integration tests cover the
+  happy path plus reuse/expiry/wrong-identity rejections. Flags: `gang pair`
+  `--relay`, `--name`, `--expires`, `--qr`, `--timeout`, `--json`; `gang join`
+  `--name`, `--once`, `--timeout`, `--json`; both honor the global `--data-dir`.
+  QR output is a documented follow-up (no terminal-QR crate is in the workspace
+  dependency table; `--qr` prints the copy-paste line rather than adding an
+  unapproved dependency). The manual `gang peer add` remains as the fallback.
 - **`gang init` — guided first-run setup.** Takes a fresh install from
   *installed* to *configured* in one command: runs the same archetype probes as
   `gang diagnose` and prints the detected network archetype plus its transport

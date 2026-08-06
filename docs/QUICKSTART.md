@@ -81,8 +81,9 @@ Data dir: /home/you/.gang
   # transfer <component>.wasm + .manifest.cbor over approved media
   gang deploy <name> <signed.wasm>       # on the robot host
 
-  # Enrol a robot (gang pair is coming; today use peer add):
-  gang peer add <name> <robot-libp2p-id> --relay <relay-multiaddr>
+  # Enrol a robot in one line (operator waits; robot runs the printed line):
+  gang pair --relay <relay-multiaddr> --name <name>
+  #   ... or register manually: gang peer add <name> <robot-libp2p-id> --relay <relay-multiaddr>
 
 Run `gang status` to review your configuration.
 ```
@@ -377,9 +378,49 @@ warns loudly that it is running a PERMISSIVE dev policy with trust checks
 disabled; production agents get a default-deny policy file and a populated
 trust store (see [SECURITY.md](SECURITY.md)).
 
-## 7. Register the robot on your workstation
+## 7. Enrol the robot in one line: `gang pair`
 
-Paste the line the agent printed (naming it whatever you like):
+The Tailscale move. On your **workstation**, run `gang pair` and it prints one
+line to run on the robot. When the robot runs it, the robot dials out, enrolls,
+and appears in your peer list — no copying identifiers in either direction.
+
+```console
+$ gang pair --relay /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk --name robot-a
+=== gang pair — enroll a robot in one line ===
+
+Relay:    /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
+Operator: 12D3-74aded42b4ed2b3e88d1a4cedd8ec501
+Expires:  2026-08-06T03:50:13.922+00:00
+
+Run this ONE line on the robot:
+
+    gang join gang1_pWd2ZXJzaW9uAWpyZWxheV9hZGRyeFEvaXA0…
+
+Waiting up to 300s for the robot to dial out and enroll…
+```
+
+On the **robot**, paste that one line:
+
+```console
+$ gang join gang1_pWd2ZXJzaW9uAWpyZWxheV9hZGRyeFEvaXA0…
+Joining fleet via /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i…
+
+  ✔ joined: registered with operator 12D3-74aded42b4ed2b3e88d1a4cedd8ec501 as 'robot-a'
+    this robot: 12D3-6ca0419fa75b4ba889669086076df590
+
+Serving on the relay circuit. Press Ctrl-C to stop.
+```
+
+Back on the workstation, `gang pair` confirms and exits; the robot is now a
+normal fleet member. The operator records the robot under the identity **libp2p
+authenticated on the wire** — never a self-report — so a robot can only enrol as
+an identity whose key it holds. The token is single-use and expiring. See
+[ADR-021](adr/ADR-021-pairing-token-enrollment.md) for the trust model.
+
+### Manual fallback: `gang peer add`
+
+If you can't run `gang join` on the robot (air-gapped, scripted provisioning),
+paste the line the agent printed at startup instead:
 
 ```console
 $ gang peer add robot-a 12D3KooWK8sozDa46nfm4yhZysi4XRp69QUBuZ8b6M3pza54BNz2 \
@@ -394,9 +435,7 @@ Registered peer 'robot-a':
 
 Note the gang identity was **derived** from the dialable id you pasted — the
 base58 libp2p id embeds the robot's Ed25519 public key. From now on `robot-a`
-resolves to that identity + relay (`gang peer list` shows the mapping). This
-is the entire "establishing a connection to a robot" story: robot dials relay
-and reserves a circuit, you record the robot's identity and relay locally.
+resolves to that identity + relay (`gang peer list` shows the mapping).
 
 ## 8. Sign, deploy, run
 

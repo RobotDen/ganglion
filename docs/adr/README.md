@@ -53,3 +53,9 @@ Each ADR follows a consistent format:
 | # | Title | Status |
 |---|-------|--------|
 | 020 | [Remote dispatch via control protocol and e2e test](ADR-020-remote-dispatch-and-e2e-test.md) | Accepted; partially implemented |
+
+### Onboarding (v0.7)
+
+| # | Title | Status |
+|---|-------|--------|
+| 021 | [Pairing-token enrollment (`gang pair` / `gang join`)](ADR-021-pairing-token-enrollment.md) | Accepted; implemented |
