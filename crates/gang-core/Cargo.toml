@@ -21,7 +21,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
 serde_json = { workspace = true }
-libp2p-identity = { version = "0.2", features = ["ed25519", "serde"] }
+libp2p-identity = { version = "0.3", features = ["ed25519", "serde"] }
 bytes = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 glob-match = { workspace = true }
