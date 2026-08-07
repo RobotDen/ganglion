@@ -17,6 +17,20 @@ pub struct OperatorConfig {
     /// Identity verification policy: "strict" (default), "tofu", or "none".
     #[serde(default = "default_host_key_policy")]
     pub host_key_policy: String,
+
+    /// Operator-defined bandwidth profiles, merged with the built-ins when a
+    /// `--profile <name>` is resolved. Built-in names take precedence.
+    #[serde(default)]
+    pub bandwidth_profiles: Vec<gang_core::bandwidth::BandwidthProfile>,
+
+    /// Webhook URL alerts POST to (Slack-incoming-webhook compatible; any
+    /// endpoint accepting JSON works). `gang alert --webhook` overrides it.
+    #[serde(default)]
+    pub alert_webhook: Option<String>,
+
+    /// Alerting rules evaluated by `gang alert check`.
+    #[serde(default)]
+    pub alert_rules: Vec<gang_core::alert::AlertRule>,
 }
 
 impl Default for OperatorConfig {
@@ -28,6 +42,9 @@ impl Default for OperatorConfig {
         Self {
             default_relay: None,
             host_key_policy: default_host_key_policy(),
+            bandwidth_profiles: Vec::new(),
+            alert_webhook: None,
+            alert_rules: Vec::new(),
         }
     }
 }
@@ -86,7 +103,7 @@ impl OperatorConfig {
 }
 
 /// `gang status` — show version, identity, and capability summary.
-pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn status(format: &OutputFormat, html_path: Option<&str>) -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
 
     // Check identity
@@ -99,6 +116,11 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
     } else {
         "not generated (run `gang identity generate`)".to_string()
     };
+
+    // Fleet-status HTML export short-circuits the normal listing output.
+    if let Some(path) = html_path {
+        return write_fleet_status_html(path, version, &identity_status);
+    }
 
     // Registry count
     let reg_dir = registry_dir();
@@ -3973,6 +3995,251 @@ pub async fn diagnose(robot: Option<&str>, format: &crate::OutputFormat) -> anyh
     Ok(())
 }
 
+/// `gang new tool <name>` — the guided capability author loop. Scaffolds the
+/// project (delegating to `capability_scaffold`), then prints the remaining
+/// sign + publish steps so a signed tool reaches the open registry in one go.
+pub async fn new_tool(name: &str, language: &str, output_dir: Option<&str>) -> anyhow::Result<()> {
+    capability_scaffold(name, language, output_dir).await?;
+    println!("  4. Test:    cargo test   (in {name}/)");
+    println!("  5. Publish: gang registry publish {name}.component.wasm  (open, signed registry)");
+    println!();
+    println!(
+        "Every published tool is signed and declares its capabilities up front. \
+         Full author loop: docs/CAPABILITY_AUTHOR_GUIDE.md"
+    );
+    Ok(())
+}
+
+/// Build the fleet-status HTML page from local state and write it to `path`.
+fn write_fleet_status_html(path: &str, version: &str, identity: &str) -> anyhow::Result<()> {
+    use crate::fleet_html::{AuditRow, FleetStatus, PeerRow};
+    use gang_core::identity::Role;
+
+    let config = OperatorConfig::load();
+
+    let peer_registry =
+        gang_core::identity::PeerRegistry::load(&gang_core::identity::default_registry_path())
+            .unwrap_or_default();
+    let peers: Vec<PeerRow> = peer_registry
+        .list()
+        .map(|(name, e)| {
+            let role = match e.role {
+                Role::RobotAgent => "robot-agent",
+                Role::Operator => "operator",
+                Role::Relay => "relay",
+            };
+            PeerRow {
+                name: name.to_string(),
+                peer_id: e.peer_id.to_string(),
+                role: role.to_string(),
+                relays: e.relay_addrs.join(", "),
+                libp2p_id: e.libp2p_id.clone().unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    let registry_count = match gang_core::registry::Registry::open(&registry_dir()) {
+        Ok(reg) => reg.list().len(),
+        Err(_) => 0,
+    };
+
+    // Recent audit, newest first, capped.
+    let audit_log = gang_core::audit::AuditLog::new(gang_core::audit::AuditLog::default_path(), 0);
+    let mut records = audit_log.read_all().unwrap_or_default();
+    records.reverse();
+    let recent_audit: Vec<AuditRow> = records
+        .iter()
+        .take(25)
+        .map(|r| AuditRow {
+            component: r.component_name.clone(),
+            version: r.component_version.clone(),
+            operator: abbrev_id(&r.operator_peer_id.to_string()),
+            status: gang_core::events::exit_status_label(&r.exit_status).to_string(),
+            started_at: r.started_at.to_rfc3339(),
+            capabilities: r.capabilities_used.join(", "),
+        })
+        .collect();
+
+    let data = FleetStatus {
+        version: version.to_string(),
+        identity: identity.to_string(),
+        default_relay: config.default_relay.clone(),
+        registry_count,
+        peers,
+        recent_audit,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    let html = crate::fleet_html::render(&data);
+    std::fs::write(path, html).with_context(|| format!("writing fleet-status HTML to {path}"))?;
+    println!("Wrote fleet-status page to {path}");
+    Ok(())
+}
+
+/// Abbreviate a peer id for compact display.
+fn abbrev_id(id: &str) -> String {
+    if id.len() > 16 {
+        format!("{}…", &id[..16])
+    } else {
+        id.to_string()
+    }
+}
+
+/// `gang alert` — the metric→threshold→webhook alerting primitive.
+///
+/// `check` evaluates configured rules for `metric` against `value` and fires a
+/// webhook for each breach. `test` fires one sample alert to confirm the
+/// webhook wiring. `--dry-run` prints the payload instead of POSTing. Delivery
+/// is a JSON POST via `curl` (kept out of the core so gang-core stays
+/// dependency-free); Slack incoming webhooks and any JSON endpoint work.
+pub async fn alert_check(
+    metric: &str,
+    value: f64,
+    webhook: Option<&str>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use gang_core::alert::webhook_payload;
+
+    let config = OperatorConfig::load();
+    let rules: Vec<_> = config
+        .alert_rules
+        .iter()
+        .filter(|r| r.metric == metric)
+        .collect();
+    if rules.is_empty() {
+        println!(
+            "No alert rules configured for metric '{metric}'. Add rules under [[alert_rules]] in ~/.gang/config.toml."
+        );
+        return Ok(());
+    }
+
+    let url = webhook.map(str::to_string).or(config.alert_webhook.clone());
+    let mut fired = 0;
+    for rule in rules {
+        if rule.breached(value) {
+            let payload = webhook_payload(rule, value);
+            println!("BREACH  {}", rule.summary(value));
+            deliver_webhook(url.as_deref(), &payload, dry_run)?;
+            fired += 1;
+        } else {
+            println!(
+                "ok      {}: {} = {} (threshold not breached)",
+                rule.name, metric, value
+            );
+        }
+    }
+    if fired == 0 {
+        println!("No rules breached; nothing sent.");
+    }
+    Ok(())
+}
+
+/// `gang alert test` — fire one sample alert to confirm webhook delivery.
+pub async fn alert_test(webhook: Option<&str>, dry_run: bool) -> anyhow::Result<()> {
+    use gang_core::alert::{AlertRule, Comparator, webhook_payload};
+
+    let config = OperatorConfig::load();
+    let url = webhook.map(str::to_string).or(config.alert_webhook.clone());
+    let sample = AlertRule {
+        name: "sample-alert".into(),
+        metric: "cpu_temp_c".into(),
+        comparator: Comparator::Gt,
+        threshold: 80.0,
+        cooldown_secs: 0,
+    };
+    let payload = webhook_payload(&sample, 91.5);
+    println!("Sample alert: {}", sample.summary(91.5));
+    deliver_webhook(url.as_deref(), &payload, dry_run)
+}
+
+/// Deliver a webhook payload. Prints it when `dry_run` or when no URL is set;
+/// otherwise POSTs it as JSON via `curl`.
+fn deliver_webhook(url: Option<&str>, payload: &str, dry_run: bool) -> anyhow::Result<()> {
+    match (url, dry_run) {
+        (_, true) | (None, _) => {
+            if url.is_none() && !dry_run {
+                println!(
+                    "(no webhook configured — showing payload; set alert_webhook or pass --webhook)"
+                );
+            }
+            println!("{payload}");
+            Ok(())
+        }
+        (Some(url), false) => {
+            let status = std::process::Command::new("curl")
+                .args([
+                    "-sS",
+                    "-X",
+                    "POST",
+                    "-H",
+                    "Content-Type: application/json",
+                    "--data-binary",
+                    payload,
+                    url,
+                ])
+                .status()
+                .map_err(|e| anyhow::anyhow!("failed to run curl to POST the webhook: {e}"))?;
+            if !status.success() {
+                anyhow::bail!("webhook POST failed (curl exit {:?})", status.code());
+            }
+            println!("Alert delivered to webhook.");
+            Ok(())
+        }
+    }
+}
+
+/// `gang profiles` — list the bandwidth profiles available for degraded-link
+/// streaming (built-ins plus any operator-defined ones from config).
+pub async fn profiles(format: &OutputFormat) -> anyhow::Result<()> {
+    use gang_core::bandwidth::BandwidthProfile;
+
+    let config = OperatorConfig::load();
+    let mut all = BandwidthProfile::builtins();
+    // Append custom profiles that don't shadow a built-in name.
+    let builtin_names: Vec<String> = all.iter().map(|p| p.name.clone()).collect();
+    for p in &config.bandwidth_profiles {
+        if !builtin_names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&p.name))
+        {
+            all.push(p.clone());
+        }
+    }
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&all)?);
+        }
+        OutputFormat::Text => {
+            println!("Bandwidth profiles (use with --profile <name>):");
+            println!();
+            for p in &all {
+                let rate = p
+                    .max_rate_hz
+                    .map(|hz| format!("{hz} Hz"))
+                    .unwrap_or_else(|| "unlimited".to_string());
+                let cap = p
+                    .max_bytes_per_message
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "none".to_string());
+                let builtin = if builtin_names.iter().any(|n| n == &p.name) {
+                    ""
+                } else {
+                    " (custom)"
+                };
+                println!("  {}{}", p.name, builtin);
+                println!("    {}", p.description);
+                println!(
+                    "    decimation 1/{}, rate {rate}, per-message cap {cap}",
+                    p.effective_decimation()
+                );
+                println!();
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `gang transport-stats` — show REAL per-transport statistics for the live
 /// circuit to a robot (from the operator transport's connected-peer counters).
 pub async fn transport_stats(
@@ -4059,10 +4326,17 @@ pub async fn transport_stats(
 
 // --- Event subscription commands (logs / connect / list) ---
 
-/// How often `--follow` / `connect` re-polls the robot's event feed. The feed
-/// rides request-response (see `ControlMessage::SubscribeEvents`), so a live
-/// tail is a bounded poll rather than a persistent push; a genuine push stream
-/// is the reserved `/ganglion/events/1.0` direct-substream path.
+/// Idle window that marks the end of the initial snapshot + retained catch-up
+/// burst on a freshly-opened push feed (ADR-024). The catch-up frames arrive
+/// back-to-back; once this long passes with no new frame, non-follow `gang
+/// logs` has the full recent context and stops. Heartbeats (every 15 s) are far
+/// enough apart that this never truncates a live burst.
+pub(crate) const CATCHUP_IDLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// The default event-feed poll cadence, used only to honestly label the poll
+/// fallback in `logs`/`connect`/`tui` (e.g. "feed: poll (1.5s)"). The actual
+/// interval lives in `Libp2pConfig::events_poll_interval_ms`; this mirrors its
+/// default so the operator-visible label matches the real cadence.
 pub(crate) const EVENT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Parse a short duration like `30s`, `5m`, `2h`, `1d` into a `chrono::Duration`.
@@ -4201,8 +4475,10 @@ pub async fn logs(
     since: Option<&str>,
     explicit_peer: Option<&str>,
     explicit_relay: Option<&str>,
+    events_transport: Option<gang_libp2p::EventsTransport>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
+    let mode = events_transport.unwrap_or_default();
     let cutoff = match since {
         Some(spec) => Some(chrono::Utc::now() - parse_since(spec)?),
         None => None,
@@ -4237,27 +4513,26 @@ pub async fn logs(
         }
     };
 
-    // Initial fresh subscription: presence snapshot + recent context.
-    let batch = conn
+    // Open the live feed (push or poll per `mode`): the snapshot + retained
+    // context arrive first, then the feed stays open for the live tail.
+    let mut stream = conn
         .transport
-        .subscribe_events(&remote.gang_id, None, timeout)
+        .subscribe_events(&remote.gang_id, None, timeout, mode)
         .await
         .map_err(|e| anyhow::anyhow!("subscribing to '{display}' failed: {e}"))?;
+    if let OutputFormat::Text = format {
+        eprintln!("--- feed: {} ---", feed_label(stream.active_transport()));
+    }
 
-    let mut cursor: u64 = 0;
-    for ev in &batch {
-        if let Some(s) = ev.seq() {
-            cursor = cursor.max(match ev {
-                gang_core::events::AgentEvent::PresenceSnapshot { .. } => s,
-                _ => s + 1,
-            });
-        }
-        if is_log_event(ev) {
-            print(ev);
+    // Drain the initial snapshot + retained catch-up burst.
+    for ev in drain_catchup(&mut stream, CATCHUP_IDLE).await {
+        if is_log_event(&ev) {
+            print(&ev);
         }
     }
 
     if !follow {
+        drop(stream);
         conn.close().await;
         return Ok(());
     }
@@ -4265,15 +4540,32 @@ pub async fn logs(
     if let OutputFormat::Text = format {
         eprintln!("--- following '{display}' (Ctrl-C to stop) ---");
     }
-    let result = follow_events(&conn, &remote, cursor, timeout, is_log_event, &print).await;
+    let result = tail_events(&mut stream, is_log_event, &print).await;
+    drop(stream);
     conn.close().await;
     result
+}
+
+/// A short, honest label for the active event transport, including the poll
+/// cadence so an operator sees which path is live and how fresh it is.
+fn feed_label(active: gang_libp2p::EventsTransport) -> String {
+    match active {
+        gang_libp2p::EventsTransport::Poll => {
+            format!("poll ({:.1}s)", EVENT_POLL_INTERVAL.as_secs_f64())
+        }
+        _ => "push".to_string(),
+    }
 }
 
 /// `gang connect <robot>` — attach a live status view (presence + heartbeat +
 /// connection state + a live tail of policy/audit) as scrolling text until
 /// Ctrl-C. The non-TUI precursor to the dashboard; reuses the subscription API.
-pub async fn connect(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn connect(
+    robot: &str,
+    events_transport: Option<gang_libp2p::EventsTransport>,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    let mode = events_transport.unwrap_or_default();
     let target = resolve_target(robot, None, None)?;
     if target.is_local {
         anyhow::bail!(
@@ -4295,84 +4587,234 @@ pub async fn connect(robot: &str, format: &OutputFormat) -> anyhow::Result<()> {
         OutputFormat::Text => println!("{}", event_human_line(ev)),
     };
 
-    if let OutputFormat::Text = format {
-        println!("Connected to '{display}'. Live status (Ctrl-C to detach):");
-    }
-
-    let batch = conn
+    let mut stream = conn
         .transport
-        .subscribe_events(&remote.gang_id, None, timeout)
+        .subscribe_events(&remote.gang_id, None, timeout, mode)
         .await
         .map_err(|e| anyhow::anyhow!("connecting to '{display}' failed: {e}"))?;
 
-    let mut cursor: u64 = 0;
-    for ev in &batch {
-        if let Some(s) = ev.seq() {
-            cursor = cursor.max(match ev {
-                gang_core::events::AgentEvent::PresenceSnapshot { .. } => s,
-                _ => s + 1,
-            });
-        }
-        print(ev);
+    if let OutputFormat::Text = format {
+        println!(
+            "Connected to '{display}'  [feed: {}]. Live status (Ctrl-C to detach):",
+            feed_label(stream.active_transport())
+        );
     }
 
-    // Show everything in the live view.
+    // Show everything in the live view: the initial snapshot + retained context
+    // arrive first, then live events until Ctrl-C.
     let all = |_ev: &gang_core::events::AgentEvent| true;
-    let result = follow_events(&conn, &remote, cursor, timeout, all, &print).await;
+    let result = tail_events(&mut stream, all, &print).await;
+    drop(stream);
     conn.close().await;
     result
 }
 
-/// Poll the robot's event feed, printing new events until Ctrl-C. `keep`
-/// filters which events to print; `cursor` is the next-expected sequence.
-async fn follow_events(
-    conn: &RemoteConnection,
-    remote: &RemoteTarget,
-    mut cursor: u64,
-    timeout: std::time::Duration,
-    keep: impl Fn(&gang_core::events::AgentEvent) -> bool,
-    print: &impl Fn(&gang_core::events::AgentEvent),
+/// `gang view` — bridge a robot's live feed into Foxglove / Lichtblick.
+///
+/// Opens a local Foxglove WebSocket endpoint the operator points their existing
+/// visualization tool at (`ws://127.0.0.1:<port>`), and forwards the robot's
+/// live Ganglion event stream (presence, policy decisions, audit, connection,
+/// heartbeat) — arriving through the relay and capability-scoped like every
+/// other remote access — as a JSON channel. A `--profile` shapes the forwarded
+/// stream for degraded links.
+///
+/// Live ROS *topic* sample projection rides on the same bridge but depends on
+/// robot-side topic streaming (the `TopicSubscribe` broker op currently returns
+/// topic info, not samples); `--topics` is accepted and reserved for it.
+pub async fn view(
+    robot: &str,
+    port: u16,
+    topics: &[String],
+    profile_name: Option<&str>,
+    events_transport: Option<gang_libp2p::EventsTransport>,
 ) -> anyhow::Result<()> {
-    let mut ticker = tokio::time::interval(EVENT_POLL_INTERVAL);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    use gang_core::bandwidth::BandwidthProfile;
+    use tokio::sync::broadcast;
+
+    // Resolve the bandwidth profile (built-ins + operator config).
+    let config = OperatorConfig::load();
+    let profile = match profile_name {
+        Some(name) => {
+            BandwidthProfile::resolve(name, &config.bandwidth_profiles).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown bandwidth profile '{name}'. Run `gang profiles` to list options."
+                )
+            })?
+        }
+        None => BandwidthProfile::full(),
+    };
+
+    let mode = events_transport.unwrap_or_default();
+    let target = resolve_target(robot, None, None)?;
+    if target.is_local {
+        anyhow::bail!(
+            "`gang view` needs a live connection; '{robot}' resolved to a local agent. \
+             Point at a remote robot (name, peer id)."
+        );
+    }
+    let remote = prepare_remote(&target)?;
+    let display = remote.display();
+    let timeout = std::time::Duration::from_secs(CONTROL_TIMEOUT_SECS);
+    let conn = establish_remote_connection(&remote, timeout).await?;
+
+    // The single always-available channel: the governed event feed.
+    const EVENTS_CHANNEL_ID: u32 = 1;
+    let channels = vec![crate::foxglove::Channel {
+        id: EVENTS_CHANNEL_ID,
+        topic: "/ganglion/events".into(),
+        encoding: "json".into(),
+        schema_name: "ganglion.AgentEvent".into(),
+        // An open JSON object schema — Foxglove renders JSON without a strict
+        // schema; a precise schema can be added later.
+        schema: r#"{"type":"object"}"#.into(),
+        schema_encoding: "jsonschema".into(),
+    }];
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|e| anyhow::anyhow!("could not bind 127.0.0.1:{port} for the bridge: {e}"))?;
+    let bound = listener.local_addr()?;
+
+    let (tx, _rx) = broadcast::channel::<crate::foxglove::BridgeMessage>(1024);
+    let serve_tx = tx.clone();
+    let serve_channels = channels.clone();
+    tokio::spawn(async move {
+        let _ = crate::foxglove::serve(listener, "gang view".to_string(), serve_channels, serve_tx)
+            .await;
+    });
+
+    println!("Bridging '{display}' into Foxglove/Lichtblick.");
+    println!();
+    println!("  1. Open Foxglove Studio or Lichtblick");
+    println!("  2. Add connection → Foxglove WebSocket → ws://{bound}");
+    println!("  3. Subscribe to the /ganglion/events channel");
+    println!();
+    if !topics.is_empty() {
+        eprintln!(
+            "note: live ROS topic projection ({}) is not yet available — bridging the \
+             governed event feed for now.",
+            topics.join(", ")
+        );
+    }
+    println!(
+        "Profile: {} ({}). Ctrl-C to stop.",
+        profile.name, profile.description
+    );
+    println!();
+
+    let mut stream = conn
+        .transport
+        .subscribe_events(&remote.gang_id, None, timeout, mode)
+        .await
+        .map_err(|e| anyhow::anyhow!("connecting to '{display}' failed: {e}"))?;
+
+    let result = pump_events_to_bridge(&mut stream, &tx, EVENTS_CHANNEL_ID, &profile).await;
+    drop(stream);
+    conn.close().await;
+    result
+}
+
+/// Forward events from a live feed onto the Foxglove bridge, applying the
+/// bandwidth profile (decimation, per-message size cap, rate ceiling). Runs
+/// until Ctrl-C or the feed closes.
+async fn pump_events_to_bridge<S>(
+    stream: &mut S,
+    tx: &tokio::sync::broadcast::Sender<crate::foxglove::BridgeMessage>,
+    channel_id: u32,
+    profile: &gang_core::bandwidth::BandwidthProfile,
+) -> anyhow::Result<()>
+where
+    S: futures::Stream<Item = gang_core::events::AgentEvent> + Unpin,
+{
+    use futures::StreamExt;
+
+    let decimation = profile.effective_decimation();
+    let min_interval = profile
+        .min_interval_ms()
+        .map(std::time::Duration::from_millis);
+    let mut seen: u64 = 0;
+    let mut last_sent: Option<std::time::Instant> = None;
+
     loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                return Ok(());
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            next = stream.next() => match next {
+                None => return Ok(()),
+                Some(ev) => {
+                    // Decimation: forward every Nth event.
+                    let idx = seen;
+                    seen = seen.wrapping_add(1);
+                    if !idx.is_multiple_of(decimation as u64) {
+                        continue;
+                    }
+                    // Rate ceiling.
+                    match (min_interval, last_sent) {
+                        (Some(interval), Some(prev)) if prev.elapsed() < interval => continue,
+                        _ => {}
+                    }
+                    let Ok(payload) = serde_json::to_vec(&ev) else { continue };
+                    // Per-message size cap.
+                    if !profile.allows_message_size(payload.len() as u64) {
+                        continue;
+                    }
+                    let timestamp_ns = chrono::Utc::now()
+                        .timestamp_nanos_opt()
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    // A send error just means no clients are attached yet.
+                    let _ = tx.send(crate::foxglove::BridgeMessage {
+                        channel_id,
+                        timestamp_ns,
+                        payload,
+                    });
+                    last_sent = Some(std::time::Instant::now());
+                }
             }
-            _ = ticker.tick() => {
-                // A cursor of 0 means "nothing seen yet" — re-request fresh.
-                let since = cursor.checked_sub(1);
-                let batch = match conn
-                    .transport
-                    .subscribe_events(&remote.gang_id, since, timeout)
-                    .await
-                {
-                    Ok(b) => b,
-                    // Transient failure while tailing: report on stderr, keep going.
-                    Err(e) => {
-                        eprintln!("warning: event poll failed: {e}");
-                        continue;
-                    }
-                };
-                for ev in &batch {
-                    // A fresh re-request (since == None) re-sends the snapshot;
-                    // skip re-printing it while following.
-                    if since.is_none()
-                        && matches!(ev, gang_core::events::AgentEvent::PresenceSnapshot { .. })
-                    {
-                        if let Some(s) = ev.seq() {
-                            cursor = cursor.max(s);
-                        }
-                        continue;
-                    }
-                    if let Some(s) = ev.seq() {
-                        cursor = cursor.max(s + 1);
-                    }
-                    if keep(ev) {
-                        print(ev);
+        }
+    }
+}
+
+/// Drain the initial snapshot + retained catch-up burst from a freshly-opened
+/// feed: collect events until [`CATCHUP_IDLE`] elapses with nothing new (the
+/// burst is contiguous), or the robot closes the feed. Works over either
+/// transport (push or poll) since both surface as the same `Stream`.
+async fn drain_catchup<S>(
+    stream: &mut S,
+    idle: std::time::Duration,
+) -> Vec<gang_core::events::AgentEvent>
+where
+    S: futures::Stream<Item = gang_core::events::AgentEvent> + Unpin,
+{
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    while let Ok(Some(ev)) = tokio::time::timeout(idle, stream.next()).await {
+        out.push(ev);
+    }
+    out
+}
+
+/// Tail a live feed, printing new events as they arrive until Ctrl-C or the
+/// robot closes the feed. `keep` filters which events to print. Transport-
+/// agnostic: push events arrive instantly, poll events on the poll interval.
+async fn tail_events<S>(
+    stream: &mut S,
+    keep: impl Fn(&gang_core::events::AgentEvent) -> bool,
+    print: &impl Fn(&gang_core::events::AgentEvent),
+) -> anyhow::Result<()>
+where
+    S: futures::Stream<Item = gang_core::events::AgentEvent> + Unpin,
+{
+    use futures::StreamExt;
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            next = stream.next() => match next {
+                Some(ev) => {
+                    if keep(&ev) {
+                        print(&ev);
                     }
                 }
+                None => return Ok(()), // robot closed the feed
             }
         }
     }
@@ -4450,25 +4892,38 @@ async fn probe_presence(
     remote: &RemoteTarget,
     timeout: std::time::Duration,
 ) -> anyhow::Result<Option<(String, u64)>> {
+    use futures::StreamExt;
     let conn = establish_remote_connection(remote, timeout).await?;
-    let batch = conn
+    let stream = conn
         .transport
-        .subscribe_events(&remote.gang_id, None, timeout)
+        .subscribe_events(
+            &remote.gang_id,
+            None,
+            timeout,
+            gang_libp2p::EventsTransport::Auto,
+        )
         .await;
-    conn.close().await;
 
-    let batch = batch.map_err(|e| anyhow::anyhow!("{e}"))?;
-    for ev in batch {
-        if let gang_core::events::AgentEvent::PresenceSnapshot {
-            ganglion_version,
-            uptime_secs,
-            ..
-        } = ev
-        {
-            return Ok(Some((ganglion_version, uptime_secs)));
+    let result = async {
+        let mut stream = stream.map_err(|e| anyhow::anyhow!("{e}"))?;
+        // A fresh subscription leads with the presence snapshot; read the head
+        // of the feed until we see it (bounded by the connection timeout).
+        while let Ok(Some(ev)) = tokio::time::timeout(timeout, stream.next()).await {
+            if let gang_core::events::AgentEvent::PresenceSnapshot {
+                ganglion_version,
+                uptime_secs,
+                ..
+            } = ev
+            {
+                return Ok(Some((ganglion_version, uptime_secs)));
+            }
         }
+        Ok(None)
     }
-    Ok(None)
+    .await;
+
+    conn.close().await;
+    result
 }
 
 pub(crate) fn format_bytes(bytes: u64) -> String {
@@ -4931,7 +5386,7 @@ clean:
 }
 
 /// Default registry directory.
-fn registry_dir() -> PathBuf {
+pub(crate) fn registry_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("gang")

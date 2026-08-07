@@ -18,8 +18,96 @@ use gang_core::transport::{
     TransportEvent, TransportStats,
 };
 
-use crate::config::Libp2pConfig;
+use crate::config::{EventsTransport, Libp2pConfig};
 use crate::swarm::{self, GanglionBehaviour};
+
+/// A live, decoded robot→operator event feed (ADR-024): the operator-side
+/// return of [`Libp2pTransportAdapter::subscribe_events`]. Yields
+/// [`gang_core::events::AgentEvent`]s as the robot pushes them, ending when the
+/// robot closes the substream.
+pub type EventStream = Pin<Box<dyn Stream<Item = gang_core::events::AgentEvent> + Send>>;
+
+/// Robot-side inbound event substreams: the return of
+/// [`Libp2pTransportAdapter::accept_event_streams`]. Each item is an
+/// authenticated subscriber's gang [`PeerId`] paired with the raw push
+/// substream to push framed events over.
+pub type InboundEventStreams = Pin<Box<dyn Stream<Item = (PeerId, libp2p::Stream)> + Send>>;
+
+/// `active` encoding: the push substream is live.
+const ACTIVE_PUSH: u8 = 0;
+/// `active` encoding: the poll fallback is live.
+const ACTIVE_POLL: u8 = 1;
+
+/// A live robot→operator event feed (ADR-024): a `Stream<AgentEvent>` backed by
+/// either the push substream or the poll fallback, chosen by
+/// [`EventsTransport`]. Consumers poll it exactly like any `Stream`;
+/// [`EventFeed::active_transport`] reports which transport is currently live
+/// (it can change from push to poll if `auto` falls back mid-session).
+pub struct EventFeed {
+    stream: EventStream,
+    active: Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl EventFeed {
+    /// The transport currently carrying this feed: [`EventsTransport::Push`] or
+    /// [`EventsTransport::Poll`] (never `Auto` — that resolves to a concrete
+    /// transport at open, and may flip to `Poll` on a mid-session fallback).
+    pub fn active_transport(&self) -> EventsTransport {
+        match self.active.load(std::sync::atomic::Ordering::Relaxed) {
+            ACTIVE_POLL => EventsTransport::Poll,
+            _ => EventsTransport::Push,
+        }
+    }
+}
+
+impl Stream for EventFeed {
+    type Item = gang_core::events::AgentEvent;
+
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.get_mut().stream.as_mut().poll_next(cx)
+    }
+}
+
+/// Classification of a push-open failure so `auto` can decide whether to fall
+/// back to poll (unavailable/fatal) or surface the error (a refusal, which poll
+/// would repeat).
+enum PushOpenError {
+    /// The peer has no push feed (protocol-not-supported, not connected).
+    Unavailable(TransportError),
+    /// The stream opened but the handshake failed (io error, timeout, encode).
+    Fatal(TransportError),
+    /// The robot refused the subscription (unauthorized): closed the stream
+    /// without sending. Falling back to poll would refuse identically.
+    Refused(TransportError),
+}
+
+impl PushOpenError {
+    /// The underlying transport error, for the forced-`push` path where any
+    /// failure is surfaced directly (no fallback).
+    fn into_transport(self) -> TransportError {
+        match self {
+            Self::Unavailable(e) | Self::Fatal(e) | Self::Refused(e) => e,
+        }
+    }
+}
+
+/// Advance a poll/push cursor past `ev`. A [`AgentEvent::PresenceSnapshot`]
+/// carries the current tip (not a delivered event), so the cursor moves to that
+/// tip; any other event moves the cursor one past its sequence. A
+/// [`AgentEvent::Gap`] (no sequence) leaves the cursor unchanged.
+fn advance_cursor(cursor: &mut u64, ev: &gang_core::events::AgentEvent) {
+    use gang_core::events::AgentEvent;
+    if let Some(s) = ev.seq() {
+        let next = match ev {
+            AgentEvent::PresenceSnapshot { .. } => s,
+            _ => s + 1,
+        };
+        *cursor = (*cursor).max(next);
+    }
+}
 
 /// How long a caller waits for an RPC or dial reply before timing out unless
 /// an explicit per-request timeout is supplied (see
@@ -146,6 +234,10 @@ pub struct Libp2pTransportAdapter {
     connected_peers: Arc<RwLock<HashMap<String, PeerConnection>>>,
     /// Registered protocol handlers for incoming streams.
     protocol_handlers: Arc<RwLock<HashMap<String, StreamHandler>>>,
+    /// Cloneable handle for genuine push substreams (ADR-024). Talks to the
+    /// swarm's [`libp2p_stream::Behaviour`] over its own channel, so opening or
+    /// accepting an event stream never shares or locks the `Swarm`.
+    stream_control: libp2p_stream::Control,
     /// Addresses the swarm is actually listening on (populated by the worker
     /// from `NewListenAddr` events; ephemeral ports appear here resolved).
     listen_addrs: Arc<RwLock<Vec<String>>>,
@@ -188,7 +280,7 @@ impl Libp2pTransportAdapter {
         // the swarm builder so the key file is not read a second time.
         let secret_key = swarm::load_ed25519_secret(&config.key_path)
             .map_err(|e| crate::TransportError::InvalidKey(e.to_string()))?;
-        let (mut swarm, libp2p_peer_id) = swarm::build_swarm(&config, secret_key)
+        let (mut swarm, libp2p_peer_id, stream_control) = swarm::build_swarm(&config, secret_key)
             .await
             .map_err(|e| crate::TransportError::SwarmBuild(e.to_string()))?;
 
@@ -237,6 +329,7 @@ impl Libp2pTransportAdapter {
             events,
             connected_peers,
             protocol_handlers,
+            stream_control,
             listen_addrs,
             worker: Mutex::new(Some(worker)),
         })
@@ -390,25 +483,225 @@ impl Libp2pTransportAdapter {
         await_reply_within(peer, reply_rx, timeout).await
     }
 
-    /// Subscribe to a robot's event feed and return the batch of
-    /// [`gang_core::events::AgentEvent`]s the robot returns.
+    /// Subscribe to a robot's event feed and return a live [`EventFeed`] — a
+    /// `Stream<AgentEvent>` carried by EITHER the push substream or the poll
+    /// fallback, chosen by `mode` (ADR-024). Callers (`gang logs`/`connect`/
+    /// `tui`) consume the same `Stream` shape regardless of which transport is
+    /// live; [`EventFeed::active_transport`] reports the current one.
     ///
-    /// A fresh subscription (`since_seq == None`) yields a
-    /// [`gang_core::events::AgentEvent::PresenceSnapshot`] followed by the
-    /// robot's retained recent events; a resume (`since_seq == Some(cursor)`)
-    /// yields only newer events, with a leading
-    /// [`gang_core::events::AgentEvent::Gap`] if the cursor predated the
-    /// retained window.
+    /// - [`EventsTransport::Push`]: open the persistent `/ganglion/events/1.0`
+    ///   substream (over the relay circuit) and decode framed CBOR as the robot
+    ///   pushes it — instant, no cadence. Errors clearly if the stream cannot be
+    ///   opened (no silent poll).
+    /// - [`EventsTransport::Poll`]: never open a stream; run the bounded
+    ///   `ControlMessage::SubscribeEvents` request-response poll on the
+    ///   configured interval.
+    /// - [`EventsTransport::Auto`] (default): try push; if it is unavailable
+    ///   (older agent, protocol-not-supported, alpha misbehaving) fall back to
+    ///   poll automatically. A push stream that opens then drops mid-session
+    ///   also falls back to poll so the feed is never left dead.
     ///
-    /// The subscription is carried as a
-    /// [`gang_core::message::ControlMessage::SubscribeEvents`]
-    /// over the control protocol (see that message's docs for why). A robot
-    /// that refuses the subscription (e.g. the operator is not trusted) returns
-    /// an error, surfaced here as a typed [`TransportError`].
-    ///
-    /// Local buffering is bounded: the batch is bounded by the robot's
-    /// retention window and the request-response size ceiling.
+    /// A fresh subscription (`since_seq == None`) begins with a
+    /// [`gang_core::events::AgentEvent::PresenceSnapshot`]; a resume begins from
+    /// events newer than the cursor. A robot that refuses the subscription
+    /// (unauthorized) surfaces as a typed [`TransportError`] on both paths,
+    /// rather than a silently empty stream (and `auto` does NOT fall back on a
+    /// refusal — poll would refuse identically).
     pub async fn subscribe_events(
+        self: &Arc<Self>,
+        peer: &PeerId,
+        since_seq: Option<u64>,
+        timeout: Duration,
+        mode: EventsTransport,
+    ) -> Result<EventFeed, TransportError> {
+        match mode {
+            EventsTransport::Push => {
+                let (first, stream) = self
+                    .open_push(peer, since_seq, timeout)
+                    .await
+                    .map_err(PushOpenError::into_transport)?;
+                info!(peer = %peer, "event feed: push active (forced)");
+                Ok(self.push_feed(peer, first, stream, false, timeout))
+            }
+            EventsTransport::Poll => {
+                info!(peer = %peer, "event feed: poll active (forced)");
+                self.poll_feed(peer, since_seq, timeout).await
+            }
+            EventsTransport::Auto => match self.open_push(peer, since_seq, timeout).await {
+                Ok((first, stream)) => {
+                    info!(peer = %peer, "event feed: push active (auto)");
+                    Ok(self.push_feed(peer, first, stream, true, timeout))
+                }
+                Err(PushOpenError::Refused(e)) => Err(e),
+                Err(PushOpenError::Unavailable(reason) | PushOpenError::Fatal(reason)) => {
+                    info!(peer = %peer, %reason, "event feed: push unavailable, falling back to poll (auto)");
+                    self.poll_feed(peer, since_seq, timeout).await
+                }
+            },
+        }
+    }
+
+    /// Open the push substream and read the first frame, classifying failures so
+    /// `auto` can decide whether to fall back. Returns the first decoded event
+    /// plus the open stream on success.
+    async fn open_push(
+        &self,
+        peer: &PeerId,
+        since_seq: Option<u64>,
+        timeout: Duration,
+    ) -> Result<(gang_core::events::AgentEvent, libp2p::Stream), PushOpenError> {
+        use gang_core::events::{AgentEvent, EventSubscribeRequest};
+        use gang_core::message::{decode_message, encode_message};
+
+        let libp2p_peer = self
+            .resolve_peer(peer)
+            .await
+            .map_err(PushOpenError::Unavailable)?;
+        let protocol = libp2p::StreamProtocol::new(protocol::PROTOCOL_EVENTS);
+        let peer_disp = peer.to_string();
+
+        // `Control` is cloned per call (its backpressure slot is per-clone);
+        // this never touches the Swarm. A NegotiationFailed / unsupported
+        // protocol means the peer has no push feed → "unavailable".
+        let mut control = self.stream_control.clone();
+        let stream = tokio::time::timeout(timeout, control.open_stream(libp2p_peer, protocol))
+            .await
+            .map_err(|_| PushOpenError::Unavailable(TransportError::Timeout(timeout)))?;
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(libp2p_stream::OpenStreamError::UnsupportedProtocol(p)) => {
+                return Err(PushOpenError::Unavailable(
+                    TransportError::ProtocolNegotiation(format!(
+                        "peer {peer_disp} does not support the push event protocol ({p})"
+                    )),
+                ));
+            }
+            Err(e) => {
+                return Err(PushOpenError::Unavailable(TransportError::DialFailed {
+                    peer: peer_disp,
+                    reason: format!("could not open event stream: {e}"),
+                }));
+            }
+        };
+
+        let req = EventSubscribeRequest::new(since_seq, None);
+        let request_bytes = encode_message(&req).map_err(|e| {
+            PushOpenError::Fatal(TransportError::ProtocolNegotiation(format!(
+                "encode subscribe: {e}"
+            )))
+        })?;
+        crate::framed::write_frame(&mut stream, &request_bytes)
+            .await
+            .map_err(|e| {
+                PushOpenError::Fatal(TransportError::ConnectionClosed(format!(
+                    "write subscribe request: {e}"
+                )))
+            })?;
+
+        let first = tokio::time::timeout(timeout, crate::framed::read_frame(&mut stream))
+            .await
+            .map_err(|_| PushOpenError::Fatal(TransportError::Timeout(timeout)))?
+            .map_err(|e| {
+                PushOpenError::Fatal(TransportError::ConnectionClosed(format!(
+                    "reading first event frame: {e}"
+                )))
+            })?;
+        // A clean EOF on the first frame is a refusal (unauthorized), not
+        // "push unavailable" — poll would refuse identically, so do not fall back.
+        let Some(first_frame) = first else {
+            return Err(PushOpenError::Refused(TransportError::ProtocolNegotiation(
+                format!("robot {peer} refused the event subscription (unauthorized)"),
+            )));
+        };
+        let (first_event, _) = decode_message::<AgentEvent>(&first_frame).map_err(|e| {
+            PushOpenError::Fatal(TransportError::ProtocolNegotiation(format!(
+                "decode first event: {e}"
+            )))
+        })?;
+        Ok((first_event, stream))
+    }
+
+    /// Build a push-backed [`EventFeed`] from an opened stream. When
+    /// `fallback_to_poll` is set (auto mode), a mid-session stream drop
+    /// transitions to the poll fallback rather than ending the feed.
+    fn push_feed(
+        self: &Arc<Self>,
+        peer: &PeerId,
+        first: gang_core::events::AgentEvent,
+        mut stream: libp2p::Stream,
+        fallback_to_poll: bool,
+        timeout: Duration,
+    ) -> EventFeed {
+        use futures::StreamExt;
+        use gang_core::events::AgentEvent;
+        use gang_core::message::decode_message;
+
+        let active = Arc::new(std::sync::atomic::AtomicU8::new(ACTIVE_PUSH));
+        let active_for_stream = Arc::clone(&active);
+        let this = Arc::clone(self);
+        let peer = peer.clone();
+        let peer_disp = peer.to_string();
+
+        let out = async_stream::stream! {
+            let mut cursor: u64 = 0;
+            advance_cursor(&mut cursor, &first);
+            yield first;
+            loop {
+                match crate::framed::read_frame(&mut stream).await {
+                    Ok(Some(frame)) => match decode_message::<AgentEvent>(&frame) {
+                        Ok((ev, _)) => {
+                            advance_cursor(&mut cursor, &ev);
+                            yield ev;
+                        }
+                        Err(e) => {
+                            warn!(peer = %peer_disp, "dropping undecodable event frame: {e}");
+                            break;
+                        }
+                    },
+                    Ok(None) => break, // robot closed the feed
+                    Err(e) => {
+                        debug!(peer = %peer_disp, "push event stream ended: {e}");
+                        break;
+                    }
+                }
+            }
+            // Mid-session drop → fall back to poll (auto only) so the feed is
+            // never left dead.
+            if fallback_to_poll {
+                active_for_stream.store(ACTIVE_POLL, std::sync::atomic::Ordering::Relaxed);
+                info!(peer = %peer_disp, "push feed dropped; falling back to poll");
+                let mut poll = Self::poll_loop(this, peer, cursor, Vec::new(), timeout);
+                while let Some(ev) = poll.next().await {
+                    yield ev;
+                }
+            }
+        };
+
+        EventFeed {
+            stream: Box::pin(out),
+            active,
+        }
+    }
+
+    /// Build a poll-backed [`EventFeed`]. Does an eager first poll so a refusal
+    /// (unauthorized) surfaces as an error here rather than as a silently empty
+    /// stream, then continues polling on the configured interval.
+    async fn poll_feed(
+        self: &Arc<Self>,
+        peer: &PeerId,
+        since_seq: Option<u64>,
+        timeout: Duration,
+    ) -> Result<EventFeed, TransportError> {
+        let first = self.poll_once(peer, since_seq, timeout).await?;
+        let active = Arc::new(std::sync::atomic::AtomicU8::new(ACTIVE_POLL));
+        let stream = Self::poll_loop(Arc::clone(self), peer.clone(), 0, first, timeout);
+        Ok(EventFeed { stream, active })
+    }
+
+    /// One poll iteration: the `ControlMessage::SubscribeEvents` → `Events`
+    /// request-response exchange. A robot that refuses (unauthorized) returns an
+    /// `Error`, surfaced here as a typed [`TransportError`].
+    async fn poll_once(
         &self,
         peer: &PeerId,
         since_seq: Option<u64>,
@@ -436,6 +729,89 @@ impl Libp2pTransportAdapter {
                 "unexpected response to subscribe: {other:?}"
             ))),
         }
+    }
+
+    /// The poll-fallback loop as a stream: yield `prefetched` (already fetched
+    /// to detect refusal), then re-request `SubscribeEvents` every configured
+    /// interval, advancing the cursor and skipping a re-sent snapshot. Transient
+    /// poll failures are logged and retried on the next tick (never fatal).
+    fn poll_loop(
+        this: Arc<Self>,
+        peer: PeerId,
+        start_cursor: u64,
+        prefetched: Vec<gang_core::events::AgentEvent>,
+        timeout: Duration,
+    ) -> EventStream {
+        use gang_core::events::AgentEvent;
+
+        let interval = Duration::from_millis(this.config.events_poll_interval_ms.max(1));
+        let peer_disp = peer.to_string();
+
+        let out = async_stream::stream! {
+            let mut cursor = start_cursor;
+            for ev in prefetched {
+                advance_cursor(&mut cursor, &ev);
+                yield ev;
+            }
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            ticker.tick().await; // the first tick completes immediately; skip it
+            loop {
+                ticker.tick().await;
+                let since = cursor.checked_sub(1);
+                match this.poll_once(&peer, since, timeout).await {
+                    Ok(batch) => {
+                        for ev in batch {
+                            // A fresh re-request (since == None) re-sends the
+                            // snapshot; do not re-emit it while tailing.
+                            if since.is_none()
+                                && matches!(ev, AgentEvent::PresenceSnapshot { .. })
+                            {
+                                advance_cursor(&mut cursor, &ev);
+                                continue;
+                            }
+                            advance_cursor(&mut cursor, &ev);
+                            yield ev;
+                        }
+                    }
+                    Err(e) => {
+                        debug!(peer = %peer_disp, "event poll failed (will retry): {e}");
+                    }
+                }
+            }
+        };
+        Box::pin(out)
+    }
+
+    /// Accept inbound `/ganglion/events/1.0` push substreams (ADR-024, robot
+    /// side). Returns a [`Stream`] of `(subscriber, substream)` pairs, one per
+    /// operator that opens the event protocol. Each substream is a raw
+    /// `AsyncRead + AsyncWrite` the caller authenticates and pushes framed
+    /// events over.
+    ///
+    /// The subscriber [`PeerId`] is the SEC-03 gang id derived from the
+    /// Ed25519 key libp2p's Noise handshake authenticated on the connection;
+    /// a peer whose identity cannot be recovered is dropped before it is
+    /// surfaced (never streamed to). May be called once per protocol — a second
+    /// call returns [`TransportError::ProtocolNegotiation`].
+    pub fn accept_event_streams(&self) -> Result<InboundEventStreams, TransportError> {
+        use futures::StreamExt;
+
+        let protocol = libp2p::StreamProtocol::new(protocol::PROTOCOL_EVENTS);
+        let incoming = self.stream_control.clone().accept(protocol).map_err(|e| {
+            TransportError::ProtocolNegotiation(format!("event protocol already accepted: {e:?}"))
+        })?;
+
+        let mapped = incoming.filter_map(|(libp2p_peer, stream)| async move {
+            match libp2p_to_gang_peer_id(&libp2p_peer) {
+                Some(gang_peer) => Some((gang_peer, stream)),
+                None => {
+                    warn!(peer = %libp2p_peer, "Dropping event stream from peer with unrecoverable identity");
+                    None
+                }
+            }
+        });
+        Ok(Box::pin(mapped))
     }
 
     /// Look up the libp2p peer id for a connected gang peer.
@@ -1296,7 +1672,7 @@ mod tests {
         let result = swarm::build_swarm(&config, secret).await;
         assert!(result.is_ok(), "swarm build failed: {:?}", result.err());
 
-        let (_swarm, peer_id) = result.unwrap();
+        let (_swarm, peer_id, _control) = result.unwrap();
         // Peer ID should be valid (libp2p PeerId is non-empty)
         assert!(!peer_id.to_string().is_empty());
     }

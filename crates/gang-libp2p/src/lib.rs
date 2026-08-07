@@ -1,12 +1,14 @@
 mod adapter;
 mod config;
+pub mod framed;
 mod relay;
 mod swarm;
 
 pub use adapter::{
-    DialableIdentity, Libp2pTransportAdapter, identity_from_libp2p_str, libp2p_to_gang_peer_id,
+    DialableIdentity, EventFeed, EventStream, Libp2pTransportAdapter, identity_from_libp2p_str,
+    libp2p_to_gang_peer_id,
 };
-pub use config::Libp2pConfig;
+pub use config::{EventsTransport, Libp2pConfig};
 pub use relay::RelayMode;
 pub use swarm::{GanglionCodec, GanglionProtocol, GanglionRequest};
 

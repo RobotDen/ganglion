@@ -13,15 +13,19 @@
 //!   `PolicyDecision{Deny}` on the feed;
 //! - a legit deploy+invoke puts `AuditAppended` + `PolicyDecision{Allow}` on
 //!   the feed;
-//! - an UNAUTHORIZED operator (not in the robot's trust store) is refused.
+//! - an UNAUTHORIZED operator (not in the robot's trust store) is refused;
+//! - PUSH latency (ADR-024): an event emitted on the robot reaches the operator
+//!   over the real relay circuit in well under the old 1.5 s poll cadence
+//!   (asserted `< 500 ms`).
 //!
 //! The bounded broadcast-lag → `Gap` path and the ring-eviction → `Gap` path
 //! are covered deterministically by unit tests in `gang_ros::events`.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use gang_core::capability::CapabilityGroup;
 use gang_core::events::AgentEvent;
 use gang_core::identity::{Keypair, PeerId};
@@ -29,7 +33,7 @@ use gang_core::manifest::{
     ComponentManifest, ResourceLimits, SignedManifest, TrustStore, TrustedPeer,
 };
 use gang_core::message::{fresh_nonce, unix_millis_now};
-use gang_libp2p::{Libp2pConfig, Libp2pTransportAdapter};
+use gang_libp2p::{EventsTransport, Libp2pConfig, Libp2pTransportAdapter};
 use gang_ros::agent::{AgentConfig, RobotAgent};
 use gang_ros::filesystem::FsRule;
 
@@ -50,6 +54,19 @@ where
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Collect events from a live feed until `idle` passes with nothing new (the
+/// snapshot + retained catch-up burst arrives back-to-back). Transport-agnostic.
+async fn drain<S>(stream: &mut S, idle: Duration) -> Vec<AgentEvent>
+where
+    S: futures::Stream<Item = AgentEvent> + Unpin,
+{
+    let mut out = Vec::new();
+    while let Ok(Some(ev)) = tokio::time::timeout(idle, stream.next()).await {
+        out.push(ev);
+    }
+    out
 }
 
 async fn start_adapter(config: Libp2pConfig) -> Arc<Libp2pTransportAdapter> {
@@ -113,10 +130,31 @@ fn base_agent_config(dir: &Path) -> AgentConfig {
 }
 
 /// Start a robot (agent + transport) reachable only through the relay circuit.
+/// Serves both push and the poll fallback.
 async fn start_robot(
     dir: &Path,
     relay_dial_addr: &str,
     config: AgentConfig,
+) -> (Arc<RobotAgent>, Arc<Libp2pTransportAdapter>) {
+    start_robot_with(dir, relay_dial_addr, config, true).await
+}
+
+/// Like [`start_robot`] but serves ONLY the poll fallback — it does not accept
+/// the `/ganglion/events/1.0` push protocol. Simulates an older/alpha-free
+/// agent for exercising the operator's `auto` push→poll fallback.
+async fn start_robot_poll_only(
+    dir: &Path,
+    relay_dial_addr: &str,
+    config: AgentConfig,
+) -> (Arc<RobotAgent>, Arc<Libp2pTransportAdapter>) {
+    start_robot_with(dir, relay_dial_addr, config, false).await
+}
+
+async fn start_robot_with(
+    dir: &Path,
+    relay_dial_addr: &str,
+    config: AgentConfig,
+    push: bool,
 ) -> (Arc<RobotAgent>, Arc<Libp2pTransportAdapter>) {
     std::fs::create_dir_all(dir).unwrap();
     let agent = Arc::new(RobotAgent::new(config).expect("agent builds"));
@@ -127,7 +165,14 @@ async fn start_robot(
         ..Default::default()
     })
     .await;
-    agent.serve(transport.as_ref()).await.expect("agent serves");
+    if push {
+        agent.serve(transport.as_ref()).await.expect("agent serves");
+    } else {
+        agent
+            .serve_poll_only(transport.as_ref())
+            .await
+            .expect("agent serves (poll only)");
+    }
 
     wait_until("robot's relay circuit reservation", async || {
         transport
@@ -286,15 +331,23 @@ can_deploy = true
         connect_operator(&dirs.path().join("operator"), &relay_addr, &robot_transport).await;
     let robot = robot_id(&robot_transport);
 
-    // A fresh subscription yields a presence snapshot at its head.
-    let batch = operator
-        .subscribe_events(&robot, None, Duration::from_secs(WAIT_SECS))
+    // A fresh subscription yields a presence snapshot at its head (auto → push).
+    let mut stream = operator
+        .subscribe_events(
+            &robot,
+            None,
+            Duration::from_secs(WAIT_SECS),
+            EventsTransport::Auto,
+        )
         .await
         .expect("subscribe");
+    assert_eq!(stream.active_transport(), EventsTransport::Push);
+    let first = stream.next().await;
     assert!(
-        matches!(batch.first(), Some(AgentEvent::PresenceSnapshot { .. })),
-        "fresh subscribe must start with a presence snapshot: {batch:?}"
+        matches!(first, Some(AgentEvent::PresenceSnapshot { .. })),
+        "fresh subscribe must start with a presence snapshot: {first:?}"
     );
+    drop(stream);
 
     // Deny path: deploy a process/spawn capability the policy forbids.
     let denied = deploy(
@@ -331,11 +384,18 @@ can_deploy = true
     invoke(&operator, &robot, "diag").await;
 
     // Re-subscribe (fresh): the feed now carries the deny, the allow, and the
-    // audit append over the real circuit.
-    let batch = operator
-        .subscribe_events(&robot, None, Duration::from_secs(WAIT_SECS))
+    // audit append over the real circuit (delivered in the catch-up burst).
+    let mut stream = operator
+        .subscribe_events(
+            &robot,
+            None,
+            Duration::from_secs(WAIT_SECS),
+            EventsTransport::Auto,
+        )
         .await
         .expect("resubscribe");
+    let batch = drain(&mut stream, Duration::from_millis(500)).await;
+    drop(stream);
 
     let has = |pred: fn(&AgentEvent) -> bool| batch.iter().any(pred);
     assert!(
@@ -390,11 +450,238 @@ async fn circuit_subscription_rejects_unauthorized_operator() {
     let robot = robot_id(&robot_transport);
 
     let result = operator
-        .subscribe_events(&robot, None, Duration::from_secs(WAIT_SECS))
+        .subscribe_events(
+            &robot,
+            None,
+            Duration::from_secs(WAIT_SECS),
+            EventsTransport::Auto,
+        )
         .await;
-    let err = result.expect_err("an unauthorized operator must be refused");
+    // `EventFeed` is not `Debug`, so match rather than `expect_err`. A refusal
+    // must NOT auto-fall-back to poll (poll would refuse identically).
+    let err = match result {
+        Ok(_) => panic!("an unauthorized operator must be refused, but a feed opened"),
+        Err(e) => e,
+    };
     assert!(
-        err.to_string().contains("refused") || err.to_string().contains("unauthorized"),
+        err.to_string().contains("refused")
+            || err.to_string().contains("unauthorized")
+            || err.to_string().contains("refused the event subscription"),
         "refusal should be explicit: {err}"
+    );
+}
+
+/// ADR-024 PUSH latency: with the subscription open and its catch-up drained,
+/// an event emitted on the robot must reach the operator over the real relay
+/// circuit promptly — far under the old 1.5 s poll cadence. We assert < 500 ms.
+#[tokio::test(flavor = "multi_thread")]
+async fn circuit_push_delivers_event_under_500ms() {
+    let dirs = tempfile::TempDir::new().unwrap();
+    let (_relay, relay_addr) = start_relay(&dirs.path().join("relay")).await;
+
+    // Empty trust store → dev-permissive: any operator may subscribe.
+    let robot_dir = dirs.path().join("robot");
+    let (agent, robot_transport) =
+        start_robot(&robot_dir, &relay_addr, base_agent_config(&robot_dir)).await;
+    let (operator, _operator_kp) =
+        connect_operator(&dirs.path().join("operator"), &relay_addr, &robot_transport).await;
+    let robot = robot_id(&robot_transport);
+
+    // Open the live push feed (forced) and drain the snapshot + retained catch-up.
+    let mut stream = operator
+        .subscribe_events(
+            &robot,
+            None,
+            Duration::from_secs(WAIT_SECS),
+            EventsTransport::Push,
+        )
+        .await
+        .expect("subscribe");
+    assert_eq!(stream.active_transport(), EventsTransport::Push);
+    let head = stream.next().await;
+    assert!(
+        matches!(head, Some(AgentEvent::PresenceSnapshot { .. })),
+        "fresh subscribe must start with a presence snapshot: {head:?}"
+    );
+    let _ = drain(&mut stream, Duration::from_millis(400)).await;
+
+    // Emit a distinctive sentinel event on the robot and time its arrival at
+    // the operator. Nothing else emits in this window (heartbeats are 15 s
+    // apart), but match the sentinel to be robust against a stray beat.
+    const SENTINEL_UPTIME: u64 = 4_242_424;
+    let t0 = Instant::now();
+    agent.event_bus().publish(|seq| AgentEvent::Heartbeat {
+        seq,
+        ts: chrono::Utc::now(),
+        uptime_secs: SENTINEL_UPTIME,
+    });
+
+    let mut latency = None;
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(Duration::from_secs(WAIT_SECS), stream.next()).await
+    {
+        if matches!(ev, AgentEvent::Heartbeat { uptime_secs, .. } if uptime_secs == SENTINEL_UPTIME)
+        {
+            latency = Some(t0.elapsed());
+            break;
+        }
+    }
+    drop(stream);
+
+    let latency = latency.expect("the pushed sentinel event must arrive");
+    eprintln!("measured push latency over relay circuit: {latency:?}");
+    assert!(
+        latency < Duration::from_millis(500),
+        "push latency {latency:?} must be under 500ms (old poll was ~1.5s)"
+    );
+}
+
+/// A distinctive heartbeat sentinel emitted on the robot bus; matched on the
+/// operator side to confirm a specific event traversed the feed.
+const SENTINEL_UPTIME: u64 = 4_242_424;
+
+fn emit_sentinel(agent: &Arc<RobotAgent>) {
+    agent.event_bus().publish(|seq| AgentEvent::Heartbeat {
+        seq,
+        ts: chrono::Utc::now(),
+        uptime_secs: SENTINEL_UPTIME,
+    });
+}
+
+/// Read the feed until the sentinel arrives or the overall budget elapses.
+async fn recv_sentinel(stream: &mut gang_libp2p::EventFeed, budget: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(ev)) => {
+                if matches!(ev, AgentEvent::Heartbeat { uptime_secs, .. } if uptime_secs == SENTINEL_UPTIME)
+                {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// `poll` mode: force the request-response poll fallback (never open a stream)
+/// and confirm events still flow — the retained behavior from before push.
+#[tokio::test(flavor = "multi_thread")]
+async fn poll_mode_delivers_events() {
+    let dirs = tempfile::TempDir::new().unwrap();
+    let (_relay, relay_addr) = start_relay(&dirs.path().join("relay")).await;
+
+    let robot_dir = dirs.path().join("robot");
+    let (agent, robot_transport) =
+        start_robot(&robot_dir, &relay_addr, base_agent_config(&robot_dir)).await;
+    let (operator, _kp) =
+        connect_operator(&dirs.path().join("operator"), &relay_addr, &robot_transport).await;
+    let robot = robot_id(&robot_transport);
+
+    let mut stream = operator
+        .subscribe_events(
+            &robot,
+            None,
+            Duration::from_secs(WAIT_SECS),
+            EventsTransport::Poll,
+        )
+        .await
+        .expect("poll subscribe");
+    assert_eq!(
+        stream.active_transport(),
+        EventsTransport::Poll,
+        "forced poll mode must report the poll transport"
+    );
+    // The first poll yields the presence snapshot.
+    let batch = drain(&mut stream, Duration::from_millis(500)).await;
+    assert!(
+        batch
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PresenceSnapshot { .. })),
+        "poll subscribe must yield a presence snapshot: {batch:?}"
+    );
+
+    // An event emitted now is picked up on the next poll tick (~1.5s).
+    emit_sentinel(&agent);
+    assert!(
+        recv_sentinel(&mut stream, Duration::from_secs(WAIT_SECS)).await,
+        "poll fallback must deliver a freshly-emitted event"
+    );
+}
+
+/// `auto` against a robot that does NOT accept the push protocol (poll-only):
+/// the operator must fall back to poll automatically and still deliver events.
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_falls_back_to_poll_when_push_unavailable() {
+    let dirs = tempfile::TempDir::new().unwrap();
+    let (_relay, relay_addr) = start_relay(&dirs.path().join("relay")).await;
+
+    // Poll-only robot: serves control (and the SubscribeEvents poll) but never
+    // accepts /ganglion/events/1.0 — so a push open fails with NegotiationFailed.
+    let robot_dir = dirs.path().join("robot");
+    let (agent, robot_transport) =
+        start_robot_poll_only(&robot_dir, &relay_addr, base_agent_config(&robot_dir)).await;
+    let (operator, _kp) =
+        connect_operator(&dirs.path().join("operator"), &relay_addr, &robot_transport).await;
+    let robot = robot_id(&robot_transport);
+
+    let mut stream = operator
+        .subscribe_events(
+            &robot,
+            None,
+            Duration::from_secs(WAIT_SECS),
+            EventsTransport::Auto,
+        )
+        .await
+        .expect("auto subscribe must succeed via poll fallback");
+    assert_eq!(
+        stream.active_transport(),
+        EventsTransport::Poll,
+        "auto must fall back to poll when push is unavailable"
+    );
+    let batch = drain(&mut stream, Duration::from_millis(500)).await;
+    assert!(
+        batch
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PresenceSnapshot { .. })),
+        "auto→poll must still yield a presence snapshot: {batch:?}"
+    );
+
+    emit_sentinel(&agent);
+    assert!(
+        recv_sentinel(&mut stream, Duration::from_secs(WAIT_SECS)).await,
+        "auto→poll must deliver a freshly-emitted event"
+    );
+}
+
+/// `push` mode against a poll-only robot: the stream cannot be opened, and push
+/// mode must error clearly rather than silently falling back to poll.
+#[tokio::test(flavor = "multi_thread")]
+async fn push_mode_errors_when_stream_unavailable() {
+    let dirs = tempfile::TempDir::new().unwrap();
+    let (_relay, relay_addr) = start_relay(&dirs.path().join("relay")).await;
+
+    let robot_dir = dirs.path().join("robot");
+    let (_agent, robot_transport) =
+        start_robot_poll_only(&robot_dir, &relay_addr, base_agent_config(&robot_dir)).await;
+    let (operator, _kp) =
+        connect_operator(&dirs.path().join("operator"), &relay_addr, &robot_transport).await;
+    let robot = robot_id(&robot_transport);
+
+    let result = operator
+        .subscribe_events(
+            &robot,
+            None,
+            Duration::from_secs(WAIT_SECS),
+            EventsTransport::Push,
+        )
+        .await;
+    let err = match result {
+        Ok(_) => panic!("forced push against a poll-only robot must error, not fall back"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("does not support") || err.to_string().contains("event stream"),
+        "push-unavailable error should be clear: {err}"
     );
 }

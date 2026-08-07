@@ -1,6 +1,12 @@
 # ADR-022: Robot→operator event subscription layer
 
-**Status:** Accepted; implemented
+**Status:** Accepted; implemented. **Default transport superseded by
+[ADR-024](ADR-024-event-push-stream.md)** — the feed now defaults to a genuine
+push substream over `libp2p-stream`. The ~1.5 s poll-multiplex described below
+is **retained as a selectable fallback** (`events_transport = poll`, and the
+target of `auto`'s automatic fallback), so it still matters. The wire model
+(`AgentEvent`), the subscriber trust rule, and the bounded resource model
+documented here are unchanged and remain in force.
 **Date:** 2026-08-06
 
 > **Implementation status.** Landed. A versioned `AgentEvent` wire model

@@ -664,20 +664,48 @@ impl RobotAgent {
         Ok(out)
     }
 
-    /// Start serving incoming control protocol messages over the transport.
+    /// Start serving incoming control messages and the event push feed.
     ///
-    /// Registers a handler on `/ganglion/control/1.0` that deserializes
-    /// incoming `ControlMessage` requests, dispatches to the appropriate
-    /// agent method, and writes the response back.
+    /// Registers a request-response handler on `/ganglion/control/1.0` (deploy,
+    /// invoke, list, …) and accepts genuine push substreams on
+    /// `/ganglion/events/1.0` (ADR-024): each subscriber that opens the event
+    /// protocol is authenticated and then has framed [`AgentEvent`]s pushed to
+    /// it live from the bounded [`EventBus`] until the stream closes.
+    ///
+    /// Takes the concrete [`gang_libp2p::Libp2pTransportAdapter`] because the
+    /// push feed uses its raw-substream accept API, which is intentionally not
+    /// part of the transport-agnostic `TransportAdapter` trait (that trait stays
+    /// dependency-free in `gang-core`).
     pub async fn serve(
         self: &Arc<Self>,
-        transport: &dyn gang_core::transport::TransportAdapter,
+        transport: &gang_libp2p::Libp2pTransportAdapter,
+    ) -> anyhow::Result<()> {
+        self.serve_inner(transport, true).await
+    }
+
+    /// Serve control + the **poll fallback only**, without accepting push
+    /// substreams (ADR-024). Useful for a robot that deliberately does not
+    /// expose the `/ganglion/events/1.0` push protocol — e.g. running an
+    /// alpha-free build, or exercising an operator's `auto` push→poll fallback.
+    /// The control-protocol `SubscribeEvents` poll still works, so operators can
+    /// still tail the feed.
+    pub async fn serve_poll_only(
+        self: &Arc<Self>,
+        transport: &gang_libp2p::Libp2pTransportAdapter,
+    ) -> anyhow::Result<()> {
+        self.serve_inner(transport, false).await
+    }
+
+    async fn serve_inner(
+        self: &Arc<Self>,
+        transport: &gang_libp2p::Libp2pTransportAdapter,
+        accept_push: bool,
     ) -> anyhow::Result<()> {
         use gang_core::message::{
             CapabilityInfo, ControlMessage, InvokeStatus, decode_message, encode_message,
         };
         use gang_core::protocol::ProtocolId;
-        use gang_core::transport::StreamHandler;
+        use gang_core::transport::{StreamHandler, TransportAdapter};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let agent = Arc::clone(self);
@@ -776,6 +804,9 @@ impl RobotAgent {
                         since_seq,
                         max_events,
                     } => {
+                        // Poll fallback (ADR-024): serve the same authenticated
+                        // batch the push feed would send, so an operator whose
+                        // push stream is unavailable can still tail via control.
                         let req = EventSubscribeRequest::new(since_seq, max_events);
                         match agent.build_event_subscription(&remote_peer, &req).await {
                             Ok(events) => ControlMessage::Events { events },
@@ -834,57 +865,29 @@ impl RobotAgent {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to register control handler: {e}"))?;
 
-        // --- /ganglion/events/1.0: authenticated event subscription ---
-        let events_agent = Arc::clone(self);
-        let events_handler: StreamHandler = Box::new(move |mut stream| {
-            let agent = Arc::clone(&events_agent);
-            Box::pin(async move {
-                let subscriber = stream.remote_peer.clone();
-
-                // Read the (single) subscription request. An empty stream is a
-                // fresh subscription (default request).
-                let mut request_bytes = Vec::new();
-                if let Err(e) = stream.inner.read_to_end(&mut request_bytes).await {
-                    warn!("Failed to read subscribe request from {subscriber}: {e}");
-                    return;
+        // --- /ganglion/events/1.0: genuine push substreams (ADR-024) ---
+        // Accept persistent inbound event substreams and push framed events to
+        // each authenticated subscriber live. The control-protocol
+        // `SubscribeEvents` poll (above) remains available as the fallback, so
+        // an operator whose push stream is unavailable can still tail. When
+        // `accept_push` is false this robot exposes ONLY the poll path.
+        if accept_push {
+            let mut incoming = transport
+                .accept_event_streams()
+                .map_err(|e| anyhow::anyhow!("Failed to accept event streams: {e}"))?;
+            let events_agent = Arc::clone(self);
+            tokio::spawn(async move {
+                use futures::StreamExt;
+                while let Some((subscriber, stream)) = incoming.next().await {
+                    let agent = Arc::clone(&events_agent);
+                    // One task per subscriber so a slow/stalled operator only
+                    // delays its own feed, never the agent or its peers.
+                    tokio::spawn(async move {
+                        push_event_feed(agent, subscriber, stream).await;
+                    });
                 }
-                let req: EventSubscribeRequest = if request_bytes.is_empty() {
-                    EventSubscribeRequest::default()
-                } else {
-                    match decode_message(&request_bytes) {
-                        Ok((req, _)) => req,
-                        Err(e) => {
-                            warn!("Failed to decode subscribe request from {subscriber}: {e}");
-                            return;
-                        }
-                    }
-                };
-
-                // Authenticate + build the batch. An unauthorized peer receives
-                // NOTHING (the stream closes empty); we never stream events to
-                // an unauthenticated subscriber.
-                match agent.build_event_subscription(&subscriber, &req).await {
-                    Ok(events) => match gang_core::events::encode_events(&events) {
-                        Ok(bytes) => {
-                            if let Err(e) = stream.inner.write_all(&bytes).await {
-                                warn!("Failed to write events to {subscriber}: {e}");
-                            }
-                        }
-                        Err(e) => warn!("Failed to encode events for {subscriber}: {e}"),
-                    },
-                    Err(e) => {
-                        warn!(peer = %subscriber, "Event subscription refused: {e}");
-                        // Close empty — the operator observes no snapshot and
-                        // reports an authorization/reachability failure.
-                    }
-                }
-            })
-        });
-
-        transport
-            .listen(ProtocolId::events(), events_handler)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to register events handler: {e}"))?;
+            });
+        }
 
         // Heartbeat ticker: emit a liveness beat on the bus every N seconds so
         // a live viewer can tell "quiet" from "gone". Lives for the process.
@@ -1080,6 +1083,108 @@ impl RobotAgent {
         }
 
         Ok(())
+    }
+}
+
+/// Serve one operator's `/ganglion/events/1.0` push substream (ADR-024):
+/// authenticate, send the presence snapshot + retained catch-up, then push
+/// framed [`AgentEvent`]s live from the bounded [`EventBus`] until the stream
+/// closes.
+///
+/// The subscriber identity is the wire-authenticated gang id libp2p proved on
+/// the connection (SEC-03), never a self-report. Authorization reuses
+/// [`RobotAgent::build_event_subscription`] — the SAME trust rule as deploy
+/// (trusted-only when a trust store is configured; loud dev-permissive when
+/// empty). An unauthorized subscriber is streamed NOTHING: the stream is
+/// dropped (closed) without a snapshot or any events.
+///
+/// Slow/lagging live consumers degrade to an [`AgentEvent::Gap`] marker via the
+/// bounded broadcast bus, never unbounded robot memory.
+async fn push_event_feed<S>(agent: Arc<RobotAgent>, subscriber: PeerId, mut stream: S)
+where
+    S: futures::AsyncRead + futures::AsyncWrite + Unpin + Send,
+{
+    use gang_core::message::{decode_message, encode_message};
+    use gang_libp2p::framed::{read_frame, write_frame};
+
+    // Subscribe to the live feed FIRST, so events emitted during the snapshot
+    // build are captured on the broadcast channel (deduplicated below) rather
+    // than lost in the window between snapshot and tail.
+    let mut live = agent.event_bus().subscribe();
+
+    // Read the single subscription request frame. A clean EOF (operator opened
+    // and closed its write half) is treated as a fresh default subscription.
+    let req = match read_frame(&mut stream).await {
+        Ok(Some(frame)) => match decode_message::<EventSubscribeRequest>(&frame) {
+            Ok((req, _)) => req,
+            Err(e) => {
+                warn!(peer = %subscriber, "Failed to decode subscribe request: {e}");
+                return;
+            }
+        },
+        Ok(None) => EventSubscribeRequest::default(),
+        Err(e) => {
+            warn!(peer = %subscriber, "Failed to read subscribe request: {e}");
+            return;
+        }
+    };
+
+    // Authenticate + build the snapshot/catch-up batch. An unauthorized peer is
+    // refused here: we return (dropping the stream) so it is streamed nothing.
+    let batch = match agent.build_event_subscription(&subscriber, &req).await {
+        Ok(events) => events,
+        Err(e) => {
+            warn!(peer = %subscriber, "Event subscription refused: {e}");
+            return;
+        }
+    };
+
+    // Push the catch-up batch, tracking the highest REAL event sequence sent
+    // (the presence snapshot carries the tip as an indicator, not a delivered
+    // event, so it does not advance the dedup boundary).
+    let mut last_seq: Option<u64> = None;
+    for ev in &batch {
+        match encode_message(ev) {
+            Ok(frame) => {
+                if write_frame(&mut stream, &frame).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => {
+                warn!(peer = %subscriber, "Failed to encode event: {e}");
+                return;
+            }
+        }
+        if !matches!(ev, AgentEvent::PresenceSnapshot { .. })
+            && let Some(s) = ev.seq()
+        {
+            last_seq = Some(last_seq.map_or(s, |l| l.max(s)));
+        }
+    }
+
+    // Live tail: push each freshly emitted event as it arrives. Skip any event
+    // already delivered in the catch-up batch (overlap dedup). A lagging
+    // consumer surfaces as a Gap (no seq) and is always forwarded.
+    while let Some(ev) = live.recv().await {
+        if let (Some(s), Some(last)) = (ev.seq(), last_seq)
+            && s <= last
+        {
+            continue;
+        }
+        match encode_message(&ev) {
+            Ok(frame) => {
+                if write_frame(&mut stream, &frame).await.is_err() {
+                    break;
+                }
+            }
+            Err(e) => {
+                warn!(peer = %subscriber, "Failed to encode live event: {e}");
+                break;
+            }
+        }
+        if let Some(s) = ev.seq() {
+            last_seq = Some(last_seq.map_or(s, |l| l.max(s)));
+        }
     }
 }
 

@@ -4,6 +4,40 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Event feed defaults to genuine server-push, with a selectable poll fallback
+  (ADR-024).** The robot→operator event feed (`gang logs --follow`,
+  `gang connect`, `gang tui`, and the `list`/presence probe) gains a persistent
+  push substream on `/ganglion/events/1.0`, carried by the new `libp2p-stream`
+  dependency. The robot accepts inbound event substreams, authenticates each
+  subscriber with the **same** trust rule as deploy (SEC-03; loud dev-permissive
+  on an empty trust store), sends the `PresenceSnapshot` + retained catch-up,
+  then pushes framed `AgentEvent`s live from the bounded `EventBus` broadcast
+  until the stream closes (slow consumer → `Gap`, unchanged). The operator's
+  `Libp2pTransportAdapter::subscribe_events` returns a live `Stream<AgentEvent>`
+  (`EventFeed`) carried by either transport. Events reach operators the instant
+  the robot emits them — measured ~2 ms over a real relay circuit (asserted
+  `< 500 ms`), versus the ~1.5 s poll cadence.
+
+  Because `libp2p-stream` is a pre-release, the request-response poll from
+  ADR-022 (`ControlMessage::SubscribeEvents`) is **retained as a fallback**, not
+  removed. A new `events_transport` operator-config field and a per-command
+  `--events-transport <auto|push|poll>` flag on `logs`/`connect`/`tui` select
+  the transport: `auto` (default) prefers push and falls back to poll
+  automatically when push is unavailable (older/alpha-free agent,
+  protocol-not-supported, alpha misbehaving) or if a push stream drops
+  mid-session; `push` forces the stream (clear error if unavailable, no silent
+  poll); `poll` forces the request-response loop (interval configurable via
+  `events_poll_interval_ms`, default 1500 ms). `gang connect`/`tui` show a
+  subtle `feed: push` / `feed: poll (1.5s)` indicator. The `AgentEvent` wire
+  model, the trust rule, and the bounded resource model are unchanged. Adds
+  exactly one workspace dependency, `libp2p-stream` (pinned `=0.4.0-alpha`;
+  resolves cleanly against the locked `libp2p-swarm 0.47.1`); `cargo deny`
+  passes clean, so no policy exception was needed. Streams traverse the relay
+  circuit end-to-end, same as control RPC. See
+  [ADR-024](docs/adr/ADR-024-event-push-stream.md).
+
 ### Added
 
 - **`gang tui` — the live fleet dashboard (issue #2).** A full-screen
@@ -28,8 +62,9 @@ All notable changes to Ganglion will be documented in this file.
   widget-render tests over `ratatui::backend::TestBackend`, with `main`/the
   event loop a thin shell; subscriptions run on tokio tasks feeding the render
   loop over a channel so the UI never blocks on the network, and the terminal
-  is restored on quit/Ctrl-C/panic. Feed cadence is the ADR-022 bounded ~1.5 s
-  poll (not faked sub-second). A headless `--frames N` snapshot mode renders a
+  is restored on quit/Ctrl-C/panic. Feed delivery is the ADR-024 push substream
+  (events land instantly; heartbeats still drive staleness). A headless
+  `--frames N` snapshot mode renders a
   frame to text for CI and capture; `--robot <name>` focuses one robot. Design
   notes in [ADR-023](docs/adr/ADR-023-tui-dashboard.md). Adds `ratatui` 0.30 and
   `crossterm` 0.29 to the workspace (used in `gang-cli` only; kept out of the

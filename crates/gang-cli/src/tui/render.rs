@@ -138,6 +138,10 @@ fn render_title(
         right.push(Span::styled(" PAUSED ", theme.deny()));
         right.push(Span::raw("  "));
     }
+    let feed = state.feed_transport_label();
+    if !feed.is_empty() {
+        right.push(Span::styled(format!("feed {feed}  "), theme.dim()));
+    }
     if state.feed_stale(now) {
         right.push(Span::styled("[stale feed]", theme.warn()));
     } else {
@@ -562,11 +566,11 @@ fn render_help(f: &mut Frame, area: Rect, theme: &Theme) {
         ),
         Line::from(""),
         Line::from(Span::styled(
-            "  Feed cadence ~1.5s (bounded poll, ADR-022). The pulse shows a live feed;",
+            "  Feed is server-push (instant, ADR-024). The pulse shows a live feed;",
             theme.dim(),
         )),
         Line::from(Span::styled(
-            "  [stale feed] means no events arrived recently.",
+            "  [stale feed] means no events or stats updates arrived recently.",
             theme.dim(),
         )),
         Line::from(""),

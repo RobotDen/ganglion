@@ -27,4 +27,15 @@ if ! cargo test --quiet; then
     exit 1
 fi
 
+# Lint shell scripts when shellcheck is available (optional; skipped if absent
+# so the hook never hard-fails on a missing tool).
+if command -v shellcheck >/dev/null 2>&1; then
+    echo "=== pre-commit: shellcheck scripts ==="
+    if ! shellcheck scripts/*.sh .githooks/pre-commit .githooks/pre-push; then
+        echo ""
+        echo "shellcheck found issues in shell scripts."
+        exit 1
+    fi
+fi
+
 echo "=== pre-commit: all checks passed ==="

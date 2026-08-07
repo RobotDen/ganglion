@@ -485,8 +485,23 @@ Capabilities on 'robot-a':
 Subscribe to a robot's event feed over the relay circuit and print its
 `AuditAppended` and `PolicyDecision` events. Without `--follow`, prints the
 recent context from the robot's retained window and exits; with `--follow`,
-tails live (bounded poll; Ctrl-C to stop). Honest non-zero exit if the robot is
-unreachable or refuses the subscription.
+tails live (Ctrl-C to stop). Honest non-zero exit if the robot is unreachable or
+refuses the subscription.
+
+The feed transport is selectable with `--events-transport <auto|push|poll>`
+(default `auto`, ADR-024):
+
+- `auto` — prefer the genuine server-push substream (events print the instant
+  the robot emits them); fall back automatically to the request-response poll
+  when push is unavailable (older/alpha-free agent, protocol-not-supported) or
+  if a push stream drops mid-session.
+- `push` — force push; error clearly if the stream cannot be opened.
+- `poll` — force the request-response poll on a ~1.5 s cadence (configurable via
+  the operator config's `events_poll_interval_ms`).
+
+`gang logs`/`connect`/`tui` share this flag; the operator config field
+`events_transport` sets the default. `logs` prints a `--- feed: push ---` /
+`--- feed: poll (1.5s) ---` line so the active transport is visible.
 
 ```bash
 $ gang logs up-robot
@@ -653,6 +668,119 @@ Recommendations:
 ```
 
 If `robot` is specified, probes are run on the remote robot. If omitted, probes the local network.
+
+### `gang doctor`
+
+Print exactly what the network permits. Where `gang diagnose` classifies the
+network *archetype*, `gang doctor` answers the field engineer's operational
+question directly: which outbound paths Ganglion needs actually work here, is
+the relay reachable, and — if not — what is the minimal thing to ask the
+customer's network/security team to allow. Ganglion is outbound-only, so every
+probe is about egress.
+
+```bash
+$ gang doctor
+Running outbound reachability probes (this may take a few seconds)...
+
+============================================
+  gang doctor — outbound reachability
+============================================
+
+  [PASS] Outbound TCP 443
+         HTTPS-port egress works — a relay on TCP 443 is reachable from here.
+  [FAIL] Outbound UDP (QUIC)
+         UDP egress blocked — QUIC won't work; Ganglion will fall back to TCP relay.
+  [FAIL] Outbound TCP (non-443)
+         Non-443 TCP blocked — enterprise firewall; pin the relay to TCP 443.
+  [PASS] DNS resolution
+         Name resolution works.
+  [PASS] Relay reachability (TCP)
+         Relay relay.gang.tafy.dev:443 is reachable.
+  [PASS] Operator/robot identity
+         Identity key present at ~/.gang/identity.key.
+
+What to tell your network / security team:
+  • Ganglion is outbound-only: NO inbound ports need to be opened on the robot's network.
+  • Allow outbound TCP to relay.gang.tafy.dev:443 (the Ganglion relay).
+
+Verdict: a viable outbound path exists. You should be able to pair/enroll.
+```
+
+Pass `--relay <multiaddr>` to test a specific relay instead of the configured
+`default_relay`. Use `--json` (global flag) for machine-readable output. The
+command **exits non-zero** when no viable outbound path to a relay exists, so it
+works as a gate in scripts and CI and drops cleanly into a support thread:
+*"run `gang doctor` and paste the output."*
+
+### `gang profiles`
+
+List the bandwidth profiles available for degraded-link streaming. Profiles are
+a transport-shaping concept (how much of an already-permitted stream to
+forward), never an access-control one. They are applied with `--profile <name>`
+on streaming surfaces such as `gang view`.
+
+```bash
+$ gang profiles
+Bandwidth profiles (use with --profile <name>):
+
+  full
+    No shaping — forward every message at full fidelity.
+    decimation 1/1, rate unlimited, per-message cap none
+
+  lidar-low
+    Point clouds on a thin link: 1-in-10 messages, ~2 Hz ceiling.
+    decimation 1/10, rate 2 Hz, per-message cap none
+
+  vision-low
+    Camera/vision topics: 1-in-5 messages, ~1 Hz, 256 KiB/frame cap.
+    decimation 1/5, rate 1 Hz, per-message cap 256.0 KB
+
+  logs-only
+    Last-resort link: every message but only small (<=16 KiB) payloads.
+    decimation 1/1, rate unlimited, per-message cap 16.0 KB
+```
+
+Operators can define additional profiles in `~/.gang/config.toml` under
+`bandwidth_profiles`; they appear here marked `(custom)`. Built-in names take
+precedence. Use `--json` for machine-readable output.
+
+### `gang mcp`
+
+Serve Ganglion tools to an AI agent over the Model Context Protocol (stdio,
+JSON-RPC 2.0). Exposes a curated, **read-only** fleet-discovery toolset —
+`gang_status`, `list_peers`, `list_capabilities`, `network_doctor`,
+`list_bandwidth_profiles`. The capability sandbox, signed manifests,
+default-deny policy, and audit log mean an agent provably cannot exceed what
+those mechanisms permit — the safest substrate for AI-generated tooling.
+Mutating tools (deploy/run) are intentionally not exposed yet; when added they
+will be policy-checked and audited exactly like the CLI.
+
+```jsonc
+// Example client → server exchange (newline-delimited JSON-RPC):
+{"jsonrpc":"2.0","id":1,"method":"initialize"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"network_doctor","arguments":{}}}
+```
+
+stdout is the JSON-RPC channel, so `gang mcp` cannot be combined with `--json`.
+
+### `gang alert check <metric> <value>` / `gang alert test`
+
+The metric→threshold→webhook alerting primitive — the useful 20%, not an
+incident-management platform. Rules (`name`, `metric`, `comparator`,
+`threshold`, `cooldown_secs`) and a default `alert_webhook` live in
+`~/.gang/config.toml`. On breach, a Slack-incoming-webhook–compatible JSON
+payload is POSTed (via `curl`; any JSON endpoint works).
+
+```bash
+$ gang alert test --dry-run          # confirm wiring; print the sample payload
+$ gang alert check cpu_temp_c 91.5   # evaluate rules for cpu_temp_c against 91.5
+BREACH  overheat: cpu_temp_c = 91.5 (> 80)
+Alert delivered to webhook.
+```
+
+`--webhook <url>` overrides the configured URL; `--dry-run` prints the payload
+instead of POSTing.
 
 ### `gang transport-stats <robot>`
 
@@ -1023,13 +1151,53 @@ presence  v2.1.0  up 12s  archetype=unknown  caps=[diagnostics]
 |------|-------------|
 | `--prefer-transport <t1,t2>` | Preferred transport order (accepted; reserved for happy-eyeballs selection). |
 
+### `gang view <robot>`
+
+Bridge a robot's live feed into **Foxglove Studio** or **Lichtblick** — the
+visualization tool ROS engineers already have open — instead of building a
+bespoke UI. `gang view` opens a local [Foxglove WebSocket][fx] endpoint; the
+feed reaches it through the relay and is capability-scoped and audited like any
+other remote access. Ganglion supplies the reach and the governance; Foxglove
+supplies the pixels.
+
+```bash
+$ gang view up-robot --profile logs-only
+Bridging 'up-robot' into Foxglove/Lichtblick.
+
+  1. Open Foxglove Studio or Lichtblick
+  2. Add connection → Foxglove WebSocket → ws://127.0.0.1:8765
+  3. Subscribe to the /ganglion/events channel
+
+Profile: logs-only (Last-resort link: every message but only small (<=16 KiB) payloads.). Ctrl-C to stop.
+```
+
+Today the bridge forwards the robot's live **Ganglion event feed** (presence,
+policy decisions, audit, connection changes, heartbeats) as a JSON channel
+(`/ganglion/events`). Live ROS **topic** projection rides on the same bridge and
+is reserved behind `--topics`; it depends on robot-side topic sample streaming
+(the `TopicSubscribe` broker operation currently returns topic info, not live
+samples).
+
+| Flag | Description |
+|------|-------------|
+| `--port <n>` | Local TCP port for the WebSocket endpoint (default: 8765). |
+| `--topics <a,b>` | ROS topics to project (reserved; live topic streaming pending). |
+| `--profile <name>` | Bandwidth profile for degraded links (see `gang profiles`). |
+| `--events-transport <mode>` | Event-feed transport: `auto` (default), `push`, or `poll`. |
+
+[fx]: https://github.com/foxglove/ws-protocol
+
 ### `gang tui`
 
 The **live fleet dashboard** — a full-screen [ratatui](https://ratatui.rs)
 view built on the same event subscription API as `gang logs`/`connect`
 ([ADR-022](adr/ADR-022-event-subscription-layer.md)). It subscribes to every
-registered robot's event feed and folds it into four panes, refreshed on a
-bounded ~1.5 s poll:
+registered robot's event feed and folds it into four panes. The feed defaults to
+a genuine server-push substream ([ADR-024](adr/ADR-024-event-push-stream.md)), so
+events land the instant the robot emits them, with automatic fallback to the
+request-response poll when push is unavailable (`--events-transport
+auto|push|poll`). The title bar shows a `feed push` / `feed poll(1.5s)`
+indicator for the active transport:
 
 - **Peers** — name, status dot (`●` live / `◐` transitional / `○` offline),
   transport, and RTT.
@@ -1040,8 +1208,9 @@ bounded ~1.5 s poll:
 - **Audit tail** — timestamp, action, operator, result, and duration.
 
 The title bar shows relay, live/total peer count, dashboard uptime, and a
-`♥ live` pulse that flips to `[stale feed]` when no events arrive within the
-poll cadence. With **no robots registered** the dashboard shows a friendly
+`♥ live` pulse that flips to `[stale feed]` when no heartbeat arrives within the
+15 s liveness window (heartbeats still drive staleness even though the feed
+itself is now instant). With **no robots registered** the dashboard shows a friendly
 first-run panel pointing at `gang up` / `gang pair` rather than a blank grid.
 
 ```console
@@ -1081,8 +1250,9 @@ even on panic (a panic hook + RAII guard).
 | Flag | Description |
 |------|-------------|
 | `--robot <name>` | Focus a single registered robot instead of the whole fleet. |
-| `--frames <n>` | Headless snapshot: fold the feed for `n` poll cycles, print the rendered frame as text, then exit. No raw terminal — safe for CI, pipes, and capturing a static frame. |
+| `--frames <n>` | Headless snapshot: fold the live feed for `n` cycles (~1 s each), print the rendered frame as text, then exit. No raw terminal — safe for CI, pipes, and capturing a static frame. |
 | `--no-input` | Run the live dashboard but ignore keyboard input (unattended recording); Ctrl-C still quits. |
+| `--events-transport <mode>` | Feed transport: `auto` (default; push with poll fallback), `push` (force push), or `poll` (force the request-response poll). See ADR-024. |
 | `--data-dir <path>` | (global) Point at a `gang up` fleet directory. |
 
 #### NO_COLOR

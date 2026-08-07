@@ -7,6 +7,55 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub const BOOTSTRAP_RELAY: &str = "/dns4/relay.gang.tafy.dev/tcp/4001/p2p/<PEER_ID>";
 
+/// Which transport carries the robot→operator event feed (ADR-024).
+///
+/// The push path is a genuine persistent substream on `/ganglion/events/1.0`
+/// (via `libp2p-stream`); the poll path is a bounded request-response loop over
+/// `/ganglion/control/1.0` (`ControlMessage::SubscribeEvents`). Because
+/// `libp2p-stream` is a pre-release, the poll path is retained as a fallback
+/// rather than being removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum EventsTransport {
+    /// Prefer push; fall back to poll automatically when push is unavailable
+    /// (older agent, alpha misbehaving, protocol-not-supported) or if a push
+    /// stream drops mid-session. The default.
+    #[default]
+    Auto,
+    /// Force the push substream; error clearly if it cannot be opened (never
+    /// silently falls back to poll).
+    Push,
+    /// Force the request-response poll; never open a push stream.
+    Poll,
+}
+
+impl std::str::FromStr for EventsTransport {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "push" => Ok(Self::Push),
+            "poll" => Ok(Self::Poll),
+            other => Err(format!(
+                "invalid events transport '{other}': expected auto, push, or poll"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for EventsTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Auto => "auto",
+            Self::Push => "push",
+            Self::Poll => "poll",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Configuration for the libp2p transport adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Libp2pConfig {
@@ -56,6 +105,22 @@ pub struct Libp2pConfig {
     /// the swarm but will be reported in capabilities.
     #[serde(default)]
     pub enable_webrtc: bool,
+
+    /// Default transport for the robot→operator event feed (ADR-024). The
+    /// operator's `auto`/`push`/`poll` selection; a per-command CLI flag
+    /// overrides it. Defaults to [`EventsTransport::Auto`].
+    #[serde(default)]
+    pub events_transport: EventsTransport,
+
+    /// Poll interval (milliseconds) for the event-feed poll fallback: how often
+    /// the operator re-requests `SubscribeEvents` when push is unavailable or
+    /// `events_transport = poll`. Ignored on the push path. Default 1500 ms.
+    #[serde(default = "default_events_poll_interval_ms")]
+    pub events_poll_interval_ms: u64,
+}
+
+fn default_events_poll_interval_ms() -> u64 {
+    1500
 }
 
 fn default_listen_addrs() -> Vec<String> {
@@ -85,6 +150,8 @@ impl Default for Libp2pConfig {
             max_inbound_connections: default_max_connections(),
             enable_webtransport: false,
             enable_webrtc: false,
+            events_transport: EventsTransport::default(),
+            events_poll_interval_ms: default_events_poll_interval_ms(),
         }
     }
 }

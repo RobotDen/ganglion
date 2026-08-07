@@ -35,6 +35,13 @@ pub enum FeedMsg {
     },
     /// The feed to `robot` dropped; `reason` is a short human string.
     Disconnected { robot: String, reason: String },
+    /// The active event transport (ADR-024). Reported when a feed opens and
+    /// again if `auto` falls back push→poll mid-session, so the title bar can
+    /// show which path is live. Dashboard-global (last writer wins across the
+    /// fleet), so it carries no per-robot key.
+    Transport {
+        transport: gang_libp2p::EventsTransport,
+    },
 }
 
 /// Coarse liveness of a peer, derived from how recently it was heard from.
@@ -203,6 +210,9 @@ pub struct DashboardState {
     pub gap_notice: Option<(String, u64)>,
     /// The relay address the fleet routes through, if known.
     pub relay_addr: Option<String>,
+    /// The active event transport (ADR-024), for the title-bar indicator.
+    /// `None` until the first feed opens.
+    pub feed_transport: Option<gang_libp2p::EventsTransport>,
     /// True until at least one robot is configured (drives the first-run panel).
     pub roster_empty: bool,
     /// Events buffered while paused, applied on resume.
@@ -229,6 +239,7 @@ impl DashboardState {
             last_activity: None,
             gap_notice: None,
             relay_addr,
+            feed_transport: None,
             pending: Vec::new(),
         }
     }
@@ -282,8 +293,8 @@ impl DashboardState {
                     }
                     // A fresh stats read is direct evidence the circuit is alive
                     // now — heartbeats are only every 15s (agent
-                    // HEARTBEAT_INTERVAL), so the ~1.5s stats poll is what keeps
-                    // a healthy peer showing "live" between beats.
+                    // HEARTBEAT_INTERVAL), so the periodic (~2s) stats sample is
+                    // what keeps a healthy peer showing "live" between beats.
                     p.conn_down = false;
                     p.connected = true;
                     p.last_seen = Some(now);
@@ -294,6 +305,7 @@ impl DashboardState {
                 });
             }
             FeedMsg::Event { robot, event } => self.apply_event(&robot, &event, now),
+            FeedMsg::Transport { transport } => self.feed_transport = Some(transport),
         }
     }
 
@@ -518,7 +530,19 @@ impl DashboardState {
         (now - self.started_at).num_seconds().max(0) as u64
     }
 
-    /// Whether the feed looks stale (no activity within the poll cadence * 3).
+    /// A short label for the active event transport (ADR-024), for the title
+    /// bar: `push`, `poll(1.5s)`, or empty until the first feed opens.
+    pub fn feed_transport_label(&self) -> String {
+        match self.feed_transport {
+            Some(gang_libp2p::EventsTransport::Poll) => "poll(1.5s)".to_string(),
+            Some(_) => "push".to_string(),
+            None => String::new(),
+        }
+    }
+
+    /// Whether the feed looks stale: no activity (event or ~2s stats sample)
+    /// within 4.5s. The event feed is push (instant), so staleness reflects a
+    /// dead/stalled connection rather than a missed poll.
     pub fn feed_stale(&self, now: DateTime<Utc>) -> bool {
         match self.last_activity {
             None => true,

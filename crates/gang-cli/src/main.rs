@@ -1,4 +1,8 @@
 mod commands;
+mod doctor;
+mod fleet_html;
+mod foxglove;
+mod mcp;
 mod tui;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -43,6 +47,28 @@ struct Cli {
 pub enum OutputFormat {
     Text,
     Json,
+}
+
+/// Event-feed transport selector for `logs`/`connect`/`tui` (ADR-024). Maps to
+/// [`gang_libp2p::EventsTransport`]; `auto` prefers push and falls back to poll.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum EventsTransportArg {
+    /// Prefer the push substream; fall back to poll automatically (default).
+    Auto,
+    /// Force the push substream; error if it cannot be opened.
+    Push,
+    /// Force the request-response poll; never open a push stream.
+    Poll,
+}
+
+impl From<EventsTransportArg> for gang_libp2p::EventsTransport {
+    fn from(a: EventsTransportArg) -> Self {
+        match a {
+            EventsTransportArg::Auto => Self::Auto,
+            EventsTransportArg::Push => Self::Push,
+            EventsTransportArg::Poll => Self::Poll,
+        }
+    }
 }
 
 /// Reject `--format json` on subcommands that only produce human-readable
@@ -263,6 +289,9 @@ enum Commands {
         /// Relay multiaddr (overrides registry and config defaults).
         #[arg(long, short = 'r')]
         relay: Option<String>,
+        /// Event-feed transport: auto (default), push, or poll (ADR-024).
+        #[arg(long, value_name = "MODE")]
+        events_transport: Option<EventsTransportArg>,
     },
 
     /// Run a local end-to-end demo: start agent, deploy diagnostics, invoke.
@@ -303,6 +332,54 @@ enum Commands {
         /// Robot name or peer ID (optional — if omitted, probes local network).
         robot: Option<String>,
     },
+
+    /// Print exactly what this network permits — the field-engineer's egress check.
+    ///
+    /// Runs a handful of outbound-reachability probes (TCP 443, UDP/QUIC,
+    /// non-443 TCP, DNS) and — if a relay is configured or given with
+    /// `--relay` — whether that relay's transport address is reachable. Prints
+    /// a PASS/FAIL table plus a copy-pasteable egress allowlist to hand to the
+    /// customer's network/security team. Exits non-zero when no viable
+    /// outbound path to a relay exists, so it drops straight into a support
+    /// thread: "run `gang doctor` and paste the output."
+    #[command(display_order = 51)]
+    Doctor {
+        /// Relay multiaddr to test reachability against (default: `default_relay`).
+        #[arg(long, short = 'r', value_name = "MULTIADDR")]
+        relay: Option<String>,
+    },
+
+    /// List bandwidth profiles for degraded-link streaming (`--profile <name>`).
+    ///
+    /// Shows the built-in presets (`full`, `lidar-low`, `vision-low`,
+    /// `logs-only`) plus any operator-defined profiles from config. These names
+    /// are accepted by streaming surfaces such as `gang view` to trade fidelity
+    /// for reachability on cellular / warehouse-Wi-Fi links.
+    #[command(display_order = 51)]
+    Profiles,
+
+    /// Fire webhooks when a metric breaches a threshold — `gang alert`.
+    ///
+    /// The useful 20% of alerting: a rule (metric, comparator, threshold,
+    /// cooldown) fires a Slack-compatible JSON webhook on breach. Rules and the
+    /// default webhook live in `~/.gang/config.toml`. Delivery is a JSON POST
+    /// via curl; `--dry-run` prints the payload instead.
+    #[command(display_order = 37)]
+    Alert {
+        #[command(subcommand)]
+        action: AlertAction,
+    },
+
+    /// Serve Ganglion tools to an AI agent over MCP (stdio) — `gang mcp`.
+    ///
+    /// A Model Context Protocol server exposing a curated, read-only
+    /// fleet-discovery toolset (status, peers, capabilities, `gang doctor`,
+    /// bandwidth profiles). The capability sandbox, signed manifests,
+    /// default-deny policy, and audit log mean an agent provably cannot exceed
+    /// what those mechanisms permit — the safest substrate for AI-generated
+    /// tooling. Speaks JSON-RPC 2.0 on stdout; do not combine with `--json`.
+    #[command(display_order = 36)]
+    Mcp,
 
     /// Show real per-transport statistics for the live circuit to a robot.
     #[command(display_order = 35)]
@@ -351,6 +428,17 @@ enum Commands {
         action: CapabilityAction,
     },
 
+    /// Scaffold a new signed capability — `gang new tool <name>`.
+    ///
+    /// A guided front door to the author loop: scaffolds the project (manifest,
+    /// tests, WIT) and prints the full idea → build → sign → publish path so a
+    /// signed tool can go from nothing to the open registry in one sitting.
+    #[command(display_order = 20)]
+    New {
+        #[command(subcommand)]
+        what: NewAction,
+    },
+
     /// Manage the capability registry.
     #[command(display_order = 40)]
     Registry {
@@ -373,8 +461,17 @@ enum Commands {
     },
 
     /// Show Ganglion status: version, identity, available and WIP capabilities.
+    ///
+    /// With `--html <path>`, instead writes a self-contained fleet-status page
+    /// (identity, registered peers, capability count, and recent audit) built
+    /// entirely from local state — a shareable snapshot, not a live dashboard
+    /// (use `gang tui` for live).
     #[command(display_order = 50)]
-    Status,
+    Status {
+        /// Write a self-contained fleet-status HTML page to this path.
+        #[arg(long, value_name = "PATH")]
+        html: Option<String>,
+    },
 
     /// List registered robots with live reachability from a presence probe.
     #[command(display_order = 33)]
@@ -389,8 +486,9 @@ enum Commands {
     ///
     /// Keys: ↑↓/j k select a peer · ⏎ inspect it · p pause the feed (for a
     /// clean capture) · / filter · a audit-only fullscreen · ? help · q/Esc
-    /// quit. The feed is a bounded ~1.5s poll (ADR-022); a live pulse shows it
-    /// is fresh. Honors NO_COLOR (monochrome/ASCII) and resizes gracefully.
+    /// quit. The feed is a genuine server-push substream (ADR-024) — events
+    /// land instantly; a live pulse shows it is fresh. Honors NO_COLOR
+    /// (monochrome/ASCII) and resizes gracefully.
     #[command(display_order = 32)]
     Tui {
         /// Focus a single registered robot instead of the whole fleet.
@@ -404,6 +502,9 @@ enum Commands {
         /// recording); Ctrl-C still quits.
         #[arg(long)]
         no_input: bool,
+        /// Event-feed transport: auto (default), push, or poll (ADR-024).
+        #[arg(long, value_name = "MODE")]
+        events_transport: Option<EventsTransportArg>,
     },
 
     /// Attach a live status view to a robot (presence + heartbeat + audit tail).
@@ -414,6 +515,34 @@ enum Commands {
         /// Preferred transport order for happy-eyeballs selection.
         #[arg(long, value_delimiter = ',')]
         prefer_transport: Option<Vec<String>>,
+        /// Event-feed transport: auto (default), push, or poll (ADR-024).
+        #[arg(long, value_name = "MODE")]
+        events_transport: Option<EventsTransportArg>,
+    },
+
+    /// Bridge a robot's live feed into Foxglove / Lichtblick — `gang view`.
+    ///
+    /// Opens a local Foxglove WebSocket endpoint (`ws://127.0.0.1:<port>`) and
+    /// forwards the robot's live, relay-delivered, capability-scoped Ganglion
+    /// event feed as a JSON channel you can watch in the tool you already have
+    /// open. `--profile` shapes the stream for degraded links (see
+    /// `gang profiles`). `--topics` is reserved for live ROS topic projection.
+    #[command(display_order = 32)]
+    View {
+        /// Robot name or peer ID.
+        robot: String,
+        /// Local TCP port for the Foxglove WebSocket endpoint (default: 8765).
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+        /// ROS topics to project (reserved; live topic streaming is pending).
+        #[arg(long, value_delimiter = ',', value_name = "TOPIC")]
+        topics: Option<Vec<String>>,
+        /// Bandwidth profile name for degraded links (see `gang profiles`).
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        /// Event-feed transport: auto (default), push, or poll (ADR-024).
+        #[arg(long, value_name = "MODE")]
+        events_transport: Option<EventsTransportArg>,
     },
 
     /// Generate shell completion scripts.
@@ -456,6 +585,47 @@ enum CapabilityAction {
     /// Generate a capability project skeleton.
     Scaffold {
         /// Capability name (e.g., "my-diagnostics").
+        name: String,
+        /// Language: rust, cpp, python, go.
+        #[arg(long, default_value = "rust")]
+        language: String,
+        /// Output directory (default: current directory).
+        #[arg(long)]
+        output_dir: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AlertAction {
+    /// Evaluate configured rules for a metric against a value; fire on breach.
+    Check {
+        /// Metric name to evaluate (matches `metric` in configured rules).
+        metric: String,
+        /// Observed value.
+        value: f64,
+        /// Webhook URL override (default: `alert_webhook` from config).
+        #[arg(long, value_name = "URL")]
+        webhook: Option<String>,
+        /// Print the payload instead of POSTing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Fire one sample alert to confirm webhook delivery.
+    Test {
+        /// Webhook URL override (default: `alert_webhook` from config).
+        #[arg(long, value_name = "URL")]
+        webhook: Option<String>,
+        /// Print the payload instead of POSTing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum NewAction {
+    /// Scaffold a new signed capability ("tool") and print the full author loop.
+    Tool {
+        /// Tool/capability name (e.g., "my-diagnostics").
         name: String,
         /// Language: rust, cpp, python, go.
         #[arg(long, default_value = "rust")]
@@ -734,6 +904,7 @@ async fn main() -> anyhow::Result<()> {
             since,
             peer,
             relay,
+            events_transport,
         } => {
             commands::logs(
                 &robot,
@@ -741,12 +912,27 @@ async fn main() -> anyhow::Result<()> {
                 since.as_deref(),
                 peer.as_deref(),
                 relay.as_deref(),
+                events_transport.map(Into::into),
                 &cli.format,
             )
             .await?
         }
         Commands::TestArchetype { archetype } => commands::test_archetype(&archetype).await?,
         Commands::Diagnose { robot } => commands::diagnose(robot.as_deref(), &cli.format).await?,
+        Commands::Doctor { relay } => doctor::doctor(relay.as_deref(), &cli.format).await?,
+        Commands::Profiles => commands::profiles(&cli.format).await?,
+        Commands::Mcp => mcp::serve(&cli.format).await?,
+        Commands::Alert { action } => match action {
+            AlertAction::Check {
+                metric,
+                value,
+                webhook,
+                dry_run,
+            } => commands::alert_check(&metric, value, webhook.as_deref(), dry_run).await?,
+            AlertAction::Test { webhook, dry_run } => {
+                commands::alert_test(webhook.as_deref(), dry_run).await?
+            }
+        },
         Commands::TransportStats {
             robot,
             peer,
@@ -777,6 +963,16 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 reject_json(&cli.format, "capability scaffold")?;
                 commands::capability_scaffold(&name, &language, output_dir.as_deref()).await?
+            }
+        },
+        Commands::New { what } => match what {
+            NewAction::Tool {
+                name,
+                language,
+                output_dir,
+            } => {
+                reject_json(&cli.format, "new tool")?;
+                commands::new_tool(&name, &language, output_dir.as_deref()).await?
             }
         },
         Commands::Registry { action } => match action {
@@ -836,17 +1032,44 @@ async fn main() -> anyhow::Result<()> {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "gang", &mut std::io::stdout());
         }
-        Commands::Status => commands::status(&cli.format).await?,
+        Commands::Status { html } => commands::status(&cli.format, html.as_deref()).await?,
         Commands::List => commands::list(&cli.format).await?,
         Commands::Tui {
             robot,
             frames,
             no_input,
-        } => tui::tui(robot.as_deref(), frames, no_input, &cli.format).await?,
+            events_transport,
+        } => {
+            tui::tui(
+                robot.as_deref(),
+                frames,
+                no_input,
+                events_transport.map(Into::into),
+                &cli.format,
+            )
+            .await?
+        }
         Commands::Connect {
             robot,
             prefer_transport: _,
-        } => commands::connect(&robot, &cli.format).await?,
+            events_transport,
+        } => commands::connect(&robot, events_transport.map(Into::into), &cli.format).await?,
+        Commands::View {
+            robot,
+            port,
+            topics,
+            profile,
+            events_transport,
+        } => {
+            commands::view(
+                &robot,
+                port,
+                &topics.unwrap_or_default(),
+                profile.as_deref(),
+                events_transport.map(Into::into),
+            )
+            .await?
+        }
         Commands::Relay {
             listen_addr,
             port,

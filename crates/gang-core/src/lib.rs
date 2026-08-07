@@ -22,10 +22,14 @@
 //! Error types live in [`error`].
 #![warn(missing_docs)]
 
+/// Minimal alerting primitive: metric → threshold → webhook.
+pub mod alert;
 /// Content-addressed artifact storage.
 pub mod artifacts;
 /// Append-only, hash-chained audit log.
 pub mod audit;
+/// Named bandwidth profiles for degraded-link streaming presets.
+pub mod bandwidth;
 /// Layer 3 broker request/response types and trait.
 pub mod broker;
 /// Capability groups and installed-capability descriptors.
