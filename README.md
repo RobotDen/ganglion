@@ -83,6 +83,8 @@ Full threat model: [docs/SECURITY.md](docs/SECURITY.md).
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the three layers, the eight WIT capability groups, and the crate map.
 - **[docs/NETWORK_ARCHETYPES.md](docs/NETWORK_ARCHETYPES.md)** — the five network environments Ganglion is designed around (open warehouse, NAT'd office, enterprise DMZ, regulated facility, mobile/CGNAT).
 - **[docs/CAPABILITY_AUTHOR_GUIDE.md](docs/CAPABILITY_AUTHOR_GUIDE.md)** — writing capabilities in Rust, C++, Python, or Go.
+- **[docs/ZENOH.md](docs/ZENOH.md)** — running Ganglion on `rmw_zenoh` fleets (it composes; Zenoh moves data, Ganglion adds reach + governance).
+- **[docs/OTA.md](docs/OTA.md)** — pairing Ganglion with Mender / balena for OS/app updates (reach + tooling vs. OTA — a clean split).
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — building from source and the test harness.
 
 ## Support & production

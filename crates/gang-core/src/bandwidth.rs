@@ -20,7 +20,7 @@
 //!   topic, enforced by the consumer as a minimum inter-message interval.
 //!
 //! Profiles are data, so operators can define their own in config and pass the
-//! name through unchanged; [`BandwidthProfile::resolve`] checks the built-ins
+//! name through unchanged; `BandwidthProfile::resolve` checks the built-ins
 //! first and then a caller-supplied set.
 
 use serde::{Deserialize, Serialize};
