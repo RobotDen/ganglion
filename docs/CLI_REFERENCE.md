@@ -744,6 +744,44 @@ Operators can define additional profiles in `~/.gang/config.toml` under
 `bandwidth_profiles`; they appear here marked `(custom)`. Built-in names take
 precedence. Use `--json` for machine-readable output.
 
+### `gang mcp`
+
+Serve Ganglion tools to an AI agent over the Model Context Protocol (stdio,
+JSON-RPC 2.0). Exposes a curated, **read-only** fleet-discovery toolset —
+`gang_status`, `list_peers`, `list_capabilities`, `network_doctor`,
+`list_bandwidth_profiles`. The capability sandbox, signed manifests,
+default-deny policy, and audit log mean an agent provably cannot exceed what
+those mechanisms permit — the safest substrate for AI-generated tooling.
+Mutating tools (deploy/run) are intentionally not exposed yet; when added they
+will be policy-checked and audited exactly like the CLI.
+
+```jsonc
+// Example client → server exchange (newline-delimited JSON-RPC):
+{"jsonrpc":"2.0","id":1,"method":"initialize"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"network_doctor","arguments":{}}}
+```
+
+stdout is the JSON-RPC channel, so `gang mcp` cannot be combined with `--json`.
+
+### `gang alert check <metric> <value>` / `gang alert test`
+
+The metric→threshold→webhook alerting primitive — the useful 20%, not an
+incident-management platform. Rules (`name`, `metric`, `comparator`,
+`threshold`, `cooldown_secs`) and a default `alert_webhook` live in
+`~/.gang/config.toml`. On breach, a Slack-incoming-webhook–compatible JSON
+payload is POSTed (via `curl`; any JSON endpoint works).
+
+```bash
+$ gang alert test --dry-run          # confirm wiring; print the sample payload
+$ gang alert check cpu_temp_c 91.5   # evaluate rules for cpu_temp_c against 91.5
+BREACH  overheat: cpu_temp_c = 91.5 (> 80)
+Alert delivered to webhook.
+```
+
+`--webhook <url>` overrides the configured URL; `--dry-run` prints the payload
+instead of POSTing.
+
 ### `gang transport-stats <robot>`
 
 Show REAL per-transport statistics for the live circuit to a robot, read from

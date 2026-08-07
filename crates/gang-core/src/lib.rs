@@ -22,6 +22,8 @@
 //! Error types live in [`error`].
 #![warn(missing_docs)]
 
+/// Minimal alerting primitive: metric → threshold → webhook.
+pub mod alert;
 /// Content-addressed artifact storage.
 pub mod artifacts;
 /// Append-only, hash-chained audit log.

@@ -22,6 +22,15 @@ pub struct OperatorConfig {
     /// `--profile <name>` is resolved. Built-in names take precedence.
     #[serde(default)]
     pub bandwidth_profiles: Vec<gang_core::bandwidth::BandwidthProfile>,
+
+    /// Webhook URL alerts POST to (Slack-incoming-webhook compatible; any
+    /// endpoint accepting JSON works). `gang alert --webhook` overrides it.
+    #[serde(default)]
+    pub alert_webhook: Option<String>,
+
+    /// Alerting rules evaluated by `gang alert check`.
+    #[serde(default)]
+    pub alert_rules: Vec<gang_core::alert::AlertRule>,
 }
 
 impl Default for OperatorConfig {
@@ -34,6 +43,8 @@ impl Default for OperatorConfig {
             default_relay: None,
             host_key_policy: default_host_key_policy(),
             bandwidth_profiles: Vec::new(),
+            alert_webhook: None,
+            alert_rules: Vec::new(),
         }
     }
 }
@@ -92,7 +103,7 @@ impl OperatorConfig {
 }
 
 /// `gang status` — show version, identity, and capability summary.
-pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn status(format: &OutputFormat, html_path: Option<&str>) -> anyhow::Result<()> {
     let version = env!("CARGO_PKG_VERSION");
 
     // Check identity
@@ -105,6 +116,11 @@ pub async fn status(format: &OutputFormat) -> anyhow::Result<()> {
     } else {
         "not generated (run `gang identity generate`)".to_string()
     };
+
+    // Fleet-status HTML export short-circuits the normal listing output.
+    if let Some(path) = html_path {
+        return write_fleet_status_html(path, version, &identity_status);
+    }
 
     // Registry count
     let reg_dir = registry_dir();
@@ -3979,6 +3995,199 @@ pub async fn diagnose(robot: Option<&str>, format: &crate::OutputFormat) -> anyh
     Ok(())
 }
 
+/// `gang new tool <name>` — the guided capability author loop. Scaffolds the
+/// project (delegating to `capability_scaffold`), then prints the remaining
+/// sign + publish steps so a signed tool reaches the open registry in one go.
+pub async fn new_tool(name: &str, language: &str, output_dir: Option<&str>) -> anyhow::Result<()> {
+    capability_scaffold(name, language, output_dir).await?;
+    println!("  4. Test:    cargo test   (in {name}/)");
+    println!("  5. Publish: gang registry publish {name}.component.wasm  (open, signed registry)");
+    println!();
+    println!(
+        "Every published tool is signed and declares its capabilities up front. \
+         Full author loop: docs/CAPABILITY_AUTHOR_GUIDE.md"
+    );
+    Ok(())
+}
+
+/// Build the fleet-status HTML page from local state and write it to `path`.
+fn write_fleet_status_html(path: &str, version: &str, identity: &str) -> anyhow::Result<()> {
+    use crate::fleet_html::{AuditRow, FleetStatus, PeerRow};
+    use gang_core::identity::Role;
+
+    let config = OperatorConfig::load();
+
+    let peer_registry =
+        gang_core::identity::PeerRegistry::load(&gang_core::identity::default_registry_path())
+            .unwrap_or_default();
+    let peers: Vec<PeerRow> = peer_registry
+        .list()
+        .map(|(name, e)| {
+            let role = match e.role {
+                Role::RobotAgent => "robot-agent",
+                Role::Operator => "operator",
+                Role::Relay => "relay",
+            };
+            PeerRow {
+                name: name.to_string(),
+                peer_id: e.peer_id.to_string(),
+                role: role.to_string(),
+                relays: e.relay_addrs.join(", "),
+                libp2p_id: e.libp2p_id.clone().unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    let registry_count = match gang_core::registry::Registry::open(&registry_dir()) {
+        Ok(reg) => reg.list().len(),
+        Err(_) => 0,
+    };
+
+    // Recent audit, newest first, capped.
+    let audit_log = gang_core::audit::AuditLog::new(gang_core::audit::AuditLog::default_path(), 0);
+    let mut records = audit_log.read_all().unwrap_or_default();
+    records.reverse();
+    let recent_audit: Vec<AuditRow> = records
+        .iter()
+        .take(25)
+        .map(|r| AuditRow {
+            component: r.component_name.clone(),
+            version: r.component_version.clone(),
+            operator: abbrev_id(&r.operator_peer_id.to_string()),
+            status: gang_core::events::exit_status_label(&r.exit_status).to_string(),
+            started_at: r.started_at.to_rfc3339(),
+            capabilities: r.capabilities_used.join(", "),
+        })
+        .collect();
+
+    let data = FleetStatus {
+        version: version.to_string(),
+        identity: identity.to_string(),
+        default_relay: config.default_relay.clone(),
+        registry_count,
+        peers,
+        recent_audit,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    let html = crate::fleet_html::render(&data);
+    std::fs::write(path, html).with_context(|| format!("writing fleet-status HTML to {path}"))?;
+    println!("Wrote fleet-status page to {path}");
+    Ok(())
+}
+
+/// Abbreviate a peer id for compact display.
+fn abbrev_id(id: &str) -> String {
+    if id.len() > 16 {
+        format!("{}…", &id[..16])
+    } else {
+        id.to_string()
+    }
+}
+
+/// `gang alert` — the metric→threshold→webhook alerting primitive.
+///
+/// `check` evaluates configured rules for `metric` against `value` and fires a
+/// webhook for each breach. `test` fires one sample alert to confirm the
+/// webhook wiring. `--dry-run` prints the payload instead of POSTing. Delivery
+/// is a JSON POST via `curl` (kept out of the core so gang-core stays
+/// dependency-free); Slack incoming webhooks and any JSON endpoint work.
+pub async fn alert_check(
+    metric: &str,
+    value: f64,
+    webhook: Option<&str>,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    use gang_core::alert::webhook_payload;
+
+    let config = OperatorConfig::load();
+    let rules: Vec<_> = config
+        .alert_rules
+        .iter()
+        .filter(|r| r.metric == metric)
+        .collect();
+    if rules.is_empty() {
+        println!(
+            "No alert rules configured for metric '{metric}'. Add rules under [[alert_rules]] in ~/.gang/config.toml."
+        );
+        return Ok(());
+    }
+
+    let url = webhook.map(str::to_string).or(config.alert_webhook.clone());
+    let mut fired = 0;
+    for rule in rules {
+        if rule.breached(value) {
+            let payload = webhook_payload(rule, value);
+            println!("BREACH  {}", rule.summary(value));
+            deliver_webhook(url.as_deref(), &payload, dry_run)?;
+            fired += 1;
+        } else {
+            println!(
+                "ok      {}: {} = {} (threshold not breached)",
+                rule.name, metric, value
+            );
+        }
+    }
+    if fired == 0 {
+        println!("No rules breached; nothing sent.");
+    }
+    Ok(())
+}
+
+/// `gang alert test` — fire one sample alert to confirm webhook delivery.
+pub async fn alert_test(webhook: Option<&str>, dry_run: bool) -> anyhow::Result<()> {
+    use gang_core::alert::{AlertRule, Comparator, webhook_payload};
+
+    let config = OperatorConfig::load();
+    let url = webhook.map(str::to_string).or(config.alert_webhook.clone());
+    let sample = AlertRule {
+        name: "sample-alert".into(),
+        metric: "cpu_temp_c".into(),
+        comparator: Comparator::Gt,
+        threshold: 80.0,
+        cooldown_secs: 0,
+    };
+    let payload = webhook_payload(&sample, 91.5);
+    println!("Sample alert: {}", sample.summary(91.5));
+    deliver_webhook(url.as_deref(), &payload, dry_run)
+}
+
+/// Deliver a webhook payload. Prints it when `dry_run` or when no URL is set;
+/// otherwise POSTs it as JSON via `curl`.
+fn deliver_webhook(url: Option<&str>, payload: &str, dry_run: bool) -> anyhow::Result<()> {
+    match (url, dry_run) {
+        (_, true) | (None, _) => {
+            if url.is_none() && !dry_run {
+                println!(
+                    "(no webhook configured — showing payload; set alert_webhook or pass --webhook)"
+                );
+            }
+            println!("{payload}");
+            Ok(())
+        }
+        (Some(url), false) => {
+            let status = std::process::Command::new("curl")
+                .args([
+                    "-sS",
+                    "-X",
+                    "POST",
+                    "-H",
+                    "Content-Type: application/json",
+                    "--data-binary",
+                    payload,
+                    url,
+                ])
+                .status()
+                .map_err(|e| anyhow::anyhow!("failed to run curl to POST the webhook: {e}"))?;
+            if !status.success() {
+                anyhow::bail!("webhook POST failed (curl exit {:?})", status.code());
+            }
+            println!("Alert delivered to webhook.");
+            Ok(())
+        }
+    }
+}
+
 /// `gang profiles` — list the bandwidth profiles available for degraded-link
 /// streaming (built-ins plus any operator-defined ones from config).
 pub async fn profiles(format: &OutputFormat) -> anyhow::Result<()> {
@@ -5177,7 +5386,7 @@ clean:
 }
 
 /// Default registry directory.
-fn registry_dir() -> PathBuf {
+pub(crate) fn registry_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("gang")

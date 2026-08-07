@@ -427,6 +427,22 @@ pub fn render_text(report: &DoctorReport) -> String {
     out
 }
 
+/// Gather a [`DoctorReport`] without printing anything — for callers that need
+/// the structured result (e.g. the MCP server) rather than the CLI rendering.
+pub async fn gather_report(relay: Option<String>) -> DoctorReport {
+    let identity_present = gang_core::identity::default_key_path().exists();
+    tokio::task::spawn_blocking(move || build_report(relay, identity_present))
+        .await
+        .unwrap_or_else(|_| DoctorReport {
+            checks: Vec::new(),
+            relay: None,
+            relay_reachable: None,
+            identity_present,
+            allowlist: derive_allowlist(None),
+            viable_path: false,
+        })
+}
+
 /// `gang doctor` entry point.
 pub async fn doctor(relay: Option<&str>, format: &OutputFormat) -> anyhow::Result<()> {
     // Resolve the relay: explicit --relay wins, else config `default_relay`.

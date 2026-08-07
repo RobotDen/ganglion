@@ -1,6 +1,8 @@
 mod commands;
 mod doctor;
+mod fleet_html;
 mod foxglove;
+mod mcp;
 mod tui;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -356,6 +358,29 @@ enum Commands {
     #[command(display_order = 51)]
     Profiles,
 
+    /// Fire webhooks when a metric breaches a threshold — `gang alert`.
+    ///
+    /// The useful 20% of alerting: a rule (metric, comparator, threshold,
+    /// cooldown) fires a Slack-compatible JSON webhook on breach. Rules and the
+    /// default webhook live in `~/.gang/config.toml`. Delivery is a JSON POST
+    /// via curl; `--dry-run` prints the payload instead.
+    #[command(display_order = 37)]
+    Alert {
+        #[command(subcommand)]
+        action: AlertAction,
+    },
+
+    /// Serve Ganglion tools to an AI agent over MCP (stdio) — `gang mcp`.
+    ///
+    /// A Model Context Protocol server exposing a curated, read-only
+    /// fleet-discovery toolset (status, peers, capabilities, `gang doctor`,
+    /// bandwidth profiles). The capability sandbox, signed manifests,
+    /// default-deny policy, and audit log mean an agent provably cannot exceed
+    /// what those mechanisms permit — the safest substrate for AI-generated
+    /// tooling. Speaks JSON-RPC 2.0 on stdout; do not combine with `--json`.
+    #[command(display_order = 36)]
+    Mcp,
+
     /// Show real per-transport statistics for the live circuit to a robot.
     #[command(display_order = 35)]
     TransportStats {
@@ -403,6 +428,17 @@ enum Commands {
         action: CapabilityAction,
     },
 
+    /// Scaffold a new signed capability — `gang new tool <name>`.
+    ///
+    /// A guided front door to the author loop: scaffolds the project (manifest,
+    /// tests, WIT) and prints the full idea → build → sign → publish path so a
+    /// signed tool can go from nothing to the open registry in one sitting.
+    #[command(display_order = 20)]
+    New {
+        #[command(subcommand)]
+        what: NewAction,
+    },
+
     /// Manage the capability registry.
     #[command(display_order = 40)]
     Registry {
@@ -425,8 +461,17 @@ enum Commands {
     },
 
     /// Show Ganglion status: version, identity, available and WIP capabilities.
+    ///
+    /// With `--html <path>`, instead writes a self-contained fleet-status page
+    /// (identity, registered peers, capability count, and recent audit) built
+    /// entirely from local state — a shareable snapshot, not a live dashboard
+    /// (use `gang tui` for live).
     #[command(display_order = 50)]
-    Status,
+    Status {
+        /// Write a self-contained fleet-status HTML page to this path.
+        #[arg(long, value_name = "PATH")]
+        html: Option<String>,
+    },
 
     /// List registered robots with live reachability from a presence probe.
     #[command(display_order = 33)]
@@ -540,6 +585,47 @@ enum CapabilityAction {
     /// Generate a capability project skeleton.
     Scaffold {
         /// Capability name (e.g., "my-diagnostics").
+        name: String,
+        /// Language: rust, cpp, python, go.
+        #[arg(long, default_value = "rust")]
+        language: String,
+        /// Output directory (default: current directory).
+        #[arg(long)]
+        output_dir: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AlertAction {
+    /// Evaluate configured rules for a metric against a value; fire on breach.
+    Check {
+        /// Metric name to evaluate (matches `metric` in configured rules).
+        metric: String,
+        /// Observed value.
+        value: f64,
+        /// Webhook URL override (default: `alert_webhook` from config).
+        #[arg(long, value_name = "URL")]
+        webhook: Option<String>,
+        /// Print the payload instead of POSTing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Fire one sample alert to confirm webhook delivery.
+    Test {
+        /// Webhook URL override (default: `alert_webhook` from config).
+        #[arg(long, value_name = "URL")]
+        webhook: Option<String>,
+        /// Print the payload instead of POSTing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum NewAction {
+    /// Scaffold a new signed capability ("tool") and print the full author loop.
+    Tool {
+        /// Tool/capability name (e.g., "my-diagnostics").
         name: String,
         /// Language: rust, cpp, python, go.
         #[arg(long, default_value = "rust")]
@@ -835,6 +921,18 @@ async fn main() -> anyhow::Result<()> {
         Commands::Diagnose { robot } => commands::diagnose(robot.as_deref(), &cli.format).await?,
         Commands::Doctor { relay } => doctor::doctor(relay.as_deref(), &cli.format).await?,
         Commands::Profiles => commands::profiles(&cli.format).await?,
+        Commands::Mcp => mcp::serve(&cli.format).await?,
+        Commands::Alert { action } => match action {
+            AlertAction::Check {
+                metric,
+                value,
+                webhook,
+                dry_run,
+            } => commands::alert_check(&metric, value, webhook.as_deref(), dry_run).await?,
+            AlertAction::Test { webhook, dry_run } => {
+                commands::alert_test(webhook.as_deref(), dry_run).await?
+            }
+        },
         Commands::TransportStats {
             robot,
             peer,
@@ -865,6 +963,16 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 reject_json(&cli.format, "capability scaffold")?;
                 commands::capability_scaffold(&name, &language, output_dir.as_deref()).await?
+            }
+        },
+        Commands::New { what } => match what {
+            NewAction::Tool {
+                name,
+                language,
+                output_dir,
+            } => {
+                reject_json(&cli.format, "new tool")?;
+                commands::new_tool(&name, &language, output_dir.as_deref()).await?
             }
         },
         Commands::Registry { action } => match action {
@@ -924,7 +1032,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "gang", &mut std::io::stdout());
         }
-        Commands::Status => commands::status(&cli.format).await?,
+        Commands::Status { html } => commands::status(&cli.format, html.as_deref()).await?,
         Commands::List => commands::list(&cli.format).await?,
         Commands::Tui {
             robot,
