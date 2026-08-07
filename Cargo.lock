@@ -1677,6 +1677,7 @@ name = "gang"
 version = "2.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "blake3",
  "chrono",
  "ciborium",

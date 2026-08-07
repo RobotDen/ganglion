@@ -4400,6 +4400,171 @@ pub async fn connect(
     result
 }
 
+/// `gang view` — bridge a robot's live feed into Foxglove / Lichtblick.
+///
+/// Opens a local Foxglove WebSocket endpoint the operator points their existing
+/// visualization tool at (`ws://127.0.0.1:<port>`), and forwards the robot's
+/// live Ganglion event stream (presence, policy decisions, audit, connection,
+/// heartbeat) — arriving through the relay and capability-scoped like every
+/// other remote access — as a JSON channel. A `--profile` shapes the forwarded
+/// stream for degraded links.
+///
+/// Live ROS *topic* sample projection rides on the same bridge but depends on
+/// robot-side topic streaming (the `TopicSubscribe` broker op currently returns
+/// topic info, not samples); `--topics` is accepted and reserved for it.
+pub async fn view(
+    robot: &str,
+    port: u16,
+    topics: &[String],
+    profile_name: Option<&str>,
+    events_transport: Option<gang_libp2p::EventsTransport>,
+) -> anyhow::Result<()> {
+    use gang_core::bandwidth::BandwidthProfile;
+    use tokio::sync::broadcast;
+
+    // Resolve the bandwidth profile (built-ins + operator config).
+    let config = OperatorConfig::load();
+    let profile = match profile_name {
+        Some(name) => {
+            BandwidthProfile::resolve(name, &config.bandwidth_profiles).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown bandwidth profile '{name}'. Run `gang profiles` to list options."
+                )
+            })?
+        }
+        None => BandwidthProfile::full(),
+    };
+
+    let mode = events_transport.unwrap_or_default();
+    let target = resolve_target(robot, None, None)?;
+    if target.is_local {
+        anyhow::bail!(
+            "`gang view` needs a live connection; '{robot}' resolved to a local agent. \
+             Point at a remote robot (name, peer id)."
+        );
+    }
+    let remote = prepare_remote(&target)?;
+    let display = remote.display();
+    let timeout = std::time::Duration::from_secs(CONTROL_TIMEOUT_SECS);
+    let conn = establish_remote_connection(&remote, timeout).await?;
+
+    // The single always-available channel: the governed event feed.
+    const EVENTS_CHANNEL_ID: u32 = 1;
+    let channels = vec![crate::foxglove::Channel {
+        id: EVENTS_CHANNEL_ID,
+        topic: "/ganglion/events".into(),
+        encoding: "json".into(),
+        schema_name: "ganglion.AgentEvent".into(),
+        // An open JSON object schema — Foxglove renders JSON without a strict
+        // schema; a precise schema can be added later.
+        schema: r#"{"type":"object"}"#.into(),
+        schema_encoding: "jsonschema".into(),
+    }];
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|e| anyhow::anyhow!("could not bind 127.0.0.1:{port} for the bridge: {e}"))?;
+    let bound = listener.local_addr()?;
+
+    let (tx, _rx) = broadcast::channel::<crate::foxglove::BridgeMessage>(1024);
+    let serve_tx = tx.clone();
+    let serve_channels = channels.clone();
+    tokio::spawn(async move {
+        let _ = crate::foxglove::serve(listener, "gang view".to_string(), serve_channels, serve_tx)
+            .await;
+    });
+
+    println!("Bridging '{display}' into Foxglove/Lichtblick.");
+    println!();
+    println!("  1. Open Foxglove Studio or Lichtblick");
+    println!("  2. Add connection → Foxglove WebSocket → ws://{bound}");
+    println!("  3. Subscribe to the /ganglion/events channel");
+    println!();
+    if !topics.is_empty() {
+        eprintln!(
+            "note: live ROS topic projection ({}) is not yet available — bridging the \
+             governed event feed for now.",
+            topics.join(", ")
+        );
+    }
+    println!(
+        "Profile: {} ({}). Ctrl-C to stop.",
+        profile.name, profile.description
+    );
+    println!();
+
+    let mut stream = conn
+        .transport
+        .subscribe_events(&remote.gang_id, None, timeout, mode)
+        .await
+        .map_err(|e| anyhow::anyhow!("connecting to '{display}' failed: {e}"))?;
+
+    let result = pump_events_to_bridge(&mut stream, &tx, EVENTS_CHANNEL_ID, &profile).await;
+    drop(stream);
+    conn.close().await;
+    result
+}
+
+/// Forward events from a live feed onto the Foxglove bridge, applying the
+/// bandwidth profile (decimation, per-message size cap, rate ceiling). Runs
+/// until Ctrl-C or the feed closes.
+async fn pump_events_to_bridge<S>(
+    stream: &mut S,
+    tx: &tokio::sync::broadcast::Sender<crate::foxglove::BridgeMessage>,
+    channel_id: u32,
+    profile: &gang_core::bandwidth::BandwidthProfile,
+) -> anyhow::Result<()>
+where
+    S: futures::Stream<Item = gang_core::events::AgentEvent> + Unpin,
+{
+    use futures::StreamExt;
+
+    let decimation = profile.effective_decimation();
+    let min_interval = profile
+        .min_interval_ms()
+        .map(std::time::Duration::from_millis);
+    let mut seen: u64 = 0;
+    let mut last_sent: Option<std::time::Instant> = None;
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            next = stream.next() => match next {
+                None => return Ok(()),
+                Some(ev) => {
+                    // Decimation: forward every Nth event.
+                    let idx = seen;
+                    seen = seen.wrapping_add(1);
+                    if !idx.is_multiple_of(decimation as u64) {
+                        continue;
+                    }
+                    // Rate ceiling.
+                    match (min_interval, last_sent) {
+                        (Some(interval), Some(prev)) if prev.elapsed() < interval => continue,
+                        _ => {}
+                    }
+                    let Ok(payload) = serde_json::to_vec(&ev) else { continue };
+                    // Per-message size cap.
+                    if !profile.allows_message_size(payload.len() as u64) {
+                        continue;
+                    }
+                    let timestamp_ns = chrono::Utc::now()
+                        .timestamp_nanos_opt()
+                        .unwrap_or(0)
+                        .max(0) as u64;
+                    // A send error just means no clients are attached yet.
+                    let _ = tx.send(crate::foxglove::BridgeMessage {
+                        channel_id,
+                        timestamp_ns,
+                        payload,
+                    });
+                    last_sent = Some(std::time::Instant::now());
+                }
+            }
+        }
+    }
+}
+
 /// Drain the initial snapshot + retained catch-up burst from a freshly-opened
 /// feed: collect events until [`CATCHUP_IDLE`] elapses with nothing new (the
 /// burst is contiguous), or the robot closes the feed. Works over either

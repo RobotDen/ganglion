@@ -1113,6 +1113,42 @@ presence  v2.1.0  up 12s  archetype=unknown  caps=[diagnostics]
 |------|-------------|
 | `--prefer-transport <t1,t2>` | Preferred transport order (accepted; reserved for happy-eyeballs selection). |
 
+### `gang view <robot>`
+
+Bridge a robot's live feed into **Foxglove Studio** or **Lichtblick** — the
+visualization tool ROS engineers already have open — instead of building a
+bespoke UI. `gang view` opens a local [Foxglove WebSocket][fx] endpoint; the
+feed reaches it through the relay and is capability-scoped and audited like any
+other remote access. Ganglion supplies the reach and the governance; Foxglove
+supplies the pixels.
+
+```bash
+$ gang view up-robot --profile logs-only
+Bridging 'up-robot' into Foxglove/Lichtblick.
+
+  1. Open Foxglove Studio or Lichtblick
+  2. Add connection → Foxglove WebSocket → ws://127.0.0.1:8765
+  3. Subscribe to the /ganglion/events channel
+
+Profile: logs-only (Last-resort link: every message but only small (<=16 KiB) payloads.). Ctrl-C to stop.
+```
+
+Today the bridge forwards the robot's live **Ganglion event feed** (presence,
+policy decisions, audit, connection changes, heartbeats) as a JSON channel
+(`/ganglion/events`). Live ROS **topic** projection rides on the same bridge and
+is reserved behind `--topics`; it depends on robot-side topic sample streaming
+(the `TopicSubscribe` broker operation currently returns topic info, not live
+samples).
+
+| Flag | Description |
+|------|-------------|
+| `--port <n>` | Local TCP port for the WebSocket endpoint (default: 8765). |
+| `--topics <a,b>` | ROS topics to project (reserved; live topic streaming pending). |
+| `--profile <name>` | Bandwidth profile for degraded links (see `gang profiles`). |
+| `--events-transport <mode>` | Event-feed transport: `auto` (default), `push`, or `poll`. |
+
+[fx]: https://github.com/foxglove/ws-protocol
+
 ### `gang tui`
 
 The **live fleet dashboard** — a full-screen [ratatui](https://ratatui.rs)

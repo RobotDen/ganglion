@@ -1,5 +1,6 @@
 mod commands;
 mod doctor;
+mod foxglove;
 mod tui;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -474,6 +475,31 @@ enum Commands {
         events_transport: Option<EventsTransportArg>,
     },
 
+    /// Bridge a robot's live feed into Foxglove / Lichtblick — `gang view`.
+    ///
+    /// Opens a local Foxglove WebSocket endpoint (`ws://127.0.0.1:<port>`) and
+    /// forwards the robot's live, relay-delivered, capability-scoped Ganglion
+    /// event feed as a JSON channel you can watch in the tool you already have
+    /// open. `--profile` shapes the stream for degraded links (see
+    /// `gang profiles`). `--topics` is reserved for live ROS topic projection.
+    #[command(display_order = 32)]
+    View {
+        /// Robot name or peer ID.
+        robot: String,
+        /// Local TCP port for the Foxglove WebSocket endpoint (default: 8765).
+        #[arg(long, default_value_t = 8765)]
+        port: u16,
+        /// ROS topics to project (reserved; live topic streaming is pending).
+        #[arg(long, value_delimiter = ',', value_name = "TOPIC")]
+        topics: Option<Vec<String>>,
+        /// Bandwidth profile name for degraded links (see `gang profiles`).
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        /// Event-feed transport: auto (default), push, or poll (ADR-024).
+        #[arg(long, value_name = "MODE")]
+        events_transport: Option<EventsTransportArg>,
+    },
+
     /// Generate shell completion scripts.
     #[command(display_order = 54)]
     Completions {
@@ -920,6 +946,22 @@ async fn main() -> anyhow::Result<()> {
             prefer_transport: _,
             events_transport,
         } => commands::connect(&robot, events_transport.map(Into::into), &cli.format).await?,
+        Commands::View {
+            robot,
+            port,
+            topics,
+            profile,
+            events_transport,
+        } => {
+            commands::view(
+                &robot,
+                port,
+                &topics.unwrap_or_default(),
+                profile.as_deref(),
+                events_transport.map(Into::into),
+            )
+            .await?
+        }
         Commands::Relay {
             listen_addr,
             port,
