@@ -2,6 +2,11 @@
 
 This document describes Ganglion's threat model, security mechanisms, and trust boundaries.
 
+> Preparing a security review or vendor assessment? A reviewer-facing overview
+> of this architecture lives at
+> [tafylabs.io/fleetlink/security](https://tafylabs.io/fleetlink/security);
+> this document is the full technical detail behind it.
+
 ## Threat model
 
 Ganglion operates in a specific threat environment: robots deployed on customer networks where the network itself is untrusted and potentially hostile. The operator needs to reach robots, deploy diagnostic tools, and retrieve data — all without inbound connectivity and without trusting the network path.

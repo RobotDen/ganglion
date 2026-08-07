@@ -74,7 +74,7 @@ Full reference: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Ed25519 identity (PeerId = Blake3 of the public key) · Noise-encrypted channels · signed component manifests verified against a trust store · a **default-deny** policy engine that fails closed on malformed input · tamper-evident Blake3 hash-chain audit log · replay protection on control requests · a TOCTOU-closed symlink jail, command allowlisting, and SSRF guards on the brokers · fuel/memory/deadline limits on every WASM execution.
 
-Full threat model: [docs/SECURITY.md](docs/SECURITY.md).
+Full threat model: [docs/SECURITY.md](docs/SECURITY.md). Taking this architecture through a security review? There's a reviewer-facing overview at [tafylabs.io/fleetlink/security](https://tafylabs.io/fleetlink/security).
 
 ## Learn more
 
@@ -91,7 +91,7 @@ Full threat model: [docs/SECURITY.md](docs/SECURITY.md).
 
 Ganglion is Apache-2.0 — run it, fork it, no strings. If it saves you a truck roll, **[sponsoring the den](https://github.com/sponsors/karma0)** is a welcome thanks and keeps the open core moving.
 
-When one engineer's setup becomes a fleet with auditors, SLAs, and many sites, that's where the open core ends and **[FleetLink](https://tafylabs.io)** begins — the enterprise layer built on this substrate: multi-tenant gateway, hosted/HA relay, SSO and RBAC, compliance reporting, and fleet-scale OTA, plus fixed-scope architecture reviews and implementations by the people who wrote Ganglion. Start at **[tafylabs.io](https://tafylabs.io)** or email **bobby@tafy.ai**.
+When one engineer's setup becomes a fleet with auditors, SLAs, and many sites, that's where the open core ends and **[FleetLink](https://tafylabs.io/fleetlink)** begins — the enterprise layer built on this substrate: multi-tenant gateway, hosted/HA relay, SSO and RBAC, compliance reporting, and fleet-scale OTA, plus fixed-scope architecture reviews and implementations by the people who wrote Ganglion. Start at **[tafylabs.io/fleetlink](https://tafylabs.io/fleetlink)** or email **bobby@tafy.ai**.
 
 ## License
 

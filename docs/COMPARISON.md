@@ -155,7 +155,7 @@ those were never its goals.
   Ganglion earns its complexity on networks you *don't* control.
 - **You want a managed SaaS with dashboards and support.** Ganglion is an
   Apache-2.0 substrate you operate yourself. (That said — the commercial layer
-  on top of it is [FleetLink](https://tafylabs.io).)
+  on top of it is [FleetLink](https://tafylabs.io/fleetlink).)
 - **You don't run ROS 2.** The connectivity and WASM layers are generic, but
   the brokers, capabilities, and tooling are built for ROS 2 fleets. Elsewhere
   you'd be using half the project.
