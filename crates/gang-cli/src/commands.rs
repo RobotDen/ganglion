@@ -17,6 +17,11 @@ pub struct OperatorConfig {
     /// Identity verification policy: "strict" (default), "tofu", or "none".
     #[serde(default = "default_host_key_policy")]
     pub host_key_policy: String,
+
+    /// Operator-defined bandwidth profiles, merged with the built-ins when a
+    /// `--profile <name>` is resolved. Built-in names take precedence.
+    #[serde(default)]
+    pub bandwidth_profiles: Vec<gang_core::bandwidth::BandwidthProfile>,
 }
 
 impl Default for OperatorConfig {
@@ -28,6 +33,7 @@ impl Default for OperatorConfig {
         Self {
             default_relay: None,
             host_key_policy: default_host_key_policy(),
+            bandwidth_profiles: Vec::new(),
         }
     }
 }
@@ -3970,6 +3976,58 @@ pub async fn diagnose(robot: Option<&str>, format: &crate::OutputFormat) -> anyh
         }
     }
 
+    Ok(())
+}
+
+/// `gang profiles` — list the bandwidth profiles available for degraded-link
+/// streaming (built-ins plus any operator-defined ones from config).
+pub async fn profiles(format: &OutputFormat) -> anyhow::Result<()> {
+    use gang_core::bandwidth::BandwidthProfile;
+
+    let config = OperatorConfig::load();
+    let mut all = BandwidthProfile::builtins();
+    // Append custom profiles that don't shadow a built-in name.
+    let builtin_names: Vec<String> = all.iter().map(|p| p.name.clone()).collect();
+    for p in &config.bandwidth_profiles {
+        if !builtin_names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&p.name))
+        {
+            all.push(p.clone());
+        }
+    }
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&all)?);
+        }
+        OutputFormat::Text => {
+            println!("Bandwidth profiles (use with --profile <name>):");
+            println!();
+            for p in &all {
+                let rate = p
+                    .max_rate_hz
+                    .map(|hz| format!("{hz} Hz"))
+                    .unwrap_or_else(|| "unlimited".to_string());
+                let cap = p
+                    .max_bytes_per_message
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "none".to_string());
+                let builtin = if builtin_names.iter().any(|n| n == &p.name) {
+                    ""
+                } else {
+                    " (custom)"
+                };
+                println!("  {}{}", p.name, builtin);
+                println!("    {}", p.description);
+                println!(
+                    "    decimation 1/{}, rate {rate}, per-message cap {cap}",
+                    p.effective_decimation()
+                );
+                println!();
+            }
+        }
+    }
     Ok(())
 }
 

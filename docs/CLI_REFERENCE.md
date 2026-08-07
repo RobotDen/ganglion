@@ -669,6 +669,81 @@ Recommendations:
 
 If `robot` is specified, probes are run on the remote robot. If omitted, probes the local network.
 
+### `gang doctor`
+
+Print exactly what the network permits. Where `gang diagnose` classifies the
+network *archetype*, `gang doctor` answers the field engineer's operational
+question directly: which outbound paths Ganglion needs actually work here, is
+the relay reachable, and — if not — what is the minimal thing to ask the
+customer's network/security team to allow. Ganglion is outbound-only, so every
+probe is about egress.
+
+```bash
+$ gang doctor
+Running outbound reachability probes (this may take a few seconds)...
+
+============================================
+  gang doctor — outbound reachability
+============================================
+
+  [PASS] Outbound TCP 443
+         HTTPS-port egress works — a relay on TCP 443 is reachable from here.
+  [FAIL] Outbound UDP (QUIC)
+         UDP egress blocked — QUIC won't work; Ganglion will fall back to TCP relay.
+  [FAIL] Outbound TCP (non-443)
+         Non-443 TCP blocked — enterprise firewall; pin the relay to TCP 443.
+  [PASS] DNS resolution
+         Name resolution works.
+  [PASS] Relay reachability (TCP)
+         Relay relay.gang.tafy.dev:443 is reachable.
+  [PASS] Operator/robot identity
+         Identity key present at ~/.gang/identity.key.
+
+What to tell your network / security team:
+  • Ganglion is outbound-only: NO inbound ports need to be opened on the robot's network.
+  • Allow outbound TCP to relay.gang.tafy.dev:443 (the Ganglion relay).
+
+Verdict: a viable outbound path exists. You should be able to pair/enroll.
+```
+
+Pass `--relay <multiaddr>` to test a specific relay instead of the configured
+`default_relay`. Use `--json` (global flag) for machine-readable output. The
+command **exits non-zero** when no viable outbound path to a relay exists, so it
+works as a gate in scripts and CI and drops cleanly into a support thread:
+*"run `gang doctor` and paste the output."*
+
+### `gang profiles`
+
+List the bandwidth profiles available for degraded-link streaming. Profiles are
+a transport-shaping concept (how much of an already-permitted stream to
+forward), never an access-control one. They are applied with `--profile <name>`
+on streaming surfaces such as `gang view`.
+
+```bash
+$ gang profiles
+Bandwidth profiles (use with --profile <name>):
+
+  full
+    No shaping — forward every message at full fidelity.
+    decimation 1/1, rate unlimited, per-message cap none
+
+  lidar-low
+    Point clouds on a thin link: 1-in-10 messages, ~2 Hz ceiling.
+    decimation 1/10, rate 2 Hz, per-message cap none
+
+  vision-low
+    Camera/vision topics: 1-in-5 messages, ~1 Hz, 256 KiB/frame cap.
+    decimation 1/5, rate 1 Hz, per-message cap 256.0 KB
+
+  logs-only
+    Last-resort link: every message but only small (<=16 KiB) payloads.
+    decimation 1/1, rate unlimited, per-message cap 16.0 KB
+```
+
+Operators can define additional profiles in `~/.gang/config.toml` under
+`bandwidth_profiles`; they appear here marked `(custom)`. Built-in names take
+precedence. Use `--json` for machine-readable output.
+
 ### `gang transport-stats <robot>`
 
 Show REAL per-transport statistics for the live circuit to a robot, read from

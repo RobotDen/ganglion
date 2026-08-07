@@ -1,4 +1,5 @@
 mod commands;
+mod doctor;
 mod tui;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -328,6 +329,31 @@ enum Commands {
         /// Robot name or peer ID (optional — if omitted, probes local network).
         robot: Option<String>,
     },
+
+    /// Print exactly what this network permits — the field-engineer's egress check.
+    ///
+    /// Runs a handful of outbound-reachability probes (TCP 443, UDP/QUIC,
+    /// non-443 TCP, DNS) and — if a relay is configured or given with
+    /// `--relay` — whether that relay's transport address is reachable. Prints
+    /// a PASS/FAIL table plus a copy-pasteable egress allowlist to hand to the
+    /// customer's network/security team. Exits non-zero when no viable
+    /// outbound path to a relay exists, so it drops straight into a support
+    /// thread: "run `gang doctor` and paste the output."
+    #[command(display_order = 51)]
+    Doctor {
+        /// Relay multiaddr to test reachability against (default: `default_relay`).
+        #[arg(long, short = 'r', value_name = "MULTIADDR")]
+        relay: Option<String>,
+    },
+
+    /// List bandwidth profiles for degraded-link streaming (`--profile <name>`).
+    ///
+    /// Shows the built-in presets (`full`, `lidar-low`, `vision-low`,
+    /// `logs-only`) plus any operator-defined profiles from config. These names
+    /// are accepted by streaming surfaces such as `gang view` to trade fidelity
+    /// for reachability on cellular / warehouse-Wi-Fi links.
+    #[command(display_order = 51)]
+    Profiles,
 
     /// Show real per-transport statistics for the live circuit to a robot.
     #[command(display_order = 35)]
@@ -781,6 +807,8 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::TestArchetype { archetype } => commands::test_archetype(&archetype).await?,
         Commands::Diagnose { robot } => commands::diagnose(robot.as_deref(), &cli.format).await?,
+        Commands::Doctor { relay } => doctor::doctor(relay.as_deref(), &cli.format).await?,
+        Commands::Profiles => commands::profiles(&cli.format).await?,
         Commands::TransportStats {
             robot,
             peer,
