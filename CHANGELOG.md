@@ -4,41 +4,62 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
-### Changed
-
-- **Event feed defaults to genuine server-push, with a selectable poll fallback
-  (ADR-024).** The robot→operator event feed (`gang logs --follow`,
-  `gang connect`, `gang tui`, and the `list`/presence probe) gains a persistent
-  push substream on `/ganglion/events/1.0`, carried by the new `libp2p-stream`
-  dependency. The robot accepts inbound event substreams, authenticates each
-  subscriber with the **same** trust rule as deploy (SEC-03; loud dev-permissive
-  on an empty trust store), sends the `PresenceSnapshot` + retained catch-up,
-  then pushes framed `AgentEvent`s live from the bounded `EventBus` broadcast
-  until the stream closes (slow consumer → `Gap`, unchanged). The operator's
-  `Libp2pTransportAdapter::subscribe_events` returns a live `Stream<AgentEvent>`
-  (`EventFeed`) carried by either transport. Events reach operators the instant
-  the robot emits them — measured ~2 ms over a real relay circuit (asserted
-  `< 500 ms`), versus the ~1.5 s poll cadence.
-
-  Because `libp2p-stream` is a pre-release, the request-response poll from
-  ADR-022 (`ControlMessage::SubscribeEvents`) is **retained as a fallback**, not
-  removed. A new `events_transport` operator-config field and a per-command
-  `--events-transport <auto|push|poll>` flag on `logs`/`connect`/`tui` select
-  the transport: `auto` (default) prefers push and falls back to poll
-  automatically when push is unavailable (older/alpha-free agent,
-  protocol-not-supported, alpha misbehaving) or if a push stream drops
-  mid-session; `push` forces the stream (clear error if unavailable, no silent
-  poll); `poll` forces the request-response loop (interval configurable via
-  `events_poll_interval_ms`, default 1500 ms). `gang connect`/`tui` show a
-  subtle `feed: push` / `feed: poll (1.5s)` indicator. The `AgentEvent` wire
-  model, the trust rule, and the bounded resource model are unchanged. Adds
-  exactly one workspace dependency, `libp2p-stream` (pinned `=0.4.0-alpha`;
-  resolves cleanly against the locked `libp2p-swarm 0.47.1`); `cargo deny`
-  passes clean, so no policy exception was needed. Streams traverse the relay
-  circuit end-to-end, same as control RPC. See
-  [ADR-024](docs/adr/ADR-024-event-push-stream.md).
+## [2.2.0] - 2026-08-10
 
 ### Added
+
+- **`gang doctor` — print exactly what the network permits.** A field-facing
+  egress diagnostic: probes outbound TCP 443, UDP/QUIC, non-443 TCP, DNS, and
+  (when configured or passed with `--relay`) reachability of the relay's
+  transport address, then prints a PASS/FAIL table plus a copy-pasteable
+  egress allowlist for the customer's network/security team. `--format json`
+  for machines; exits non-zero when no viable outbound path exists so it works
+  as a script/CI gate. Closes #17.
+
+- **Bandwidth profiles (`gang profiles`).** Named degraded-link presets —
+  `full`, `lidar-low`, `vision-low`, `logs-only` — as a shared
+  `gang_core::bandwidth` type: decimation, per-message size cap, and a rate
+  ceiling. Operator-defined profiles merge in from `~/.gang/config.toml`.
+  Accepted via `--profile` on streaming surfaces. Closes #22.
+
+- **`gang view` — bridge a robot's live feed into Foxglove/Lichtblick.** A
+  dependency-light Foxglove WebSocket server (handshake, framing,
+  serverInfo/advertise, MessageData — protocol layer unit-tested against the
+  RFC 6455 and SHA-1 test vectors) plus `gang view <robot>`, which opens
+  `ws://127.0.0.1:<port>` and forwards the relay-delivered, capability-scoped
+  event feed as the `/ganglion/events` JSON channel with `--profile` shaping.
+  Live ROS topic projection rides the same bridge and is tracked in #27;
+  `--topics` is reserved for it. (#18)
+
+- **`gang mcp` — serve Ganglion tools to AI agents over MCP (stdio).** A
+  Model Context Protocol server exposing a curated, read-only fleet-discovery
+  toolset (`gang_status`, `list_peers`, `list_capabilities`, `network_doctor`,
+  `list_bandwidth_profiles`) over line-delimited JSON-RPC 2.0. The sandbox,
+  signed manifests, default-deny policy, and audit log mean an agent provably
+  cannot exceed what those mechanisms permit. Mutating tools are deliberately
+  deferred and will be policy-checked and audited like the CLI. Closes #20.
+
+- **`gang alert` — the metric→threshold→webhook primitive.** Rules (metric,
+  comparator, threshold, cooldown) in operator config fire a
+  Slack-incoming-webhook-compatible JSON payload on breach; `gang alert check`
+  evaluates, `gang alert test` fires a sample, `--dry-run` prints instead of
+  POSTing. Deliberately the useful 20% — incident-management integrations stay
+  out of the open core. Closes #23.
+
+- **`gang status --html` — a self-contained fleet-status snapshot.** Renders
+  identity, registered peers, capability count, and recent audit from local
+  state into a single shareable HTML file (escaped, unit-tested renderer).
+  Not a live dashboard — that's `gang tui`. Closes #26.
+
+- **`gang new tool` — the guided capability author loop.** Scaffolds a
+  capability project and prints the full idea → build → sign → publish path to
+  the open registry. (#21)
+
+- **Integration docs:** `docs/ZENOH.md` (Ganglion composes with `rmw_zenoh` —
+  the brokers drive the RMW-agnostic `ros2` CLI; Zenoh moves data, Ganglion
+  adds outbound reach, identity, capability-scoped tooling, and audit — closes
+  #24) and `docs/OTA.md` (pair with Mender/balena rather than building OTA —
+  closes #25).
 
 - **`gang tui` — the live fleet dashboard (issue #2).** A full-screen
   [ratatui](https://ratatui.rs) dashboard that subscribes to every registered
@@ -156,6 +177,58 @@ All notable changes to Ganglion will be documented in this file.
   via the `GANG_HOME` environment variable. `gang --data-dir <dir> deploy
   up-robot …` drives a `gang up` fleet.
 
+### Changed
+
+- **README repositioned.** Leads with what Ganglion is and where it fits
+  (differentiation table, "already on Tailscale + SSH? keep them"), trims the
+  quickstart to three commands, links the full walkthroughs, makes the
+  **Apache-2.0-forever** commitment explicit, and points FleetLink references
+  at the dedicated landing pages (tafylabs.io/fleetlink, with the
+  reviewer-facing security overview at tafylabs.io/fleetlink/security linked
+  from the security docs). Demo GIF replaced with a real `gang up` → `gang tui`
+  capture rendered through the actual TUI renderer.
+
+- **Shell scripts are linted.** The pre-commit hook shellchecks
+  `scripts/*.sh` and both git hooks (skipped when shellcheck is absent), and
+  CI gained a Shellcheck job.
+
+- **Dependency policy documented.** `libp2p 0.56 → libp2p-identity 0.2 →
+  ed25519-dalek 2` is one coupled version train (noted in `Cargo.toml`);
+  dependabot majors that split it (#15, #16) are declined until a libp2p
+  release moves the whole train. Grouped minor/patch bumps merged (#14).
+
+- **Event feed defaults to genuine server-push, with a selectable poll fallback
+  (ADR-024).** The robot→operator event feed (`gang logs --follow`,
+  `gang connect`, `gang tui`, and the `list`/presence probe) gains a persistent
+  push substream on `/ganglion/events/1.0`, carried by the new `libp2p-stream`
+  dependency. The robot accepts inbound event substreams, authenticates each
+  subscriber with the **same** trust rule as deploy (SEC-03; loud dev-permissive
+  on an empty trust store), sends the `PresenceSnapshot` + retained catch-up,
+  then pushes framed `AgentEvent`s live from the bounded `EventBus` broadcast
+  until the stream closes (slow consumer → `Gap`, unchanged). The operator's
+  `Libp2pTransportAdapter::subscribe_events` returns a live `Stream<AgentEvent>`
+  (`EventFeed`) carried by either transport. Events reach operators the instant
+  the robot emits them — measured ~2 ms over a real relay circuit (asserted
+  `< 500 ms`), versus the ~1.5 s poll cadence.
+
+  Because `libp2p-stream` is a pre-release, the request-response poll from
+  ADR-022 (`ControlMessage::SubscribeEvents`) is **retained as a fallback**, not
+  removed. A new `events_transport` operator-config field and a per-command
+  `--events-transport <auto|push|poll>` flag on `logs`/`connect`/`tui` select
+  the transport: `auto` (default) prefers push and falls back to poll
+  automatically when push is unavailable (older/alpha-free agent,
+  protocol-not-supported, alpha misbehaving) or if a push stream drops
+  mid-session; `push` forces the stream (clear error if unavailable, no silent
+  poll); `poll` forces the request-response loop (interval configurable via
+  `events_poll_interval_ms`, default 1500 ms). `gang connect`/`tui` show a
+  subtle `feed: push` / `feed: poll (1.5s)` indicator. The `AgentEvent` wire
+  model, the trust rule, and the bounded resource model are unchanged. Adds
+  exactly one workspace dependency, `libp2p-stream` (pinned `=0.4.0-alpha`;
+  resolves cleanly against the locked `libp2p-swarm 0.47.1`); `cargo deny`
+  passes clean, so no policy exception was needed. Streams traverse the relay
+  circuit end-to-end, same as control RPC. See
+  [ADR-024](docs/adr/ADR-024-event-push-stream.md).
+
 ### Fixed
 
 - **`OperatorConfig::default()` now yields the documented defaults.** The
@@ -164,6 +237,7 @@ All notable changes to Ganglion will be documented in this file.
   then rejected in any environment without a `config.toml` (e.g. a fresh fleet
   directory). `Default` is now hand-written to match the deserialized defaults
   (`host_key_policy = "strict"`).
+
 
 ## [2.1.0] - 2026-08-06
 
