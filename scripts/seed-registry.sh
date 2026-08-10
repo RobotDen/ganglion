@@ -39,6 +39,14 @@ if [ "$DRY_RUN" -eq 0 ]; then
   # newer versions); accept either being installed.
   rustup target list --installed 2>/dev/null | grep -qE 'wasm32-wasip[12]|wasm32-wasi$' \
     || die "no wasm32-wasi* target installed (rustup target add wasm32-wasip1)"
+  # A crate can only produce a .wasm if it builds as a cdylib. The capability
+  # crates are currently rlib-only logic libraries — componentization (cdylib +
+  # WIT guest bindings) is tracked in issue #28. Fail with the real story
+  # rather than a confusing empty-find later.
+  if ! grep -q 'cdylib' crates/gang-capability-diagnostics/Cargo.toml 2>/dev/null; then
+    die "capability crates are not componentized yet (rlib-only; no cdylib/WIT \
+guest bindings) — cargo-component emits .rlib, never .wasm. See issue #28."
+  fi
 fi
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
