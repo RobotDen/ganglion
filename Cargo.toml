@@ -56,6 +56,13 @@ ciborium = "0.2"
 serde_json = "1"
 
 # Crypto
+#
+# ed25519-dalek, libp2p-identity (gang-core), and libp2p form one coupled
+# version train: libp2p 0.56 → libp2p-identity 0.2 → ed25519-dalek 2. Bumping
+# ed25519-dalek to 3.x or libp2p-identity to 0.3.x on their own dual-versions
+# the PeerId/Keypair/signature types across the crate boundary and breaks the
+# build (declined in dependabot PRs #15/#16). Take those majors ONLY together
+# with a libp2p release built on the new identity/dalek line.
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
 # Pinned to 0.8: ed25519-dalek 2 depends on rand_core 0.6, which rand 0.8
 # provides. Do NOT bump to 0.9 (rand_core 0.9) without upgrading ed25519-dalek
