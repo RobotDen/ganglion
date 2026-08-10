@@ -4,6 +4,31 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Live ROS topic streaming + full Foxglove projection (`gang view
+  --topics`).** A dedicated `/ganglion/topics/1.0` substream (mirroring the
+  ADR-024 push shape): the operator sends one `TopicStreamRequest`; the robot
+  authenticates the subscriber with the same trust rule as deploy, evaluates
+  **each topic against the default-deny policy engine** as a read-only
+  `ganglion:ros/interface` pattern (the `policy.toml` globs and read-only
+  ceiling govern live streaming exactly as they govern deployed capabilities),
+  emits a `PolicyDecision` per verdict on the event feed, replies with the
+  per-topic verdicts, and streams samples live. Samples come from
+  `ros2 topic echo` (RMW-agnostic, so Zenoh fleets work unchanged), are
+  converted YAML→JSON on the robot (subset converter, unit-tested against
+  ros2-echo document shapes), and are **shaped robot-side** (decimation,
+  per-message size cap, rate ceiling from the `--profile` knobs) before
+  crossing the wire. `gang view <robot> --topics /a,/b` advertises one
+  Foxglove channel per permitted topic alongside `/ganglion/events`.
+  Closes #27; completes #18.
+
+- **`scripts/seed-registry.sh` — one-command registry seeding.** Builds all
+  eight in-tree capability crates as WASM components (cargo-component,
+  wasm32-wasip2), signs each with your identity key declaring exactly the
+  capability groups it needs, and publishes them to the open registry.
+  `--dry-run` prints the crate→capabilities mapping without building. (#21)
+
 ## [2.2.0] - 2026-08-10
 
 ### Added
