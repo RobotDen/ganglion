@@ -606,6 +606,84 @@ impl RobotAgent {
         &self.event_bus
     }
 
+    /// Authorize a live topic-stream subscription: the subscriber must pass
+    /// the SAME trust rule as deploy/the event feed, and each requested topic
+    /// is evaluated by the default-deny policy engine as a read-only
+    /// `ganglion:ros/interface` pattern — so the per-topic globs and read-only
+    /// ceiling in `policy.toml` govern live streaming exactly as they govern
+    /// deployed capabilities. Every verdict is emitted as a `PolicyDecision`
+    /// on the event bus (visible in `gang connect`/`gang tui`).
+    pub fn authorize_topic_stream(
+        &self,
+        subscriber: &PeerId,
+        topics: &[String],
+    ) -> Result<Vec<gang_core::topics::TopicVerdict>, SubscribeError> {
+        use gang_core::capability::{AccessPattern, CapabilityGroup, RosAccess};
+        use gang_core::topics::TopicVerdict;
+
+        if !self.trust_store.trusted_peers.is_empty() && !self.trust_store.is_trusted(subscriber) {
+            warn!(peer = %subscriber, "Rejecting topic stream from untrusted peer");
+            return Err(SubscribeError::Unauthorized {
+                peer: subscriber.to_string(),
+            });
+        }
+
+        let verdicts: Vec<TopicVerdict> = topics
+            .iter()
+            .map(|topic| {
+                let group = CapabilityGroup::RosInterface {
+                    version: "1.0".to_string(),
+                    patterns: vec![AccessPattern {
+                        pattern: topic.clone(),
+                        access: RosAccess::ReadOnly,
+                    }],
+                };
+                match self
+                    .policy
+                    .evaluate(std::slice::from_ref(&group), subscriber)
+                {
+                    Ok(()) => TopicVerdict {
+                        topic: topic.clone(),
+                        allowed: true,
+                        reason: String::new(),
+                    },
+                    Err(e) => TopicVerdict {
+                        topic: topic.clone(),
+                        allowed: false,
+                        reason: e.to_string(),
+                    },
+                }
+            })
+            .collect();
+
+        // Emit one PolicyDecision per verdict so topic subscriptions are part
+        // of the same observable policy/audit surface as everything else.
+        for v in &verdicts {
+            let subscriber = subscriber.clone();
+            let decision = if v.allowed {
+                PolicyOutcome::Allow
+            } else {
+                PolicyOutcome::Deny
+            };
+            let reason = if v.allowed {
+                format!("live topic stream: {}", v.topic)
+            } else {
+                format!("live topic stream: {} ({})", v.topic, v.reason)
+            };
+            self.event_bus
+                .publish(move |seq| AgentEvent::PolicyDecision {
+                    seq,
+                    ts: chrono::Utc::now(),
+                    operator_peer: subscriber.clone(),
+                    capability_group: "ganglion:ros/interface".to_string(),
+                    decision,
+                    reason: reason.clone(),
+                });
+        }
+
+        Ok(verdicts)
+    }
+
     /// Agent uptime in whole seconds.
     fn uptime_secs(&self) -> u64 {
         self.started_at.elapsed().as_secs()
@@ -884,6 +962,24 @@ impl RobotAgent {
                     // delays its own feed, never the agent or its peers.
                     tokio::spawn(async move {
                         push_event_feed(agent, subscriber, stream).await;
+                    });
+                }
+            });
+
+            // --- /ganglion/topics/1.0: live topic sample streams ---
+            // Same accept shape as events; trust + per-topic policy are
+            // enforced inside `run_topic_stream` via
+            // `authorize_topic_stream`.
+            let mut incoming_topics = transport
+                .accept_topic_streams()
+                .map_err(|e| anyhow::anyhow!("Failed to accept topic streams: {e}"))?;
+            let topics_agent = Arc::clone(self);
+            tokio::spawn(async move {
+                use futures::StreamExt;
+                while let Some((subscriber, stream)) = incoming_topics.next().await {
+                    let agent = Arc::clone(&topics_agent);
+                    tokio::spawn(async move {
+                        crate::topic_stream::run_topic_stream(agent, subscriber, stream).await;
                     });
                 }
             });

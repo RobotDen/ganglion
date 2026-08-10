@@ -52,5 +52,7 @@ pub mod policy;
 pub mod protocol;
 /// The capability registry.
 pub mod registry;
+/// The robot→operator live topic streaming wire model.
+pub mod topics;
 /// The protocol-agnostic transport adapter trait and supporting types.
 pub mod transport;

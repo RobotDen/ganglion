@@ -4615,12 +4615,11 @@ pub async fn connect(
 /// visualization tool at (`ws://127.0.0.1:<port>`), and forwards the robot's
 /// live Ganglion event stream (presence, policy decisions, audit, connection,
 /// heartbeat) — arriving through the relay and capability-scoped like every
-/// other remote access — as a JSON channel. A `--profile` shapes the forwarded
-/// stream for degraded links.
-///
-/// Live ROS *topic* sample projection rides on the same bridge but depends on
-/// robot-side topic streaming (the `TopicSubscribe` broker op currently returns
-/// topic info, not samples); `--topics` is accepted and reserved for it.
+/// other remote access — as a JSON channel. With `--topics`, live ROS topic
+/// samples stream from the robot over `/ganglion/topics/1.0` — each topic
+/// policy-checked (default-deny, read-only) on the robot and shaped
+/// robot-side — and are projected as one Foxglove channel per topic. A
+/// `--profile` sets the shaping for degraded links.
 pub async fn view(
     robot: &str,
     port: u16,
@@ -4629,6 +4628,7 @@ pub async fn view(
     events_transport: Option<gang_libp2p::EventsTransport>,
 ) -> anyhow::Result<()> {
     use gang_core::bandwidth::BandwidthProfile;
+    use gang_core::topics::TopicStreamRequest;
     use tokio::sync::broadcast;
 
     // Resolve the bandwidth profile (built-ins + operator config).
@@ -4657,9 +4657,9 @@ pub async fn view(
     let timeout = std::time::Duration::from_secs(CONTROL_TIMEOUT_SECS);
     let conn = establish_remote_connection(&remote, timeout).await?;
 
-    // The single always-available channel: the governed event feed.
+    // The always-available channel: the governed event feed.
     const EVENTS_CHANNEL_ID: u32 = 1;
-    let channels = vec![crate::foxglove::Channel {
+    let mut channels = vec![crate::foxglove::Channel {
         id: EVENTS_CHANNEL_ID,
         topic: "/ganglion/events".into(),
         encoding: "json".into(),
@@ -4669,6 +4669,52 @@ pub async fn view(
         schema: r#"{"type":"object"}"#.into(),
         schema_encoding: "jsonschema".into(),
     }];
+
+    // Live ROS topic projection: subscribe BEFORE the server starts so the
+    // channel list advertised to Foxglove includes every permitted topic.
+    // Each topic is policy-checked on the robot (default-deny, read-only);
+    // shaping happens robot-side from the profile's knobs so a thin uplink
+    // never carries data the operator would throw away.
+    let mut topic_feed = None;
+    let mut topic_channel_ids: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    if !topics.is_empty() {
+        let request = TopicStreamRequest {
+            topics: topics.to_vec(),
+            decimation: profile.effective_decimation(),
+            max_rate_hz: profile.max_rate_hz,
+            max_bytes_per_message: profile.max_bytes_per_message,
+        };
+        let (verdicts, feed) = conn
+            .transport
+            .subscribe_topics(&remote.gang_id, &request, timeout)
+            .await
+            .map_err(|e| anyhow::anyhow!("topic subscription to '{display}' failed: {e}"))?;
+
+        let mut next_id = EVENTS_CHANNEL_ID + 1;
+        for v in &verdicts {
+            if v.allowed {
+                topic_channel_ids.insert(v.topic.clone(), next_id);
+                channels.push(crate::foxglove::Channel {
+                    id: next_id,
+                    topic: v.topic.clone(),
+                    encoding: "json".into(),
+                    schema_name: "ganglion.TopicSample".into(),
+                    schema: r#"{"type":"object"}"#.into(),
+                    schema_encoding: "jsonschema".into(),
+                });
+                next_id += 1;
+            } else {
+                eprintln!("denied by policy: {} ({})", v.topic, v.reason);
+            }
+        }
+        if topic_channel_ids.is_empty() {
+            anyhow::bail!(
+                "every requested topic was denied by the robot's policy — nothing to project"
+            );
+        }
+        topic_feed = Some(feed);
+    }
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
@@ -4687,20 +4733,47 @@ pub async fn view(
     println!();
     println!("  1. Open Foxglove Studio or Lichtblick");
     println!("  2. Add connection → Foxglove WebSocket → ws://{bound}");
-    println!("  3. Subscribe to the /ganglion/events channel");
-    println!();
-    if !topics.is_empty() {
-        eprintln!(
-            "note: live ROS topic projection ({}) is not yet available — bridging the \
-             governed event feed for now.",
-            topics.join(", ")
-        );
+    println!("  3. Subscribe to the advertised channels:");
+    for c in &channels {
+        println!("       {}", c.topic);
     }
+    println!();
     println!(
         "Profile: {} ({}). Ctrl-C to stop.",
         profile.name, profile.description
     );
     println!();
+
+    // Topic pump: forward permitted samples onto their per-topic channels.
+    // Runs alongside the event pump; ends when the robot closes the stream.
+    let topic_task = topic_feed.map(|mut feed| {
+        let tx = tx.clone();
+        let ids = topic_channel_ids.clone();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            use gang_core::topics::TopicStreamMessage;
+            while let Some(msg) = feed.next().await {
+                match msg {
+                    TopicStreamMessage::Sample {
+                        topic, ts, json, ..
+                    } => {
+                        if let Some(&channel_id) = ids.get(&topic) {
+                            let timestamp_ns = ts.timestamp_nanos_opt().unwrap_or(0).max(0) as u64;
+                            let _ = tx.send(crate::foxglove::BridgeMessage {
+                                channel_id,
+                                timestamp_ns,
+                                payload: json.into_bytes(),
+                            });
+                        }
+                    }
+                    TopicStreamMessage::TopicError { topic, message } => {
+                        eprintln!("topic '{topic}': {message}");
+                    }
+                    _ => {}
+                }
+            }
+        })
+    });
 
     let mut stream = conn
         .transport
@@ -4709,6 +4782,9 @@ pub async fn view(
         .map_err(|e| anyhow::anyhow!("connecting to '{display}' failed: {e}"))?;
 
     let result = pump_events_to_bridge(&mut stream, &tx, EVENTS_CHANNEL_ID, &profile).await;
+    if let Some(t) = topic_task {
+        t.abort();
+    }
     drop(stream);
     conn.close().await;
     result

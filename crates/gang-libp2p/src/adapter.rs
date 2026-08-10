@@ -33,6 +33,12 @@ pub type EventStream = Pin<Box<dyn Stream<Item = gang_core::events::AgentEvent> 
 /// substream to push framed events over.
 pub type InboundEventStreams = Pin<Box<dyn Stream<Item = (PeerId, libp2p::Stream)> + Send>>;
 
+/// A live robot→operator topic-sample stream: the return of
+/// [`Libp2pTransportAdapter::subscribe_topics`]. Yields
+/// [`gang_core::topics::TopicStreamMessage`]s as the robot pushes them, ending
+/// when the robot closes the substream.
+pub type TopicStream = Pin<Box<dyn Stream<Item = gang_core::topics::TopicStreamMessage> + Send>>;
+
 /// `active` encoding: the push substream is live.
 const ACTIVE_PUSH: u8 = 0;
 /// `active` encoding: the poll fallback is live.
@@ -812,6 +818,106 @@ impl Libp2pTransportAdapter {
             }
         });
         Ok(Box::pin(mapped))
+    }
+
+    /// Robot side: accept inbound live topic-sample substreams
+    /// (`/ganglion/topics/1.0`). Same shape as
+    /// [`Self::accept_event_streams`]; trust and per-topic policy are
+    /// enforced by the agent on each stream.
+    pub fn accept_topic_streams(&self) -> Result<InboundEventStreams, TransportError> {
+        use futures::StreamExt;
+
+        let protocol = libp2p::StreamProtocol::new(protocol::PROTOCOL_TOPICS);
+        let incoming = self.stream_control.clone().accept(protocol).map_err(|e| {
+            TransportError::ProtocolNegotiation(format!("topic protocol already accepted: {e:?}"))
+        })?;
+
+        let mapped = incoming.filter_map(|(libp2p_peer, stream)| async move {
+            match libp2p_to_gang_peer_id(&libp2p_peer) {
+                Some(gang_peer) => Some((gang_peer, stream)),
+                None => {
+                    warn!(peer = %libp2p_peer, "Dropping topic stream from peer with unrecoverable identity");
+                    None
+                }
+            }
+        });
+        Ok(Box::pin(mapped))
+    }
+
+    /// Operator side: subscribe to live topic samples from a robot
+    /// (`/ganglion/topics/1.0`). Push-only — there is no poll fallback for
+    /// topic data. Opens the substream, sends the request, and returns the
+    /// robot's per-topic verdicts plus the live stream of
+    /// [`gang_core::topics::TopicStreamMessage`]s.
+    pub async fn subscribe_topics(
+        self: &Arc<Self>,
+        peer: &PeerId,
+        request: &gang_core::topics::TopicStreamRequest,
+        timeout: Duration,
+    ) -> Result<(Vec<gang_core::topics::TopicVerdict>, TopicStream), TransportError> {
+        use gang_core::message::{decode_message, encode_message};
+        use gang_core::topics::TopicStreamMessage;
+
+        let libp2p_peer = self.resolve_peer(peer).await?;
+        let protocol = libp2p::StreamProtocol::new(protocol::PROTOCOL_TOPICS);
+        let peer_disp = peer.to_string();
+
+        let mut control = self.stream_control.clone();
+        let stream = tokio::time::timeout(timeout, control.open_stream(libp2p_peer, protocol))
+            .await
+            .map_err(|_| TransportError::Timeout(timeout))?;
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(libp2p_stream::OpenStreamError::UnsupportedProtocol(p)) => {
+                return Err(TransportError::ProtocolNegotiation(format!(
+                    "robot {peer_disp} does not support live topic streaming ({p}) — \
+                     it may be running an older gang version"
+                )));
+            }
+            Err(e) => {
+                return Err(TransportError::DialFailed {
+                    peer: peer_disp,
+                    reason: format!("could not open topic stream: {e}"),
+                });
+            }
+        };
+
+        let request_bytes = encode_message(request)
+            .map_err(|e| TransportError::ProtocolNegotiation(format!("encode request: {e}")))?;
+        crate::framed::write_frame(&mut stream, &request_bytes)
+            .await
+            .map_err(|e| TransportError::ConnectionClosed(format!("write request: {e}")))?;
+
+        // First frame: the per-topic verdicts. A clean EOF is a refusal
+        // (untrusted subscriber), mirroring the event feed's refusal shape.
+        let first = tokio::time::timeout(timeout, crate::framed::read_frame(&mut stream))
+            .await
+            .map_err(|_| TransportError::Timeout(timeout))?
+            .map_err(|e| TransportError::ConnectionClosed(format!("reading verdicts: {e}")))?;
+        let Some(first_frame) = first else {
+            return Err(TransportError::ProtocolNegotiation(format!(
+                "robot {peer} refused the topic subscription (unauthorized)"
+            )));
+        };
+        let (first_msg, _) = decode_message::<TopicStreamMessage>(&first_frame)
+            .map_err(|e| TransportError::ProtocolNegotiation(format!("decode verdicts: {e}")))?;
+        let TopicStreamMessage::Accepted { verdicts } = first_msg else {
+            return Err(TransportError::ProtocolNegotiation(
+                "robot sent a sample before the verdict frame".into(),
+            ));
+        };
+
+        // Live tail: unfold framed messages until EOF/error.
+        let live = futures::stream::unfold(stream, |mut stream| async move {
+            match crate::framed::read_frame(&mut stream).await {
+                Ok(Some(frame)) => match decode_message::<TopicStreamMessage>(&frame) {
+                    Ok((msg, _)) => Some((msg, stream)),
+                    Err(_) => None,
+                },
+                _ => None,
+            }
+        });
+        Ok((verdicts, Box::pin(live)))
     }
 
     /// Look up the libp2p peer id for a connected gang peer.

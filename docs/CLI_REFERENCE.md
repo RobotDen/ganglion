@@ -1171,17 +1171,29 @@ Bridging 'up-robot' into Foxglove/Lichtblick.
 Profile: logs-only (Last-resort link: every message but only small (<=16 KiB) payloads.). Ctrl-C to stop.
 ```
 
-Today the bridge forwards the robot's live **Ganglion event feed** (presence,
+The bridge always forwards the robot's live **Ganglion event feed** (presence,
 policy decisions, audit, connection changes, heartbeats) as a JSON channel
-(`/ganglion/events`). Live ROS **topic** projection rides on the same bridge and
-is reserved behind `--topics`; it depends on robot-side topic sample streaming
-(the `TopicSubscribe` broker operation currently returns topic info, not live
-samples).
+(`/ganglion/events`). With `--topics`, **live ROS topic samples** stream from
+the robot over the dedicated `/ganglion/topics/1.0` substream and appear as one
+Foxglove channel per topic:
+
+```bash
+$ gang view up-robot --topics /rosout,/tf --profile lidar-low
+```
+
+Every requested topic is evaluated by the robot's **default-deny policy
+engine** as a read-only `ganglion:ros/interface` pattern — the same globs and
+read-only ceiling in `policy.toml` that govern deployed capabilities govern
+live streaming, and each verdict is emitted as a `PolicyDecision` on the event
+feed (visible in `gang connect` / `gang tui`). Denied topics are reported and
+skipped. Samples are converted to JSON and **shaped on the robot** (decimation,
+per-message size cap, rate ceiling from the selected profile) before crossing
+the wire, so a thin uplink never carries data the operator would throw away.
 
 | Flag | Description |
 |------|-------------|
 | `--port <n>` | Local TCP port for the WebSocket endpoint (default: 8765). |
-| `--topics <a,b>` | ROS topics to project (reserved; live topic streaming pending). |
+| `--topics <a,b>` | ROS topics to project live (policy-checked per topic on the robot). |
 | `--profile <name>` | Bandwidth profile for degraded links (see `gang profiles`). |
 | `--events-transport <mode>` | Event-feed transport: `auto` (default), `push`, or `poll`. |
 

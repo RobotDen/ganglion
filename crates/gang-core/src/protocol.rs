@@ -16,12 +16,19 @@ pub const PROTOCOL_BULK: &str = "/ganglion/bulk/1.0";
 /// length-prefixed CBOR sequence of [`crate::events::AgentEvent`]s.
 pub const PROTOCOL_EVENTS: &str = "/ganglion/events/1.0";
 
+/// Policy-scoped live ROS topic sample streaming (robot→operator). See
+/// [`crate::topics`]. A subscriber opens this protocol, sends one
+/// [`crate::topics::TopicStreamRequest`], and receives a length-prefixed CBOR
+/// sequence of [`crate::topics::TopicStreamMessage`]s.
+pub const PROTOCOL_TOPICS: &str = "/ganglion/topics/1.0";
+
 /// All known Ganglion stream protocols.
 pub const ALL_PROTOCOLS: &[&str] = &[
     PROTOCOL_CONTROL,
     PROTOCOL_TOOL,
     PROTOCOL_BULK,
     PROTOCOL_EVENTS,
+    PROTOCOL_TOPICS,
 ];
 
 /// Protocol identifier type for type safety.
@@ -57,6 +64,11 @@ impl ProtocolId {
     /// The event-subscription protocol identifier (`/ganglion/events/1.0`).
     pub fn events() -> Self {
         Self(PROTOCOL_EVENTS.into())
+    }
+
+    /// The topic-streaming protocol identifier (`/ganglion/topics/1.0`).
+    pub fn topics() -> Self {
+        Self(PROTOCOL_TOPICS.into())
     }
 }
 
