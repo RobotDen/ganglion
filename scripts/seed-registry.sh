@@ -35,7 +35,10 @@ done
 if [ "$DRY_RUN" -eq 0 ]; then
   command -v cargo-component >/dev/null 2>&1 || die "cargo-component not found (cargo install cargo-component)"
   command -v gang >/dev/null 2>&1 || die "gang not found on PATH (cargo install --path crates/gang-cli)"
-  rustup target list --installed 2>/dev/null | grep -q wasm32-wasip2 || die "wasm32-wasip2 target missing (rustup target add wasm32-wasip2)"
+  # cargo-component builds for wasm32-wasip1 by default (wasip2 also works on
+  # newer versions); accept either being installed.
+  rustup target list --installed 2>/dev/null | grep -qE 'wasm32-wasip[12]|wasm32-wasi$' \
+    || die "no wasm32-wasi* target installed (rustup target add wasm32-wasip1)"
 fi
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -74,9 +77,19 @@ for dir in crates/gang-capability-*/; do
 
   # 1. Build the component.
   (cd "$dir" && cargo component build --release --quiet)
-  wasm="$(find "$dir/target/wasm32-wasip2/release" -maxdepth 1 -name '*.wasm' | head -1)"
-  [ -n "$wasm" ] || wasm="$(find target/wasm32-wasip2/release -maxdepth 1 -name "${crate//-/_}.wasm" | head -1)"
-  [ -n "$wasm" ] || die "no component produced for $crate"
+  # cargo-component's output target dir varies by version (wasip1 is the
+  # long-standing default; wasip2 on newer releases; wasm32-wasi historically),
+  # and in a workspace the artifact lands in the WORKSPACE root target/ (or
+  # $CARGO_TARGET_DIR), never the crate-local one. Search all candidates.
+  wasm=""
+  base="${CARGO_TARGET_DIR:-$repo_root/target}"
+  for tgt in wasm32-wasip2 wasm32-wasip1 wasm32-wasi; do
+    for root in "$base" "$dir/target"; do
+      candidate="$(find "$root/$tgt/release" -maxdepth 1 -name "${crate//-/_}.wasm" 2>/dev/null | head -1)"
+      if [ -n "$candidate" ]; then wasm="$candidate"; break 2; fi
+    done
+  done
+  [ -n "$wasm" ] || die "no component produced for $crate (searched $base/wasm32-wasip{1,2}/release)"
   cp "$wasm" "$outdir/$crate.component.wasm"
 
   # 2. Sign (writes $outdir/$crate.component.manifest.cbor).
