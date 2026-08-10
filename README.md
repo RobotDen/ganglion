@@ -89,7 +89,7 @@ Full threat model: [docs/SECURITY.md](docs/SECURITY.md). Taking this architectur
 
 ## Support & production
 
-Ganglion is Apache-2.0 — run it, fork it, no strings. If it saves you a truck roll, **[sponsoring the den](https://github.com/sponsors/karma0)** is a welcome thanks and keeps the open core moving.
+Ganglion is **Apache-2.0, forever**. The core substrate — reachability, relay, sandbox, signing, audit, the open registry — stays open permanently: no rug-pull, no relicense, and you can self-host the entire path with no vendor in your data loop. Run it, fork it, no strings. If it saves you a truck roll, **[sponsoring the den](https://github.com/sponsors/karma0)** is a welcome thanks and keeps the open core moving.
 
 When one engineer's setup becomes a fleet with auditors, SLAs, and many sites, that's where the open core ends and **[FleetLink](https://tafylabs.io/fleetlink)** begins — the enterprise layer built on this substrate: multi-tenant gateway, hosted/HA relay, SSO and RBAC, compliance reporting, and fleet-scale OTA, plus fixed-scope architecture reviews and implementations by the people who wrote Ganglion. Start at **[tafylabs.io/fleetlink](https://tafylabs.io/fleetlink)** or email **bobby@tafy.ai**.
 
