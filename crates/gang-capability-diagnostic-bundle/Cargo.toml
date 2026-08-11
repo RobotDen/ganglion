@@ -14,3 +14,12 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# Componentization (#28): build as a WASM component with `cargo build --target
+# wasm32-wasip2 --release` (rustc emits a component directly for cdylib crates).
+# rlib is kept so native unit tests and the workspace gate are unaffected.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = { workspace = true }

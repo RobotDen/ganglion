@@ -4,7 +4,8 @@
 #   ./scripts/seed-registry.sh [--sign-key <path>] [--dry-run]
 #
 # For each `crates/gang-capability-*` crate this script:
-#   1. builds it as a WASM component (cargo-component, wasm32-wasip2),
+#   1. builds it as a WASM component (`cargo build --target wasm32-wasip2`;
+#      rustc emits a component directly for cdylib crates — no cargo-component),
 #   2. signs it with your identity key (`gang sign`), which writes the
 #      `.manifest.cbor` with the crate's declared capabilities, and
 #   3. publishes it to the local open registry (`gang registry publish`),
@@ -12,7 +13,6 @@
 #
 # Prerequisites (one-time):
 #   rustup target add wasm32-wasip2
-#   cargo install cargo-component
 #   gang identity generate          # if ~/.gang/identity.key does not exist
 #
 # The author recorded on every published entry is the signing identity, so run
@@ -33,20 +33,11 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$DRY_RUN" -eq 0 ]; then
-  command -v cargo-component >/dev/null 2>&1 || die "cargo-component not found (cargo install cargo-component)"
   command -v gang >/dev/null 2>&1 || die "gang not found on PATH (cargo install --path crates/gang-cli)"
-  # cargo-component builds for wasm32-wasip1 by default (wasip2 also works on
-  # newer versions); accept either being installed.
-  rustup target list --installed 2>/dev/null | grep -qE 'wasm32-wasip[12]|wasm32-wasi$' \
-    || die "no wasm32-wasi* target installed (rustup target add wasm32-wasip1)"
-  # A crate can only produce a .wasm if it builds as a cdylib. The capability
-  # crates are currently rlib-only logic libraries — componentization (cdylib +
-  # WIT guest bindings) is tracked in issue #28. Fail with the real story
-  # rather than a confusing empty-find later.
-  if ! grep -q 'cdylib' crates/gang-capability-diagnostics/Cargo.toml 2>/dev/null; then
-    die "capability crates are not componentized yet (rlib-only; no cdylib/WIT \
-guest bindings) — cargo-component emits .rlib, never .wasm. See issue #28."
-  fi
+  # The wasm32-wasip2 target produces components directly from cdylib crates;
+  # no cargo-component needed.
+  rustup target list --installed 2>/dev/null | grep -q 'wasm32-wasip2' \
+    || die "wasm32-wasip2 target missing (rustup target add wasm32-wasip2)"
 fi
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -63,7 +54,7 @@ caps_for() {
     gang-capability-network-archetype) echo "network,diagnostics" ;;
     gang-capability-log-normalize)     echo "logs" ;;
     gang-capability-topic-echo)        echo "ros,artifacts" ;;
-    gang-capability-canary-probe)      echo "ros,metrics" ;;
+    gang-capability-canary-probe)      echo "diagnostics,ros,metrics" ;;
     gang-capability-rosbag-slice)      echo "fs,process,artifacts" ;;
     *) die "no capability mapping for $1" ;;
   esac
@@ -83,21 +74,13 @@ for dir in crates/gang-capability-*/; do
     continue
   fi
 
-  # 1. Build the component.
-  (cd "$dir" && cargo component build --release --quiet)
-  # cargo-component's output target dir varies by version (wasip1 is the
-  # long-standing default; wasip2 on newer releases; wasm32-wasi historically),
-  # and in a workspace the artifact lands in the WORKSPACE root target/ (or
-  # $CARGO_TARGET_DIR), never the crate-local one. Search all candidates.
-  wasm=""
+  # 1. Build the component. The wasm32-wasip2 target emits a WASM *component*
+  # directly for cdylib crates (rustc links via wasm-component-ld) — no
+  # cargo-component or adapter step needed.
+  cargo build -p "$crate" --release --target wasm32-wasip2 --quiet
   base="${CARGO_TARGET_DIR:-$repo_root/target}"
-  for tgt in wasm32-wasip2 wasm32-wasip1 wasm32-wasi; do
-    for root in "$base" "$dir/target"; do
-      candidate="$(find "$root/$tgt/release" -maxdepth 1 -name "${crate//-/_}.wasm" 2>/dev/null | head -1)"
-      if [ -n "$candidate" ]; then wasm="$candidate"; break 2; fi
-    done
-  done
-  [ -n "$wasm" ] || die "no component produced for $crate (searched $base/wasm32-wasip{1,2}/release)"
+  wasm="$base/wasm32-wasip2/release/${crate//-/_}.wasm"
+  [ -f "$wasm" ] || die "no component produced for $crate (expected $wasm)"
   cp "$wasm" "$outdir/$crate.component.wasm"
 
   # 2. Sign (writes $outdir/$crate.component.manifest.cbor).

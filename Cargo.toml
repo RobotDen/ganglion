@@ -69,6 +69,8 @@ ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
 # in lockstep — the RNG traits are incompatible across that boundary.
 rand = "0.8"
 blake3 = "1"
+# Guest bindings for the capability crates (wasm32 builds only).
+wit-bindgen = "0.60"
 
 # Logging
 tracing = "0.1"

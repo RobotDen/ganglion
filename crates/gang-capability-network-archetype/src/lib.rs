@@ -514,3 +514,9 @@ mod tests {
         assert_eq!(loaded.archetype, NetworkArchetype::NatOffice);
     }
 }
+
+/// WASM component entry point — bridges the `ganglion-capability` world's
+/// `run` export to this crate's canonical logic (wasm32 builds only; see
+/// `component.rs`). Native builds and tests are unaffected.
+#[cfg(target_arch = "wasm32")]
+mod component;

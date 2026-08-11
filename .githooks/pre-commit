@@ -38,4 +38,16 @@ if command -v shellcheck >/dev/null 2>&1; then
     fi
 fi
 
+echo "=== pre-commit: vendored WIT in sync ==="
+canonical="crates/gang-wasm-host/wit/ganglion.wit"
+for vendored in crates/gang-capability-*/wit/ganglion.wit; do
+    # Compare ignoring the vendoring header (leading // comment lines).
+    if ! diff -q <(grep -v '^//' "$canonical") <(grep -v '^//' "$vendored") >/dev/null; then
+        echo ""
+        echo "Vendored WIT out of sync: $vendored differs from $canonical."
+        echo "Re-copy the canonical WIT (keep the vendoring header)."
+        exit 1
+    fi
+done
+
 echo "=== pre-commit: all checks passed ==="
