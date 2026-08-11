@@ -65,6 +65,7 @@ outdir="$repo_root/target/registry-seed"
 mkdir -p "$outdir"
 
 published=0
+skipped=0
 for dir in crates/gang-capability-*/; do
   crate="$(basename "$dir")"
   caps="$(caps_for "$crate")"
@@ -83,9 +84,19 @@ for dir in crates/gang-capability-*/; do
   [ -f "$wasm" ] || die "no component produced for $crate (expected $wasm)"
   cp "$wasm" "$outdir/$crate.component.wasm"
 
+  short="${crate#gang-capability-}"
+
+  # Idempotency: a re-run after a partial failure must not die on crates that
+  # already made it into the registry.
+  if gang registry info "$short" 2>/dev/null | grep -q "v${version}"; then
+    say "  $short@$version already published — skipping"
+    skipped=$((skipped + 1))
+    continue
+  fi
+
   # 2. Sign (writes $outdir/$crate.component.manifest.cbor).
   sign_args=(sign "$outdir/$crate.component.wasm"
-             --name "${crate#gang-capability-}"
+             --name "$short"
              --component-version "$version"
              --capabilities "$caps")
   [ -n "$SIGN_KEY" ] && sign_args+=(--key "$SIGN_KEY")
@@ -101,5 +112,5 @@ done
 if [ "$DRY_RUN" -eq 1 ]; then
   say "dry run complete — 8 crates mapped, nothing built"
 else
-  say "published $published capabilities. Verify: gang registry list"
+  say "published $published capabilities (skipped $skipped already-published). Verify: gang registry list"
 fi
