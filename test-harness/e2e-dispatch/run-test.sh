@@ -26,6 +26,10 @@ EXIT_CODE=0
 cleanup() {
     echo
     echo "--- Tearing down ---"
+    # Preserve per-service logs before teardown so a failing run is
+    # diagnosable after the containers are gone (the degraded-link matrix
+    # copies this next to its artifact).
+    docker compose logs --no-color > test-data/compose.log 2>/dev/null || true
     docker compose down -v --remove-orphans 2>/dev/null || true
     rm -f test-data/robot-libp2p-id test-data/robot-libp2p-id.tmp test-data/robot-agent.log
 }

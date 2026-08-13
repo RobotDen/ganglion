@@ -66,14 +66,34 @@ run_one() {
   [ -n "$robot_shape" ]    && say "  robot:    $robot_shape"
   [ -n "$operator_shape" ] && say "  operator: $operator_shape"
 
-  local t0 t1
+  # Gate profiles retry ONCE on failure — the same policy as the archetype
+  # scenarios (run_scenario_with_retry): container startup on shared runners
+  # is occasionally flaky, and a persistent regression still fails twice.
+  # Chaos runs never retry (a chaos failure is the signal).
+  local t0 t1 attempts note=""
+  attempts=1
+  [ "$class" = "gate" ] && attempts=2
   t0=$(date +%s)
-  rc=0
-  GANG_SHAPE_CMD="$robot_shape" GANG_SHAPE_OPERATOR_CMD="$operator_shape" \
-    "$E2E_DIR/run-test.sh" || rc=$?
+  rc=1
+  local try
+  for try in $(seq 1 "$attempts"); do
+    rc=0
+    GANG_SHAPE_CMD="$robot_shape" GANG_SHAPE_OPERATOR_CMD="$operator_shape" \
+      "$E2E_DIR/run-test.sh" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      [ "$try" -gt 1 ] && note=" (passed on retry)"
+      break
+    fi
+    # Preserve the failing attempt's compose logs next to the artifacts.
+    if [ -f "$E2E_DIR/test-data/compose.log" ]; then
+      cp "$E2E_DIR/test-data/compose.log" \
+        "$ART_DIR/$(date -u +%Y%m%dT%H%M%SZ)-$name-attempt$try-compose.log"
+    fi
+    [ "$try" -lt "$attempts" ] && { say "  attempt $try failed — retrying in 10s"; sleep 10; }
+  done
   t1=$(date +%s)
   dur=$((t1 - t0))
-  if [ "$rc" -eq 0 ]; then result="pass"; else result="fail"; fi
+  if [ "$rc" -eq 0 ]; then result="pass$note"; else result="fail"; fi
 
   local artifact ts
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -118,6 +138,7 @@ else
     run_one "$PROFILE_NAME" "$PROFILE_DESC" "$PROFILE_CLASS" \
       "$ROBOT_SHAPE" "$OPERATOR_SHAPE" || FAILED=$((FAILED + 1))
     RAN=$((RAN + 1))
+    sleep 5  # let Docker networking settle between profiles
   done
   if [ "$RAN" -eq 0 ]; then
     echo "no profile matched '$ONLY_PROFILE'" >&2
