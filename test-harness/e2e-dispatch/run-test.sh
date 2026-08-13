@@ -50,6 +50,18 @@ cat > test-data/run-robot.sh << 'ROBOT_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Degraded-link matrix hook (#32): apply link impairment BEFORE the agent
+# starts, so the whole session runs under the shaped link. The exact command
+# is echoed so it lands in the container log (and the run artifact).
+if [ -n "${GANG_SHAPE_CMD:-}" ]; then
+    echo "robot: shaping link: $GANG_SHAPE_CMD"
+    if ! eval "$GANG_SHAPE_CMD"; then
+        echo "robot: FAIL: link shaping command failed" >&2
+        exit 1
+    fi
+    echo "robot: link shaped"
+fi
+
 ADDR_FILE=/shared/relay.addr
 for _ in $(seq 1 60); do
     [ -s "$ADDR_FILE" ] && break
@@ -102,6 +114,17 @@ chmod +x test-data/run-robot.sh
 cat > test-data/run-operator-test.sh << 'OPERATOR_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Degraded-link matrix hook (#32): operator-side shaping (e.g. the downlink
+# half of a symmetric-latency profile).
+if [ -n "${GANG_SHAPE_OPERATOR_CMD:-}" ]; then
+    echo "operator: shaping link: $GANG_SHAPE_OPERATOR_CMD"
+    if ! eval "$GANG_SHAPE_OPERATOR_CMD"; then
+        echo "operator: FAIL: link shaping command failed" >&2
+        exit 1
+    fi
+    echo "operator: link shaped"
+fi
 
 echo "=== Operator e2e dispatch test ==="
 

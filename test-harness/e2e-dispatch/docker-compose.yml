@@ -35,6 +35,12 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
+    # NET_ADMIN so the degraded-link matrix (#32) can shape this container's
+    # link (tc netem/tbf, iptables statistic loss) before the agent starts.
+    cap_add:
+      - NET_ADMIN
+    environment:
+      GANG_SHAPE_CMD: ${GANG_SHAPE_CMD:-}
     # Wrapper waits for the relay's published multiaddr, starts
     # `gang agent -r <relay>`, and publishes the robot's dialable libp2p id
     # and agent log to /test-data for the operator.
@@ -53,6 +59,10 @@ services:
     build:
       context: ../..
       dockerfile: test-harness/Dockerfile.base
+    cap_add:
+      - NET_ADMIN
+    environment:
+      GANG_SHAPE_OPERATOR_CMD: ${GANG_SHAPE_OPERATOR_CMD:-}
     entrypoint: ["/bin/bash", "/test-data/run-operator-test.sh"]
     depends_on:
       - relay
