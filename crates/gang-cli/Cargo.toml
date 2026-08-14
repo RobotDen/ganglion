@@ -10,6 +10,23 @@ keywords.workspace = true
 categories = ["command-line-utilities", "network-programming", "science::robotics"]
 rust-version.workspace = true
 
+# `cargo deb -p gang --no-build` — Debian/Ubuntu package (built in the
+# release workflow for amd64 + arm64; see packaging/README.md).
+[package.metadata.deb]
+maintainer = "Bobby Larson <bobby@robotden.dev>"
+copyright = "2026 Robot Den contributors"
+section = "net"
+priority = "optional"
+extended-description = """\
+Ganglion gives ROS 2 robot fleets outbound-only reachability across NAT and
+firewalled networks (libp2p relay + hole punching), sandboxed WASM field
+tooling with default-deny policy, and an append-only audit log. This package
+installs the prebuilt gang CLI."""
+assets = [
+    ["target/release/gang", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/gang/README.md", "644"],
+]
+
 # `cargo binstall gang` — resolve the prebuilt tarball from the GitHub
 # release (gang-v<version>-<target>.tar.gz, binary at the archive root)
 # instead of compiling from source.
