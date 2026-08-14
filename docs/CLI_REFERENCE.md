@@ -712,6 +712,33 @@ command **exits non-zero** when no viable outbound path to a relay exists, so it
 works as a gate in scripts and CI and drops cleanly into a support thread:
 *"run `gang doctor` and paste the output."*
 
+#### `--profile-out`: the customer link as a CI test case
+
+When a customer says *"it's slow at their site"*, the link conditions evaporate
+the moment the support call ends. `--profile-out` measures the actual link and
+writes a **deterministic** degraded-link profile in the
+`test-harness/degraded-link` fixture format, so the site becomes a replayable
+matrix case instead of an anecdote:
+
+```bash
+$ gang doctor --profile-out acme-east.profile --profile-name "Acme East" \
+    --uplink-kbit 384
+Measuring link against relay.gang.tafy.dev:443 (20 samples, ~3s)...
+Measured relay.gang.tafy.dev:443: median rtt 187.4ms, spread 22.1ms, 1/20 probes failed.
+Wrote deterministic site profile 'acme-east' to acme-east.profile.
+Replay it in CI: test-harness/degraded-link/run-matrix.sh --profile-file acme-east.profile
+```
+
+The measurement is RTT (median of N TCP connects to the configured relay) and
+connect-failure rate; the emitted shape uses only fixed netem delay (measured
+RTT split evenly across both directions) and iptables statistic-nth loss, per
+the matrix gate determinism contract — measured jitter is recorded in the
+header comments but deliberately not reproduced. Rates are **not** measurable
+from a handshake probe: `--uplink-kbit` / `--downlink-kbit` fold
+operator-supplied caps (e.g. from a site speed test) into the profile, and the
+header says which numbers were measured and which were supplied. `--samples N`
+controls probe count. The command refuses to profile an unreachable link. (#33)
+
 ### `gang profiles`
 
 List the bandwidth profiles available for degraded-link streaming. Profiles are

@@ -1,5 +1,6 @@
 mod commands;
 mod doctor;
+mod link_profile;
 mod fleet_html;
 mod foxglove;
 mod mcp;
@@ -347,6 +348,30 @@ enum Commands {
         /// Relay multiaddr to test reachability against (default: `default_relay`).
         #[arg(long, short = 'r', value_name = "MULTIADDR")]
         relay: Option<String>,
+
+        /// Measure the link and write a deterministic degraded-link profile
+        /// (test-harness fixture format) to this path — the customer's
+        /// network as a replayable `run-matrix.sh` test case. (#33)
+        #[arg(long, value_name = "FILE")]
+        profile_out: Option<std::path::PathBuf>,
+
+        /// Profile name recorded in the emitted file (sanitized to
+        /// `[a-z0-9-]`). Default: "site".
+        #[arg(long, value_name = "NAME", default_value = "site")]
+        profile_name: String,
+
+        /// Number of RTT/loss probe samples for `--profile-out`.
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        samples: u16,
+
+        /// Robot uplink cap to record in the profile, kbit/s (rates are not
+        /// measurable from a handshake probe — supply from a site speed test).
+        #[arg(long, value_name = "KBIT")]
+        uplink_kbit: Option<u32>,
+
+        /// Robot downlink cap to record in the profile, kbit/s.
+        #[arg(long, value_name = "KBIT")]
+        downlink_kbit: Option<u32>,
     },
 
     /// List bandwidth profiles for degraded-link streaming (`--profile <name>`).
@@ -971,7 +996,27 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::TestArchetype { archetype } => commands::test_archetype(&archetype).await?,
         Commands::Diagnose { robot } => commands::diagnose(robot.as_deref(), &cli.format).await?,
-        Commands::Doctor { relay } => doctor::doctor(relay.as_deref(), &cli.format).await?,
+        Commands::Doctor {
+            relay,
+            profile_out,
+            profile_name,
+            samples,
+            uplink_kbit,
+            downlink_kbit,
+        } => {
+            doctor::doctor(
+                relay.as_deref(),
+                &cli.format,
+                profile_out.as_deref().map(|p| doctor::ProfileOut {
+                    path: p.to_path_buf(),
+                    name: profile_name.clone(),
+                    samples: samples as usize,
+                    uplink_kbit,
+                    downlink_kbit,
+                }),
+            )
+            .await?
+        }
         Commands::Profiles => commands::profiles(&cli.format).await?,
         Commands::Mcp => mcp::serve(&cli.format).await?,
         Commands::Alert { action } => match action {

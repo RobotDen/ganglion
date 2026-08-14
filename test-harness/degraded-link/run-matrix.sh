@@ -4,6 +4,7 @@
 #   ./run-matrix.sh                        # required gate: all 5 deterministic profiles
 #   ./run-matrix.sh --profile lossy        # one profile
 #   ./run-matrix.sh --chaos [--seed N]     # randomized netem chaos (nightly)
+#   ./run-matrix.sh --profile-file site.profile   # external/site fixture (#33)
 #
 # Each profile runs the REAL e2e-dispatch round-trip (deploy -> invoke ->
 # verify over the relay) with link impairment applied INSIDE the robot (and
@@ -28,15 +29,24 @@ say() { printf '\033[1;36m==>\033[0m %s\n' "$1"; }
 
 MODE="gate"
 ONLY_PROFILE=""
+PROFILE_FILE=""
 SEED=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) ONLY_PROFILE="$2"; shift 2 ;;
+    # An external fixture file — e.g. a site profile captured in the field
+    # with `gang doctor --profile-out` (#33). Same format as profiles/*.profile.
+    --profile-file) PROFILE_FILE="$2"; shift 2 ;;
     --chaos)   MODE="chaos"; shift ;;
     --seed)    SEED="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ -n "$PROFILE_FILE" ] && [ ! -f "$PROFILE_FILE" ]; then
+  echo "profile file not found: $PROFILE_FILE" >&2
+  exit 2
+fi
 
 # Chaos seed: explicit, else derived from the epoch (recorded either way).
 if [ "$MODE" = "chaos" ] && [ -z "$SEED" ]; then
@@ -125,6 +135,18 @@ if [ "$MODE" = "chaos" ]; then
   say "replay: ./run-matrix.sh --chaos --seed $SEED"
   run_one "chaos" "seeded random netem impairment" "chaos" \
     "tc qdisc add dev eth0 root netem $PARAMS" "" || FAILED=$((FAILED + 1))
+  RAN=1
+elif [ -n "$PROFILE_FILE" ]; then
+  PROFILE_NAME="" PROFILE_DESC="" PROFILE_CLASS="" ROBOT_SHAPE="" OPERATOR_SHAPE=""
+  # shellcheck source=/dev/null
+  . "$PROFILE_FILE"
+  if [ -z "$PROFILE_NAME" ]; then
+    echo "not a profile fixture (no PROFILE_NAME): $PROFILE_FILE" >&2
+    exit 2
+  fi
+  say "external profile file: $PROFILE_FILE"
+  run_one "$PROFILE_NAME" "$PROFILE_DESC" "${PROFILE_CLASS:-site}" \
+    "$ROBOT_SHAPE" "$OPERATOR_SHAPE" || FAILED=$((FAILED + 1))
   RAN=1
 else
   for f in "$SCRIPT_DIR"/profiles/*.profile; do

@@ -443,8 +443,52 @@ pub async fn gather_report(relay: Option<String>) -> DoctorReport {
         })
 }
 
+/// `--profile-out` request: where to write the site profile and how to
+/// measure it.
+#[derive(Debug, Clone)]
+pub struct ProfileOut {
+    /// Output path for the harness-format `.profile` file.
+    pub path: std::path::PathBuf,
+    /// Raw profile name (sanitized before rendering).
+    pub name: String,
+    /// Number of probe samples.
+    pub samples: usize,
+    /// Operator-supplied robot uplink cap, kbit/s.
+    pub uplink_kbit: Option<u32>,
+    /// Operator-supplied robot downlink cap, kbit/s.
+    pub downlink_kbit: Option<u32>,
+}
+
+/// Pick the TCP target to measure for `--profile-out`: the configured TCP
+/// relay when there is one; a QUIC relay falls back to TCP on the same
+/// host:port when reachable, else the generic 443 probe target; no relay
+/// measures the generic target. Returns (host, port, note-for-humans).
+fn profile_target(relay: Option<&RelayEndpoint>) -> (String, u16, Option<String>) {
+    match relay {
+        Some(ep) if ep.transport == RelayTransport::Tcp => (ep.host.clone(), ep.port, None),
+        Some(ep) => (
+            ep.host.clone(),
+            ep.port,
+            Some(format!(
+                "relay {} is QUIC; measuring TCP connects to the same host:port \
+                 (falls back to 1.1.1.1:443 if that listener is closed)",
+                ep.host_port()
+            )),
+        ),
+        None => (
+            "1.1.1.1".to_string(),
+            443,
+            Some("no relay configured; measuring against 1.1.1.1:443".to_string()),
+        ),
+    }
+}
+
 /// `gang doctor` entry point.
-pub async fn doctor(relay: Option<&str>, format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn doctor(
+    relay: Option<&str>,
+    format: &OutputFormat,
+    profile_out: Option<ProfileOut>,
+) -> anyhow::Result<()> {
     // Resolve the relay: explicit --relay wins, else config `default_relay`.
     let relay_addr = relay.map(|s| s.to_string()).or_else(|| {
         crate::commands::OperatorConfig::load()
@@ -470,6 +514,74 @@ pub async fn doctor(relay: Option<&str>, format: &OutputFormat) -> anyhow::Resul
         }
         OutputFormat::Text => {
             print!("{}", render_text(&report));
+        }
+    }
+
+    // --profile-out: measure the link and emit the site profile. Runs after
+    // the report so the reachability verdict is already on screen; refuses
+    // when there is no viable path (profiling an unreachable link is noise).
+    if let Some(req) = profile_out {
+        if !report.viable_path {
+            anyhow::bail!(
+                "--profile-out: no viable outbound path — fix reachability first \
+                 (see the report above)"
+            );
+        }
+        let (host, port, note) = profile_target(report.relay.as_ref());
+        if matches!(format, OutputFormat::Text) {
+            if let Some(n) = &note {
+                println!("note: {n}");
+            }
+            println!(
+                "Measuring link against {host}:{port} ({} samples, ~{}s)...",
+                req.samples,
+                req.samples / 10 + 1
+            );
+        }
+        let path = req.path.clone();
+        let (m, p) = tokio::task::spawn_blocking(move || {
+            // QUIC-relay fallback: if the same-host TCP probe fails entirely,
+            // re-measure against the generic 443 target rather than erroring.
+            let first = crate::link_profile::measure_tcp(&host, port, 3, PROBE_TIMEOUT);
+            let (host, port) = if first.failures >= first.samples && host != "1.1.1.1" {
+                ("1.1.1.1".to_string(), 443)
+            } else {
+                (host, port)
+            };
+            crate::link_profile::write_profile(
+                &host,
+                port,
+                req.samples,
+                PROBE_TIMEOUT,
+                &req.name,
+                req.uplink_kbit,
+                req.downlink_kbit,
+                &path,
+            )
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("measurement task failed: {e}"))??;
+        if matches!(format, OutputFormat::Text) {
+            let median = m
+                .median_rtt_ms()
+                .map(|v| format!("{v:.1}ms"))
+                .unwrap_or_else(|| "n/a".to_string());
+            println!(
+                "Measured {}: median rtt {median}, spread {:.1}ms, {}/{} probes failed.",
+                m.target,
+                m.spread_ms(),
+                m.failures,
+                m.samples
+            );
+            println!(
+                "Wrote deterministic site profile '{}' to {}.",
+                p.name,
+                req.path.display()
+            );
+            println!(
+                "Replay it in CI: test-harness/degraded-link/run-matrix.sh --profile-file {}",
+                req.path.display()
+            );
         }
     }
 
@@ -563,6 +675,23 @@ mod tests {
     fn allowlist_without_relay_gives_generic_guidance() {
         let lines = derive_allowlist(None);
         assert!(lines.iter().any(|l| l.contains("No relay is configured")));
+    }
+
+    #[test]
+    fn profile_target_prefers_tcp_relay() {
+        let ep = parse_relay_multiaddr("/dns4/relay.example/tcp/443").unwrap();
+        let (host, port, note) = profile_target(Some(&ep));
+        assert_eq!((host.as_str(), port), ("relay.example", 443));
+        assert!(note.is_none());
+
+        let ep = parse_relay_multiaddr("/ip4/1.2.3.4/udp/443/quic-v1").unwrap();
+        let (host, port, note) = profile_target(Some(&ep));
+        assert_eq!((host.as_str(), port), ("1.2.3.4", 443));
+        assert!(note.unwrap().contains("QUIC"));
+
+        let (host, port, note) = profile_target(None);
+        assert_eq!((host.as_str(), port), ("1.1.1.1", 443));
+        assert!(note.unwrap().contains("no relay configured"));
     }
 
     #[test]

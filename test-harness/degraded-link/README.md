@@ -21,6 +21,7 @@ containers *before* the agent starts.
 ```bash
 ./run-matrix.sh                      # required gate: all 5 profiles
 ./run-matrix.sh --profile asymmetric # one profile
+./run-matrix.sh --profile-file site.profile  # external fixture (see below)
 ./run-matrix.sh --chaos              # randomized netem (nightly), seed recorded
 ./run-matrix.sh --chaos --seed 42    # replay a chaos run's impairment
 ```
@@ -52,3 +53,19 @@ into `.github/workflows/` by a committer whose token has workflow scope):
   docs-only pushes).
 - `nightly-chaos.yml` — daily randomized run; non-blocking; opens an issue
   with the seed and artifact on failure.
+
+## Site profiles from the field (#33)
+
+`gang doctor --profile-out site.profile` measures a customer link (RTT median
+and connect-failure rate against the configured relay) and emits a fixture in
+exactly this directory's format — fixed netem delay + statistic-nth loss, with
+the measurement provenance in header comments and operator-supplied rate caps
+via `--uplink-kbit`/`--downlink-kbit`. Replay the customer's network any time:
+
+```bash
+./run-matrix.sh --profile-file acme-east.profile
+```
+
+Site profiles carry `PROFILE_CLASS="site"` (no gate retry semantics — they run
+once like chaos, but with deterministic shapes). Check the ones worth keeping
+into `profiles/` to make a customer link part of the permanent matrix.
