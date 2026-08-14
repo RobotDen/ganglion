@@ -4,7 +4,7 @@
 
 Secure connectivity and auditable tool execution for ROS 2 robot fleets on hostile networks — outbound-only reachability, signed WASM tooling, default-deny policy.
 
-![status: usable](https://img.shields.io/badge/status-usable-green) [![crates.io](https://img.shields.io/crates/v/gang.svg)](https://crates.io/crates/gang) [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![status: usable](https://img.shields.io/badge/status-usable-green) [![CI](https://github.com/RobotDen/ganglion/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RobotDen/ganglion/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/gang.svg)](https://crates.io/crates/gang) [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 ![gang demo](docs/assets/ganglion-demo.gif)
 
