@@ -1070,6 +1070,56 @@ Rename a registered peer.
 
 Clear the stored host key for a peer. The next connection will re-verify the peer's identity.
 
+## Robot policy
+
+The robot's `policy.toml` is default-deny: anything not explicitly allowed is
+refused. These commands keep that posture livable — every denial names the
+minimal rule that would permit exactly the denied request, and applying it is
+one command. Without that loop, an unmanaged policy erodes toward
+`allowed_patterns = ["**"]` because the wide-open edit is the only one a
+frustrated operator knows will work.
+
+All four run **on the robot** (policy is deliberately not remotely editable)
+and honor `--data-dir`.
+
+### `gang policy show`
+
+Print the active policy (or a warning that no policy file exists — an agent
+started without one runs permissive dev mode).
+
+### `gang policy allow <group> <pattern> [--access <level>]`
+
+Permit a pattern with the *minimal* widening: appends to the group's existing
+rule (raising `max_access` only when `--access read_write` requires it), or
+creates a new single-pattern rule. Validated like `visudo` — the mutated
+policy is re-parsed before the file is replaced atomically, and the previous
+version is kept as `policy.toml.bak`. Everything-matching patterns (`**`)
+are refused unless `--wide-open` is passed. Restart the agent to apply.
+
+```bash
+# Exactly what a denial message suggests:
+gang policy allow ganglion:ros/interface "/scan" --access read_only
+```
+
+### `gang policy allow-peer <gang-id>`
+
+Authorize an operator to deploy (adds a `[[peer_rules]]` entry).
+
+### `gang policy denials [--last N]`
+
+Firewall-log review of recent denials: the agent appends every policy denial
+to `denials.jsonl` (next to the audit log, size-capped); this aggregates
+identical requests with counts, newest first, each with its one-command
+remedy. The deny → review → narrow-allow loop closes here.
+
+### `gang policy lint [--strict]`
+
+The drift tripwire: flags wide-open rules (`**` patterns, `**` combined with
+`max_access = "read_write"`, `peer_id = "*"` deploy rights, or a missing
+policy file entirely). `--strict` exits non-zero when findings exist, so a
+fleet can run it in CI or cron and catch erosion as a finding instead of an
+incident.
+
 ## Configuration
 
 ### `gang config show`

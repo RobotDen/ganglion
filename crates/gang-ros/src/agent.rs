@@ -53,6 +53,11 @@ pub struct RobotAgent {
     /// Audit log.
     audit_log: AuditLog,
 
+    /// Where policy denials are appended (JSON lines, capped), firewall-log
+    /// style: `gang policy denials` reads this to show what was recently
+    /// refused and the minimal rule that would permit each request.
+    denials_log_path: PathBuf,
+
     /// Directory for storing installed capabilities.
     capabilities_dir: PathBuf,
 
@@ -175,6 +180,8 @@ impl RobotAgent {
             engine, brokers,
         )?);
 
+        // Denials land next to the audit log so both survive together.
+        let denials_log_path = config.audit_log_path.with_file_name("denials.jsonl");
         let audit_log = AuditLog::new(config.audit_log_path, config.audit_max_size_bytes);
 
         let mut agent = Self {
@@ -188,6 +195,7 @@ impl RobotAgent {
             policy,
             trust_store,
             audit_log,
+            denials_log_path,
             capabilities_dir: config.capabilities_dir,
             // SEC-14: 5-minute freshness window for inbound requests.
             replay_guard: Arc::new(Mutex::new(gang_core::message::ReplayGuard::new(
@@ -208,6 +216,47 @@ impl RobotAgent {
     }
 
     /// Deploy a signed capability to this robot.
+    /// Append one policy denial to the denial log as a JSON line, capped at
+    /// 1 MiB by dropping the oldest half when exceeded. A failure to record
+    /// never fails the caller — the denial itself already did.
+    fn record_denial(&self, report: &gang_core::policy::DenialReport) {
+        #[derive(serde::Serialize)]
+        struct Entry<'a> {
+            ts: chrono::DateTime<chrono::Utc>,
+            #[serde(flatten)]
+            report: &'a gang_core::policy::DenialReport,
+        }
+        let entry = Entry {
+            ts: chrono::Utc::now(),
+            report,
+        };
+        let Ok(line) = serde_json::to_string(&entry) else {
+            return;
+        };
+        const MAX_BYTES: u64 = 1024 * 1024;
+        if let Ok(meta) = std::fs::metadata(&self.denials_log_path)
+            && meta.len() > MAX_BYTES
+            && let Ok(contents) = std::fs::read_to_string(&self.denials_log_path)
+        {
+            let lines: Vec<&str> = contents.lines().collect();
+            let keep = lines.len() / 2;
+            let tail = lines[lines.len() - keep..].join("\n");
+            let _ = std::fs::write(&self.denials_log_path, format!("{tail}\n"));
+        }
+        if let Some(parent) = self.denials_log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.denials_log_path)
+            && let Err(e) = writeln!(f, "{line}")
+        {
+            warn!("failed to append to denial log: {e}");
+        }
+    }
+
     /// Verifies signature, checks trust store, evaluates policy, then installs.
     pub async fn deploy_capability(
         &self,
@@ -285,6 +334,19 @@ impl RobotAgent {
                         decision: PolicyOutcome::Deny,
                         reason,
                     });
+                // Actionable denial: analyze the failure, record it to the
+                // denial log (reviewable with `gang policy denials`), and
+                // send the remedy back over the wire so the operator's
+                // `gang deploy` prints the exact minimal fix instead of a
+                // bare refusal. Default-deny only survives contact with real
+                // operations when the narrow edit is the easy edit.
+                if let Some(report) = self
+                    .policy
+                    .explain(&manifest.declared_capabilities, deployer)
+                {
+                    self.record_denial(&report);
+                    return Err(anyhow::anyhow!("{e}\n{}", report.render()));
+                }
                 return Err(e.into());
             }
         }

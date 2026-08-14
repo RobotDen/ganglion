@@ -6,6 +6,22 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **Actionable policy denials (`gang policy`).** Default-deny only survives
+  contact with real operations when the narrow edit is easier than the
+  wide-open one. Every policy denial now carries its own remedy: the deploy
+  error names exactly what was refused, why (no rule / pattern not covered /
+  access exceeds max / peer unauthorized), and the smallest policy change
+  that would permit exactly that request — as both a ready-to-run
+  `gang policy allow` command and a `policy.toml` snippet. The robot appends
+  each denial to a size-capped `denials.jsonl` beside the audit log;
+  `gang policy denials` reviews them firewall-log style (aggregated, newest
+  first, remedy attached). `gang policy allow` applies the minimal widening
+  with `visudo` semantics — mutate, re-validate, write atomically, keep a
+  `.bak` — and refuses `**` without `--wide-open`. `gang policy lint`
+  [`--strict`] is the drift tripwire for CI/cron: it flags wide-open
+  patterns, read-write-on-everything, wildcard deploy rights, and
+  missing-policy permissive mode.
+
 - **Degraded-link CI matrix (`test-harness/degraded-link/`).** The
   e2e-dispatch round-trip (deploy → invoke → verify over the relay circuit)
   now runs as a required gate on every main push under five deterministic

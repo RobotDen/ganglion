@@ -453,6 +453,15 @@ enum Commands {
         action: PeerAction,
     },
 
+    /// Inspect and evolve the robot's default-deny policy: show it, permit
+    /// exactly what a denial asked for, review recent denials, lint for
+    /// wide-open drift.
+    #[command(display_order = 14)]
+    Policy {
+        #[command(subcommand)]
+        action: PolicyAction,
+    },
+
     /// View or edit operator configuration (~/.gang/config.toml).
     #[command(display_order = 13)]
     Config {
@@ -740,6 +749,49 @@ enum ConfigAction {
 }
 
 #[derive(Subcommand)]
+enum PolicyAction {
+    /// Show the active robot policy.
+    Show,
+    /// Permit a capability pattern — the minimal edit, validated and written
+    /// atomically (never leaves a broken policy.toml behind).
+    Allow {
+        /// Capability group (e.g. "ganglion:ros/interface").
+        group: String,
+        /// Pattern to allow (e.g. "/cmd_vel", "journald/**"). Refuses "**"
+        /// unless --wide-open is passed.
+        pattern: String,
+        /// Access level for groups that distinguish one ("read_only" or
+        /// "read_write").
+        #[arg(long)]
+        access: Option<String>,
+        /// Explicitly permit an everything-matching pattern. Wide-open rules
+        /// are what `gang policy lint` exists to flag; requiring this flag
+        /// keeps them a deliberate act instead of a reflex.
+        #[arg(long)]
+        wide_open: bool,
+    },
+    /// Authorize a peer to deploy capabilities.
+    AllowPeer {
+        /// The operator's gang id (from `gang identity show`).
+        peer_id: String,
+    },
+    /// Review recent policy denials with the minimal rule that would permit
+    /// each — firewall-log style.
+    Denials {
+        /// Show at most this many distinct denials.
+        #[arg(long, default_value_t = 20)]
+        last: usize,
+    },
+    /// Flag over-broad rules that undermine default-deny (run it in CI or
+    /// cron; exits non-zero with --strict when findings exist).
+    Lint {
+        /// Exit 1 when any finding exists.
+        #[arg(long)]
+        strict: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum IdentityAction {
     /// Show your peer ID and public key.
     Show,
@@ -1020,6 +1072,23 @@ async fn main() -> anyhow::Result<()> {
             PeerAction::TrustReset { name } => {
                 commands::peer_trust_reset(&name, &cli.format).await?
             }
+        },
+        Commands::Policy { action } => match action {
+            PolicyAction::Show => commands::policy_show(&cli.format).await?,
+            PolicyAction::Allow {
+                group,
+                pattern,
+                access,
+                wide_open,
+            } => {
+                commands::policy_allow(&group, &pattern, access.as_deref(), wide_open, &cli.format)
+                    .await?
+            }
+            PolicyAction::AllowPeer { peer_id } => {
+                commands::policy_allow_peer(&peer_id, &cli.format).await?
+            }
+            PolicyAction::Denials { last } => commands::policy_denials(last, &cli.format).await?,
+            PolicyAction::Lint { strict } => commands::policy_lint(strict, &cli.format).await?,
         },
         Commands::Config { action } => match action {
             ConfigAction::Show => commands::config_show(&cli.format).await?,

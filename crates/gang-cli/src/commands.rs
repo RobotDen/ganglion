@@ -1065,6 +1065,328 @@ pub async fn config_show(format: &OutputFormat) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve the robot policy path (honors `--data-dir` via GANG_HOME).
+fn policy_file_path() -> std::path::PathBuf {
+    gang_core::identity::default_config_dir().join("policy.toml")
+}
+
+/// Load the policy for `gang policy` subcommands, distinguishing "no file"
+/// (permissive dev mode — worth shouting about) from a parse error.
+fn load_policy_file() -> anyhow::Result<(gang_core::policy::Policy, bool)> {
+    let path = policy_file_path();
+    if !path.exists() {
+        return Ok((gang_core::policy::Policy::default(), false));
+    }
+    let policy = gang_core::policy::Policy::load(&path)
+        .with_context(|| format!("loading policy {}", path.display()))?;
+    Ok((policy, true))
+}
+
+/// `gang policy show`
+pub async fn policy_show(format: &OutputFormat) -> anyhow::Result<()> {
+    let (policy, exists) = load_policy_file()?;
+    let path = policy_file_path();
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "exists": exists,
+                    "policy": policy,
+                })
+            );
+        }
+        OutputFormat::Text => {
+            if !exists {
+                println!("No policy file at {}.", path.display());
+                println!(
+                    "An agent started without one runs PERMISSIVE (dev mode). \
+                     Run `gang init` to write a default-deny policy."
+                );
+                return Ok(());
+            }
+            println!("Policy file: {}", path.display());
+            println!();
+            print!("{}", policy.to_toml_pretty()?);
+        }
+    }
+    Ok(())
+}
+
+/// `gang policy allow` — the visudo property: parse, mutate minimally,
+/// re-validate, write atomically. A broken policy.toml is never left behind,
+/// and the previous file survives as policy.toml.bak.
+pub async fn policy_allow(
+    group: &str,
+    pattern: &str,
+    access: Option<&str>,
+    wide_open: bool,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    use gang_core::policy::AllowOutcome;
+
+    if let Some(a) = access
+        && a != "read_only"
+        && a != "read_write"
+    {
+        anyhow::bail!("--access must be \"read_only\" or \"read_write\" (got \"{a}\")");
+    }
+    if (pattern == "**" || pattern == "*") && !wide_open {
+        anyhow::bail!(
+            "\"{pattern}\" matches everything. If that is really the intent, pass \
+             --wide-open; otherwise allow the specific pattern the denial named \
+             (`gang policy denials` lists recent ones)."
+        );
+    }
+
+    let (mut policy, exists) = load_policy_file()?;
+    if !exists {
+        anyhow::bail!(
+            "no policy file at {} — run `gang init` first (an agent without a \
+             policy file already runs permissive)",
+            policy_file_path().display()
+        );
+    }
+
+    let outcome = policy.allow(group, pattern, access);
+    let path = policy_file_path();
+    if outcome != AllowOutcome::AlreadyAllowed {
+        // Validate the mutated policy round-trips before touching the file,
+        // then write tmp + backup + rename so every intermediate state on
+        // disk is a complete, parseable policy.
+        let serialized = policy.to_toml_pretty()?;
+        gang_core::policy::Policy::from_toml(&serialized).map_err(|e| {
+            anyhow::anyhow!("refusing to write: mutated policy fails to parse: {e}")
+        })?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, &serialized).with_context(|| format!("writing {}", tmp.display()))?;
+        let bak = path.with_extension("toml.bak");
+        std::fs::copy(&path, &bak).with_context(|| format!("backing up to {}", bak.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
+    }
+
+    let described = match &outcome {
+        AllowOutcome::AlreadyAllowed => "already allowed — policy unchanged".to_string(),
+        AllowOutcome::AddedPattern => format!("added \"{pattern}\" to the {group} rule"),
+        AllowOutcome::RaisedAccess => {
+            format!("added \"{pattern}\" and raised {group} max_access to read_write")
+        }
+        AllowOutcome::NewRule => format!("created a new {group} rule allowing \"{pattern}\""),
+    };
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::json!({
+                "changed": outcome != AllowOutcome::AlreadyAllowed,
+                "result": described,
+                "path": path.display().to_string(),
+            })
+        ),
+        OutputFormat::Text => {
+            println!("{described}");
+            if outcome != AllowOutcome::AlreadyAllowed {
+                println!(
+                    "Wrote {} (previous kept as policy.toml.bak).",
+                    path.display()
+                );
+                println!("The agent reads policy at startup — restart it to apply.");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `gang policy allow-peer`
+pub async fn policy_allow_peer(peer_id: &str, format: &OutputFormat) -> anyhow::Result<()> {
+    use gang_core::policy::PeerRule;
+
+    let (mut policy, exists) = load_policy_file()?;
+    if !exists {
+        anyhow::bail!(
+            "no policy file at {} — run `gang init` first",
+            policy_file_path().display()
+        );
+    }
+    let already = policy
+        .peer_rules
+        .iter()
+        .any(|r| (r.peer_id == peer_id || r.peer_id == "*") && r.can_deploy);
+    if !already {
+        policy.peer_rules.push(PeerRule {
+            peer_id: peer_id.to_string(),
+            can_deploy: true,
+            allowed_capabilities: Vec::new(),
+        });
+        let serialized = policy.to_toml_pretty()?;
+        gang_core::policy::Policy::from_toml(&serialized).map_err(|e| {
+            anyhow::anyhow!("refusing to write: mutated policy fails to parse: {e}")
+        })?;
+        let path = policy_file_path();
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, &serialized)?;
+        let bak = path.with_extension("toml.bak");
+        std::fs::copy(&path, &bak)?;
+        std::fs::rename(&tmp, &path)?;
+    }
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::json!({ "changed": !already, "peer_id": peer_id })
+        ),
+        OutputFormat::Text => {
+            if already {
+                println!("Peer {peer_id} can already deploy — policy unchanged.");
+            } else {
+                println!("Authorized {peer_id} to deploy (restart the agent to apply).");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `gang policy denials` — read the agent's denial log, aggregate identical
+/// requests (count + last seen), newest first, each with its remedy.
+pub async fn policy_denials(last: usize, format: &OutputFormat) -> anyhow::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        ts: String,
+        #[serde(flatten)]
+        report: gang_core::policy::DenialReport,
+    }
+
+    // The agent writes denials next to its audit log; the default agent
+    // config keeps that under /var/lib/gang. Check the GANG_HOME-relative
+    // location too so `gang up` fleets work out of the box.
+    let candidates = [
+        std::path::PathBuf::from("/var/lib/gang/denials.jsonl"),
+        gang_core::identity::default_config_dir().join("denials.jsonl"),
+    ];
+    let path = candidates.iter().find(|p| p.exists());
+
+    let Some(path) = path else {
+        match format {
+            OutputFormat::Json => println!("{}", serde_json::json!({ "denials": [] })),
+            OutputFormat::Text => println!(
+                "No denials recorded (looked in {}).",
+                candidates
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+        return Ok(());
+    };
+
+    let contents = std::fs::read_to_string(path)?;
+    // Aggregate identical (group, pattern, deployer) requests.
+    let mut order: Vec<String> = Vec::new();
+    let mut agg: std::collections::HashMap<String, (usize, Entry)> =
+        std::collections::HashMap::new();
+    for line in contents.lines() {
+        let Ok(entry) = serde_json::from_str::<Entry>(line) else {
+            continue;
+        };
+        let key = format!(
+            "{}|{}|{}",
+            entry.report.group,
+            entry.report.pattern.as_deref().unwrap_or(""),
+            entry.report.deployer
+        );
+        match agg.get_mut(&key) {
+            Some((count, latest)) => {
+                *count += 1;
+                *latest = entry; // lines are chronological; keep the newest
+            }
+            None => {
+                order.push(key.clone());
+                agg.insert(key, (1, entry));
+            }
+        }
+    }
+    // Newest-first by last occurrence.
+    let mut rows: Vec<(usize, Entry)> = order.into_iter().filter_map(|k| agg.remove(&k)).collect();
+    rows.sort_by(|a, b| b.1.ts.cmp(&a.1.ts));
+    rows.truncate(last);
+
+    match format {
+        OutputFormat::Json => {
+            let items: Vec<_> = rows
+                .iter()
+                .map(|(count, e)| {
+                    serde_json::json!({
+                        "count": count,
+                        "last_seen": e.ts,
+                        "report": e.report,
+                        "suggested_command": e.report.suggested_command(),
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::json!({ "denials": items }));
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("No denials recorded in {}.", path.display());
+                return Ok(());
+            }
+            println!("Recent policy denials ({}):", path.display());
+            for (count, entry) in &rows {
+                println!();
+                let times = if *count > 1 {
+                    format!(" ({count}\u{d7})")
+                } else {
+                    String::new()
+                };
+                println!("[{}]{times}", entry.ts);
+                for line in entry.report.render().lines() {
+                    println!("  {line}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `gang policy lint` — the drift tripwire.
+pub async fn policy_lint(strict: bool, format: &OutputFormat) -> anyhow::Result<()> {
+    let (policy, exists) = load_policy_file()?;
+    let mut findings = policy.lint();
+    if !exists {
+        findings.insert(
+            0,
+            gang_core::policy::LintFinding {
+                location: "policy.toml".into(),
+                finding: "no policy file — the agent runs PERMISSIVE (allow-everything)".into(),
+                suggestion: "run `gang init` to write a default-deny policy".into(),
+            },
+        );
+    }
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::json!({ "findings": findings })),
+        OutputFormat::Text => {
+            if findings.is_empty() {
+                println!("Policy lints clean: no wide-open rules.");
+            } else {
+                println!(
+                    "{} finding(s) — wide-open rules erode default-deny:",
+                    findings.len()
+                );
+                for f in &findings {
+                    println!();
+                    println!("  where:   {}", f.location);
+                    println!("  finding: {}", f.finding);
+                    println!("  fix:     {}", f.suggestion);
+                }
+            }
+        }
+    }
+    if strict && !findings.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// `gang config set`
 pub async fn config_set(key: &str, value: &str, format: &OutputFormat) -> anyhow::Result<()> {
     let mut config = OperatorConfig::load();
