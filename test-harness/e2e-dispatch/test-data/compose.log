@@ -1,0 +1,136 @@
+relay-1  | [2m2026-08-13T21:39:43.808766Z[0m [33m WARN[0m [2mgang_core::identity[0m[2m:[0m identity key file has loose permissions; repairing to 0600 [3mpath[0m[2m=[0m/keys/relay.key [3mmode[0m[2m=[0m"644"
+relay-1  | [2m2026-08-13T21:39:43.808858Z[0m [33m WARN[0m [2mgang_core::identity[0m[2m:[0m failed to repair identity key file permissions [3mpath[0m[2m=[0m/keys/relay.key [3merror[0m[2m=[0mRead-only file system (os error 30)
+relay-1  | [2m2026-08-13T21:39:43.809649Z[0m [33m WARN[0m [2mgang_core::identity[0m[2m:[0m identity key file has loose permissions; repairing to 0600 [3mpath[0m[2m=[0m/keys/relay.key [3mmode[0m[2m=[0m"644"
+relay-1  | [2m2026-08-13T21:39:43.809660Z[0m [33m WARN[0m [2mgang_core::identity[0m[2m:[0m failed to repair identity key file permissions [3mpath[0m[2m=[0m/keys/relay.key [3merror[0m[2m=[0mRead-only file system (os error 30)
+relay-1  | [2m2026-08-13T21:39:43.810794Z[0m [32m INFO[0m [2mgang_libp2p::swarm[0m[2m:[0m Building Ganglion swarm [3mlocal_peer_id[0m[2m=[0m12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU [3mrelay_server[0m[2m=[0mtrue
+relay-1  | [2m2026-08-13T21:39:43.812840Z[0m [32m INFO[0m [2mgang_libp2p::swarm[0m[2m:[0m Listening on /ip4/0.0.0.0/tcp/4001
+relay-1  | [2m2026-08-13T21:39:43.813481Z[0m [32m INFO[0m [2mgang_libp2p::swarm[0m[2m:[0m Listening on /ip4/0.0.0.0/udp/4001/quic-v1
+relay-1  | Ganglion Relay Server
+relay-1  | ====================
+relay-1  | 
+relay-1  | Peer ID (gang identity): 12D3-85a851b3d339f18b67657f95db5d2e15
+relay-1  | Peer ID (libp2p/dial):   12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU
+relay-1  | Relay mode:   server
+relay-1  | Metrics port: 9090 (not yet active)
+relay-1  | 
+relay-1  | Listen addresses:
+relay-1  |   /ip4/0.0.0.0/tcp/4001
+relay-1  |   /ip4/0.0.0.0/udp/4001/quic-v1
+relay-1  | 
+relay-1  | Relay multiaddrs (for client config):
+relay-1  |   /ip4/0.0.0.0/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU
+relay-1  |   /ip4/0.0.0.0/udp/4001/quic-v1/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU
+relay-1  | 
+relay-1  | Relay is running. Press Ctrl+C to stop.
+relay-1  | 
+relay-1  | [2m2026-08-13T21:39:43.814551Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/127.0.0.1/tcp/4001
+relay-1  | [2m2026-08-13T21:39:43.814602Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/172.28.0.10/tcp/4001
+relay-1  | [2m2026-08-13T21:39:43.814665Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/127.0.0.1/udp/4001/quic-v1
+relay-1  | [2m2026-08-13T21:39:43.814675Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/172.28.0.10/udp/4001/quic-v1
+relay-1  | relay-entrypoint: published relay multiaddr /ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU
+relay-1  | [2m2026-08-13T21:39:44.891471Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection established [3mpeer[0m[2m=[0m12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP [3mrelay[0m[2m=[0mfalse
+relay-1  | [2m2026-08-13T21:39:46.054799Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection established [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj [3mrelay[0m[2m=[0mfalse
+relay-1  | [2m2026-08-13T21:39:46.393397Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection closed [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj
+relay-1  | [2m2026-08-13T21:39:46.398587Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection established [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj [3mrelay[0m[2m=[0mfalse
+relay-1  | [2m2026-08-13T21:39:46.756834Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection closed [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj
+relay-1  | [2m2026-08-13T21:39:46.766181Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection established [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj [3mrelay[0m[2m=[0mfalse
+relay-1  | [2m2026-08-13T21:39:47.074575Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection closed [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj
+relay-1  | [2m2026-08-13T21:39:48.276300Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection closed [3mpeer[0m[2m=[0m12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP
+robot-1  | robot: shaping link: iptables -A OUTPUT -d 172.28.0.30 -j DROP && iptables -A INPUT -s 172.28.0.30 -j DROP
+robot-1  | robot: link shaped
+robot-1  | robot: dialing relay /ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU
+robot-1  | [2m2026-08-13T21:39:44.887603Z[0m [32m INFO[0m [2mgang_ros::agent[0m[2m:[0m Robot agent initializing [3mpeer_id[0m[2m=[0m12D3-7b78c58d7602c053bf95e2cedf41767b
+robot-1  | [2m2026-08-13T21:39:44.887620Z[0m [33m WARN[0m [2mgang_ros::agent[0m[2m:[0m No policy file configured — using PERMISSIVE policy. This allows ALL capability requests and is intended for development only.
+robot-1  | [2m2026-08-13T21:39:44.887654Z[0m [33m WARN[0m [2mgang_ros::agent[0m[2m:[0m Trust store is empty — capability signature trust checks are DISABLED. This is intended for development only.
+robot-1  | Robot agent started:
+robot-1  |   Peer ID:  12D3-7b78c58d7602c053bf95e2cedf41767b
+robot-1  |   Data dir: /data
+robot-1  |   Policy:   permissive (dev mode)
+robot-1  |   Relay:    /ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU
+robot-1  |   Mode:     remote (listening on /ganglion/control/1.0)
+robot-1  | 
+robot-1  | [2m2026-08-13T21:39:44.888600Z[0m [32m INFO[0m [2mgang_libp2p::swarm[0m[2m:[0m Building Ganglion swarm [3mlocal_peer_id[0m[2m=[0m12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP [3mrelay_server[0m[2m=[0mfalse
+robot-1  | [2m2026-08-13T21:39:44.889535Z[0m [32m INFO[0m [2mgang_libp2p::swarm[0m[2m:[0m Listening on /ip4/0.0.0.0/tcp/0
+robot-1  | [2m2026-08-13T21:39:44.889771Z[0m [32m INFO[0m [2mgang_libp2p::swarm[0m[2m:[0m Listening on /ip4/0.0.0.0/udp/0/quic-v1
+robot-1  | [2m2026-08-13T21:39:44.889827Z[0m [32m INFO[0m [2mgang_libp2p::swarm[0m[2m:[0m Requesting relay circuit reservation on /ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU/p2p-circuit
+robot-1  | Peer ID (libp2p/dial): 12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP
+robot-1  | 
+robot-1  | Register on operator machine:
+robot-1  |   gang peer add my-robot 12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP --relay /ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU
+robot-1  | 
+robot-1  | Starting transport...
+robot-1  | [2m2026-08-13T21:39:44.889885Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Registered protocol handler [3mprotocol[0m[2m=[0m/ganglion/control/1.0
+robot-1  | [2m2026-08-13T21:39:44.889941Z[0m [32m INFO[0m [2mgang_ros::agent[0m[2m:[0m Robot agent serving on /ganglion/control/1.0 and /ganglion/events/1.0 [3mpeer_id[0m[2m=[0m12D3-7b78c58d7602c053bf95e2cedf41767b
+robot-1  | Press Ctrl+C to stop.
+robot-1  | [2m2026-08-13T21:39:44.890181Z[0m [33m WARN[0m [2mgang_libp2p::adapter[0m[2m:[0m Relay circuit reservation listener closed; will re-establish [3mcircuit[0m[2m=[0m/ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU/p2p-circuit [3mreason[0m[2m=[0mOk(())
+robot-1  | [2m2026-08-13T21:39:44.890251Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/127.0.0.1/tcp/40623
+robot-1  | [2m2026-08-13T21:39:44.890261Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/172.28.0.20/tcp/40623
+robot-1  | [2m2026-08-13T21:39:44.890300Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/127.0.0.1/udp/51317/quic-v1
+robot-1  | [2m2026-08-13T21:39:44.890307Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/172.28.0.20/udp/51317/quic-v1
+robot-1  | [2m2026-08-13T21:39:44.890558Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Re-requesting relay circuit reservation [3mcircuit[0m[2m=[0m/ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU/p2p-circuit
+robot-1  | [2m2026-08-13T21:39:44.890576Z[0m [33m WARN[0m [2mgang_libp2p::adapter[0m[2m:[0m Relay circuit reservation listener closed; will re-establish [3mcircuit[0m[2m=[0m/ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU/p2p-circuit [3mreason[0m[2m=[0mOk(())
+robot-1  | [2m2026-08-13T21:39:44.891243Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection established [3mpeer[0m[2m=[0m12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU [3mrelay[0m[2m=[0mfalse
+robot-1  | [2m2026-08-13T21:39:44.891251Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Re-requesting relay circuit reservation [3mcircuit[0m[2m=[0m/ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU/p2p-circuit
+robot-1  | [2m2026-08-13T21:39:44.892099Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/172.28.0.10/udp/4001/quic-v1/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU/p2p-circuit/p2p/12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP
+robot-1  | [2m2026-08-13T21:39:44.892131Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/127.0.0.1/udp/4001/quic-v1/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU/p2p-circuit/p2p/12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP
+robot-1  | [2m2026-08-13T21:39:44.892138Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU/p2p-circuit/p2p/12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP
+robot-1  | [2m2026-08-13T21:39:44.892144Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Listening on /ip4/127.0.0.1/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU/p2p-circuit/p2p/12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP
+robot-1  | Relay circuit reservation established.
+robot-1  | Connected to relay. Waiting for operator connections...
+robot-1  | robot: published libp2p id 12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP
+robot-1  | [2m2026-08-13T21:39:46.168120Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection established [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj [3mrelay[0m[2m=[0mtrue
+robot-1  | [2m2026-08-13T21:39:46.392249Z[0m [32m INFO[0m [2mgang_ros::agent[0m[2m:[0m Received control message [3mpeer[0m[2m=[0m12D3-ebc1553d23b6474359030236a7b847d7
+robot-1  | [2m2026-08-13T21:39:46.392449Z[0m [32m INFO[0m [2mgang_ros::agent[0m[2m:[0m Verifying capability for deployment [3mname[0m[2m=[0mdiagnostics [3mversion[0m[2m=[0m0.1.0 [3mauthor[0m[2m=[0m12D3-51c9ef3c1fed05532d80a3e74aebe136
+robot-1  | [2m2026-08-13T21:39:46.392644Z[0m [32m INFO[0m [2mgang_ros::agent[0m[2m:[0m Capability installed [3mname[0m[2m=[0mdiagnostics
+robot-1  | [2m2026-08-13T21:39:46.393480Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection closed [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj
+robot-1  | [2m2026-08-13T21:39:46.506441Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection established [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj [3mrelay[0m[2m=[0mtrue
+robot-1  | [2m2026-08-13T21:39:46.709976Z[0m [32m INFO[0m [2mgang_ros::agent[0m[2m:[0m Received control message [3mpeer[0m[2m=[0m12D3-ebc1553d23b6474359030236a7b847d7
+robot-1  | [2m2026-08-13T21:39:46.710061Z[0m [32m INFO[0m [2mgang_ros::agent[0m[2m:[0m Invoking capability [3mname[0m[2m=[0mdiagnostics [3moperator[0m[2m=[0m12D3-ebc1553d23b6474359030236a7b847d7
+robot-1  | [2m2026-08-13T21:39:46.710465Z[0m [32m INFO[0m [2mgang_ros::agent[0m[2m:[0m Executing via WASM component runtime [3mname[0m[2m=[0mdiagnostics
+robot-1  | [2m2026-08-13T21:39:46.757029Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection closed [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj
+robot-1  | [2m2026-08-13T21:39:46.875494Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection established [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj [3mrelay[0m[2m=[0mtrue
+robot-1  | [2m2026-08-13T21:39:47.073298Z[0m [32m INFO[0m [2mgang_ros::agent[0m[2m:[0m Received control message [3mpeer[0m[2m=[0m12D3-ebc1553d23b6474359030236a7b847d7
+robot-1  | [2m2026-08-13T21:39:47.074699Z[0m [32m INFO[0m [2mgang_libp2p::adapter[0m[2m:[0m Connection closed [3mpeer[0m[2m=[0m12D3KooW9zQhRdQSGcznhzkMQCdV6yz82qhk4mkfcNAgFMeCSNNj
+operator-1  | === Operator e2e dispatch test ===
+operator-1  | Step 1: Wait for the relay multiaddr and the robot's libp2p id
+operator-1  | PASS: relay /ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU, robot 12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP
+operator-1  | Step 2: Register robot peer (dialable libp2p id + relay)
+operator-1  | Set host_key_policy = tofu
+operator-1  | Registered peer 'e2e-robot':
+operator-1  |   Peer ID (gang identity): 12D3-7b78c58d7602c053bf95e2cedf41767b
+operator-1  |   Peer ID (libp2p/dial):   12D3KooWAY8cSMtL8fXfQP9hfVNPFK2nP3UPMiHrFfbQ75ACQpVP
+operator-1  |   Role:    robot-agent
+operator-1  |   Relay:   /ip4/172.28.0.10/tcp/4001/p2p/12D3KooWMSnv5j7r5jfRBnXUdz1YzG8UukUskL94FVHUpZNGXXfU
+operator-1  | PASS: robot registered with operator
+operator-1  | Step 3: Deploy the signed component over the relay circuit
+operator-1  | Auto-accepted host key for 12D3-7b78c58d7602c053bf95e2cedf41767b (fingerprint: BLAKE3:7b78c58d7602c053bf95e2cedf41767b).
+operator-1  | Warning: Permanently added '12D3-7b78c58d7602c053bf95e2cedf41767b' (BLAKE3:7b78c58d7602c053bf95e2cedf41767b) to the list of known robots.
+operator-1  | Deployed 'diagnostics' to robot 'e2e-robot' (via relay)
+operator-1  | PASS: deployed 'diagnostics' via relay
+operator-1  | Step 4: Invoke the capability and assert its real output
+operator-1  | {
+operator-1  |   "component": "test-diagnostics",
+operator-1  |   "system_info": {
+operator-1  |     "arch": "aarch64",
+operator-1  |     "cpu_count": "8",
+operator-1  |     "disk_available_bytes": "0",
+operator-1  |     "disk_total_bytes": "0",
+operator-1  |     "ganglion_version": "2.2.0",
+operator-1  |     "hostname": "0432f95e17ba",
+operator-1  |     "memory_available_bytes": "7541428224",
+operator-1  |     "memory_total_bytes": "8321994752",
+operator-1  |     "os": "linux",
+operator-1  |     "os_version": "6.12.76-linuxkit",
+operator-1  |     "uptime_secs": "167159"
+operator-1  |   },
+operator-1  |   "version": "0.1.0"
+operator-1  | }
+operator-1  | PASS: WASM component executed on the robot and returned real output
+operator-1  | Step 5: List capabilities
+operator-1  | Capabilities on 'e2e-robot':
+operator-1  |   diagnostics v0.1.0 (by 12D3-51c9ef3c1fed05532d80a3e74aebe136)
+operator-1  |     - ganglion:diagnostics/collect@1.0
+operator-1  |     - ganglion:logs/stream@1.0
+operator-1  | PASS: capability listed
+operator-1  | 
+operator-1  | === e2e dispatch test passed ===

@@ -199,6 +199,9 @@ jobs:
         if: steps.changes.outputs.code == 'true'
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         if: steps.changes.outputs.code == 'true'
+      - name: Install cargo-component (builds the e2e test component)
+        if: steps.changes.outputs.code == 'true'
+        run: cargo install cargo-component --locked
       - name: Run degraded-link matrix (deterministic gate)
         if: steps.changes.outputs.code == 'true'
         shell: bash
