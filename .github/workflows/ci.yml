@@ -176,3 +176,48 @@ jobs:
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -Dwarnings
+  degraded-link:
+    name: Degraded-Link Matrix
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+      - name: Skip on docs-only push
+        id: changes
+        shell: bash
+        run: |
+          if git diff --name-only HEAD^ HEAD | grep -qvE '\.(md|svg|png|gif|txt)$|^docs/|^assets/|^wiki/'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "docs-only push — skipping degraded-link matrix"
+          fi
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
+        if: steps.changes.outputs.code == 'true'
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.changes.outputs.code == 'true'
+      - name: Run degraded-link matrix (deterministic gate)
+        if: steps.changes.outputs.code == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! ./test-harness/degraded-link/run-matrix.sh 2>&1 | tee /tmp/degraded.log; then
+            {
+              echo "### degraded-link matrix failure (last 120 lines)"
+              echo '```'
+              tail -120 /tmp/degraded.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Upload run artifacts
+        if: always() && steps.changes.outputs.code == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: degraded-link-artifacts
+          path: test-harness/degraded-link/artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
