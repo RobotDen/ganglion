@@ -1,0 +1,72 @@
+# Nightly chaos run — randomized netem impairment (#32).
+#
+# INSTALL: copy this file to .github/workflows/nightly-chaos.yml
+# (requires a committer token with workflow scope).
+#
+# Non-blocking by design: a failure opens an issue carrying the seed and the
+# run artifact so the impairment PARAMETERS replay deterministically
+# (./run-matrix.sh --chaos --seed <N>). It never gates merges — randomized
+# impairment as a gate trains people to re-run until green.
+
+name: Nightly Chaos
+
+on:
+  schedule:
+    - cron: "17 9 * * *" # 09:17 UTC daily (offset to avoid top-of-hour load)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  chaos:
+    name: Randomized Degraded-Link Run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Run chaos profile
+        id: chaos
+        shell: bash
+        run: |
+          set -o pipefail
+          SEED=$(date +%s)
+          echo "seed=$SEED" >> "$GITHUB_OUTPUT"
+          ./test-harness/degraded-link/run-matrix.sh --chaos --seed "$SEED" 2>&1 | tee /tmp/chaos.log
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: chaos-artifacts-${{ github.run_id }}
+          path: test-harness/degraded-link/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const seed = '${{ steps.chaos.outputs.seed }}';
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly chaos failure (seed ${seed})`,
+              labels: ['bug', 'chaos'],
+              body: [
+                `The nightly randomized degraded-link run failed.`,
+                ``,
+                `**Replay the impairment profile:**`,
+                '```bash',
+                `./test-harness/degraded-link/run-matrix.sh --chaos --seed ${seed}`,
+                '```',
+                ``,
+                `Run (logs + artifact with exact netem params): ${url}`,
+                ``,
+                `Note: the seed replays the impairment *parameters*; netem's per-packet`,
+                `draw is kernel RNG, so reproduce may need a few attempts under the same profile.`,
+              ].join('\n'),
+            });
