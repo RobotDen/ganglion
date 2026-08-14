@@ -4,7 +4,14 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-08-14
+
 ### Added
+
+- **Distribution channels.** `brew install robotden/tap/gang`
+  (RobotDen/homebrew-tap, prebuilt binaries + shell completions),
+  `cargo binstall gang` (release-tarball metadata), and Debian/Ubuntu
+  packages (`cargo-deb`; built for amd64 + arm64 in the release workflow).
 
 - **Actionable policy denials (`gang policy`).** Default-deny only survives
   contact with real operations when the narrow edit is easier than the
@@ -56,6 +63,13 @@ All notable changes to Ganglion will be documented in this file.
   wasm32-wasip2), signs each with your identity key declaring exactly the
   capability groups it needs, and publishes them to the open registry.
   `--dry-run` prints the crate→capabilities mapping without building. (#21)
+
+### Fixed
+
+- **crates.io publish surface.** Every published crate now packages the
+  repository README (the crate pages rendered "appears to have no README.md
+  file"), carries keywords + categories for crates.io browsing, and
+  gang-core's module index no longer renders doubled summaries on docs.rs.
 
 ## [2.2.0] - 2026-08-10
 
