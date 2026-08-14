@@ -52,7 +52,10 @@ impl LinkMeasurement {
 
     /// Spread: p90 − p10 of the successful samples (0 for < 2 samples).
     pub fn spread_ms(&self) -> f64 {
-        match (percentile(&self.rtts_ms, 90.0), percentile(&self.rtts_ms, 10.0)) {
+        match (
+            percentile(&self.rtts_ms, 90.0),
+            percentile(&self.rtts_ms, 10.0),
+        ) {
             (Some(hi), Some(lo)) => (hi - lo).max(0.0),
             _ => 0.0,
         }
@@ -98,7 +101,10 @@ pub fn measure_tcp(host: &str, port: u16, samples: usize, timeout: Duration) -> 
             std::thread::sleep(PROBE_GAP);
         }
         // Re-resolve each round so DNS failures count as link failures too.
-        let addr = (host, port).to_socket_addrs().ok().and_then(|mut a| a.next());
+        let addr = (host, port)
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut a| a.next());
         let started = Instant::now();
         match addr {
             Some(addr) => match TcpStream::connect_timeout(&addr, timeout) {
@@ -241,9 +247,7 @@ pub fn render_profile(p: &ProfileParams, m: &LinkMeasurement, generated_at: &str
         .map(|v| format!("{v:.1}ms"))
         .unwrap_or_else(|| "n/a".to_string());
     let rates_line = match (p.uplink_kbit, p.downlink_kbit) {
-        (None, None) => {
-            "# rates: not measurable from a handshake probe; none supplied".to_string()
-        }
+        (None, None) => "# rates: not measurable from a handshake probe; none supplied".to_string(),
         _ => "# rates: OPERATOR-SUPPLIED (--uplink-kbit/--downlink-kbit), not measured".to_string(),
     };
 
@@ -274,6 +278,7 @@ pub fn render_profile(p: &ProfileParams, m: &LinkMeasurement, generated_at: &str
 /// Measure, synthesize, render, and write the profile file. Returns the
 /// rendered description line for the CLI to echo. Blocking measurement runs
 /// on the caller's thread — callers wrap in `spawn_blocking`.
+#[allow(clippy::too_many_arguments)] // one call site, mirrors the CLI flags 1:1
 pub fn write_profile(
     host: &str,
     port: u16,
@@ -385,8 +390,14 @@ mod tests {
             uplink_kbit: None,
             downlink_kbit: None,
         };
-        assert_eq!(robot_shape(&p), "tc qdisc add dev eth0 root netem delay 40ms");
-        assert_eq!(operator_shape(&p), "tc qdisc add dev eth0 root netem delay 40ms");
+        assert_eq!(
+            robot_shape(&p),
+            "tc qdisc add dev eth0 root netem delay 40ms"
+        );
+        assert_eq!(
+            operator_shape(&p),
+            "tc qdisc add dev eth0 root netem delay 40ms"
+        );
 
         // Uplink cap + delay: tbf root with nested netem, like asymmetric.
         let p = ProfileParams {

@@ -1070,6 +1070,114 @@ fn policy_file_path() -> std::path::PathBuf {
     gang_core::identity::default_config_dir().join("policy.toml")
 }
 
+/// Where policy change history lives: JSONL beside policy.toml. (#36)
+fn policy_history_path() -> std::path::PathBuf {
+    gang_core::identity::default_config_dir().join("policy-history.jsonl")
+}
+
+/// Cap the history file the same way the denial log is capped: keep the
+/// newest half when it outgrows this.
+const POLICY_HISTORY_MAX_BYTES: u64 = 512 * 1024;
+
+/// One recorded policy mutation: who widened what, when, and why. (#36)
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PolicyChange {
+    /// RFC3339 UTC instant of the change.
+    ts: String,
+    /// Local identity that made the change ("(no identity)" pre-`gang init`).
+    actor: String,
+    /// "allow" | "allow-peer".
+    action: String,
+    /// Capability group or peer id the change touched.
+    target: String,
+    /// Pattern added, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern: Option<String>,
+    /// Access level requested, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access: Option<String>,
+    /// Expiry for time-boxed widenings (#34), when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires: Option<String>,
+    /// What actually changed (the AllowOutcome description).
+    outcome: String,
+    /// Operator-supplied reason (--reason), when given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+/// The local identity's gang id, for history attribution.
+fn local_actor() -> String {
+    let key_path = gang_core::identity::default_key_path();
+    gang_core::identity::Keypair::load(&key_path)
+        .map(|k| k.peer_id().to_string())
+        .unwrap_or_else(|_| "(no identity)".to_string())
+}
+
+/// Append one change to the history log, rotating when oversized. History is
+/// best-effort observability: failures are reported to stderr, never fatal —
+/// the policy write itself has already succeeded.
+fn record_policy_change(change: &PolicyChange) {
+    let path = policy_history_path();
+    let write = || -> std::io::Result<()> {
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.len() > POLICY_HISTORY_MAX_BYTES
+        {
+            // Keep the newest half of the lines.
+            let contents = std::fs::read_to_string(&path)?;
+            let lines: Vec<&str> = contents.lines().collect();
+            let keep = &lines[lines.len() / 2..];
+            std::fs::write(&path, format!("{}\n", keep.join("\n")))?;
+        }
+        let line = serde_json::to_string(change).map_err(std::io::Error::other)?;
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        writeln!(f, "{line}")
+    };
+    if let Err(e) = write() {
+        eprintln!("warning: could not record policy history: {e}");
+    }
+}
+
+/// Parse `--until`: either a duration ("45m", "2h", "7d", "90s") relative to
+/// now, or an absolute RFC3339 instant. Returns the RFC3339 expiry.
+fn parse_until(spec: &str, now: chrono::DateTime<chrono::Utc>) -> anyhow::Result<String> {
+    // Absolute RFC3339 first.
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(spec) {
+        anyhow::ensure!(
+            t.timestamp() > now.timestamp(),
+            "--until {spec} is in the past"
+        );
+        return Ok(t
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string());
+    }
+    // Duration: <number><unit> with unit s/m/h/d.
+    let (num, unit) = spec.split_at(spec.len().saturating_sub(1));
+    let n: i64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--until must be a duration like 45m/2h/7d or RFC3339"))?;
+    anyhow::ensure!(n > 0, "--until duration must be positive");
+    let secs = match unit {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => anyhow::bail!("--until unit must be s, m, h, or d (got \"{unit}\")"),
+    };
+    anyhow::ensure!(
+        secs <= 366 * 86_400,
+        "--until longer than a year; make it permanent instead"
+    );
+    Ok((now + chrono::Duration::seconds(secs))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string())
+}
+
 /// Load the policy for `gang policy` subcommands, distinguishing "no file"
 /// (permissive dev mode — worth shouting about) from a parse error.
 fn load_policy_file() -> anyhow::Result<(gang_core::policy::Policy, bool)> {
@@ -1122,6 +1230,8 @@ pub async fn policy_allow(
     pattern: &str,
     access: Option<&str>,
     wide_open: bool,
+    until: Option<&str>,
+    reason: Option<&str>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
     use gang_core::policy::AllowOutcome;
@@ -1139,6 +1249,8 @@ pub async fn policy_allow(
              (`gang policy denials` lists recent ones)."
         );
     }
+    let now = chrono::Utc::now();
+    let expires = until.map(|u| parse_until(u, now)).transpose()?;
 
     let (mut policy, exists) = load_policy_file()?;
     if !exists {
@@ -1149,7 +1261,7 @@ pub async fn policy_allow(
         );
     }
 
-    let outcome = policy.allow(group, pattern, access);
+    let outcome = policy.allow_until(group, pattern, access, expires.as_deref(), now.timestamp());
     let path = policy_file_path();
     if outcome != AllowOutcome::AlreadyAllowed {
         // Validate the mutated policy round-trips before touching the file,
@@ -1169,11 +1281,27 @@ pub async fn policy_allow(
     let described = match &outcome {
         AllowOutcome::AlreadyAllowed => "already allowed — policy unchanged".to_string(),
         AllowOutcome::AddedPattern => format!("added \"{pattern}\" to the {group} rule"),
+        AllowOutcome::AddedTimedPattern { expires } => {
+            format!("added \"{pattern}\" to the {group} rule, TIME-BOXED until {expires}")
+        }
         AllowOutcome::RaisedAccess => {
             format!("added \"{pattern}\" and raised {group} max_access to read_write")
         }
         AllowOutcome::NewRule => format!("created a new {group} rule allowing \"{pattern}\""),
     };
+    if outcome != AllowOutcome::AlreadyAllowed {
+        record_policy_change(&PolicyChange {
+            ts: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            actor: local_actor(),
+            action: "allow".into(),
+            target: group.to_string(),
+            pattern: Some(pattern.to_string()),
+            access: access.map(str::to_string),
+            expires,
+            outcome: described.clone(),
+            reason: reason.map(str::to_string),
+        });
+    }
     match format {
         OutputFormat::Json => println!(
             "{}",
@@ -1198,7 +1326,11 @@ pub async fn policy_allow(
 }
 
 /// `gang policy allow-peer`
-pub async fn policy_allow_peer(peer_id: &str, format: &OutputFormat) -> anyhow::Result<()> {
+pub async fn policy_allow_peer(
+    peer_id: &str,
+    reason: Option<&str>,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
     use gang_core::policy::PeerRule;
 
     let (mut policy, exists) = load_policy_file()?;
@@ -1228,6 +1360,17 @@ pub async fn policy_allow_peer(peer_id: &str, format: &OutputFormat) -> anyhow::
         let bak = path.with_extension("toml.bak");
         std::fs::copy(&path, &bak)?;
         std::fs::rename(&tmp, &path)?;
+        record_policy_change(&PolicyChange {
+            ts: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            actor: local_actor(),
+            action: "allow-peer".into(),
+            target: peer_id.to_string(),
+            pattern: None,
+            access: None,
+            expires: None,
+            outcome: format!("authorized {peer_id} to deploy"),
+            reason: reason.map(str::to_string),
+        });
     }
     match format {
         OutputFormat::Json => println!(
@@ -1240,6 +1383,201 @@ pub async fn policy_allow_peer(peer_id: &str, format: &OutputFormat) -> anyhow::
             } else {
                 println!("Authorized {peer_id} to deploy (restart the agent to apply).");
             }
+        }
+    }
+    Ok(())
+}
+
+/// `gang policy check` — pre-flight a signed component against the LOCAL
+/// policy without deploying (#35). Deploy is otherwise the first moment a
+/// component meets the robot policy; this lets an operator iterate on
+/// policy.toml before a robot is involved. Same evaluation, same remedies as
+/// the deploy denial path — just offline.
+pub async fn policy_check(
+    wasm_path: &std::path::Path,
+    manifest_path: Option<&std::path::Path>,
+    as_peer: Option<&str>,
+    format: &OutputFormat,
+) -> anyhow::Result<()> {
+    // Load and verify the signed manifest exactly as deploy would.
+    let manifest_path = manifest_path
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| wasm_path.with_extension("manifest.cbor"));
+    if !manifest_path.exists() {
+        anyhow::bail!(
+            "Manifest not found: {}\nSign the component first: gang sign {}",
+            manifest_path.display(),
+            wasm_path.display()
+        );
+    }
+    let manifest_cbor = std::fs::read(&manifest_path)?;
+    let signed = gang_core::manifest::SignedManifest::from_cbor(&manifest_cbor)
+        .with_context(|| format!("decoding manifest {}", manifest_path.display()))?;
+    let manifest = signed
+        .verify_and_decode()
+        .with_context(|| format!("verifying manifest {}", manifest_path.display()))?;
+
+    // The peer to evaluate as: --as-peer, else the local identity (the
+    // common case: "will MY deploy of this pass?").
+    let deployer = match as_peer {
+        Some(id) => {
+            gang_core::identity::PeerId::parse(id).map_err(|e| anyhow::anyhow!("--as-peer: {e}"))?
+        }
+        None => {
+            let key_path = gang_core::identity::default_key_path();
+            gang_core::identity::Keypair::load(&key_path)
+                .map(|k| k.peer_id())
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "no local identity (run `gang init`) — or pass --as-peer <gang-id>"
+                    )
+                })?
+        }
+    };
+
+    let (policy, exists) = load_policy_file()?;
+    let path = policy_file_path();
+
+    // Evaluate each declared capability independently so the report covers
+    // ALL failures, not just the first one deploy would hit.
+    let now = chrono::Utc::now().timestamp();
+    let mut verdicts: Vec<(String, Option<gang_core::policy::DenialReport>)> = Vec::new();
+    let peer_denial = policy
+        .explain_at(&[], &deployer, now)
+        .filter(|r| matches!(r.kind, gang_core::policy::DenialKind::PeerNotAuthorized));
+    for cap in &manifest.declared_capabilities {
+        let denial = policy.explain_at(std::slice::from_ref(cap), &deployer, now);
+        // Skip duplicating the peer-level denial per capability.
+        let denial =
+            denial.filter(|r| !matches!(r.kind, gang_core::policy::DenialKind::PeerNotAuthorized));
+        verdicts.push((cap.qualified_name(), denial));
+    }
+    let denied =
+        verdicts.iter().filter(|(_, d)| d.is_some()).count() + usize::from(peer_denial.is_some());
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "component": manifest.name,
+                    "version": manifest.version,
+                    "policy_path": path.display().to_string(),
+                    "policy_exists": exists,
+                    "deployer": deployer.to_string(),
+                    "peer_denial": peer_denial,
+                    "capabilities": verdicts
+                        .iter()
+                        .map(|(name, denial)| serde_json::json!({
+                            "capability": name,
+                            "permitted": denial.is_none(),
+                            "denial": denial,
+                        }))
+                        .collect::<Vec<_>>(),
+                    "would_deploy": denied == 0,
+                })
+            );
+        }
+        OutputFormat::Text => {
+            println!(
+                "Pre-flight: {} v{} as {} against {}",
+                manifest.name,
+                manifest.version,
+                deployer,
+                path.display()
+            );
+            if !exists {
+                println!(
+                    "\nNOTE: no policy file — the agent would run PERMISSIVE (dev mode) \
+                     and allow everything. Verdicts below are against the default-deny \
+                     empty policy so you can pre-write the rules `gang init` will enforce."
+                );
+            }
+            println!();
+            if let Some(denial) = &peer_denial {
+                println!("  [DENY] deploy authorization");
+                for line in denial.render().lines() {
+                    println!("         {line}");
+                }
+                println!();
+            }
+            for (name, denial) in &verdicts {
+                match denial {
+                    None => println!("  [ OK ] {name}"),
+                    Some(d) => {
+                        println!("  [DENY] {name}");
+                        for line in d.render().lines() {
+                            println!("         {line}");
+                        }
+                    }
+                }
+            }
+            println!();
+            if denied == 0 {
+                println!("Verdict: this component would deploy under the current policy.");
+            } else {
+                println!(
+                    "Verdict: {denied} denial(s) — apply the remedies above, then re-run. \
+                     Nothing was deployed."
+                );
+            }
+        }
+    }
+    if denied > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `gang policy history` — render the policy change trail, newest first. (#36)
+pub async fn policy_history(last: usize, format: &OutputFormat) -> anyhow::Result<()> {
+    let path = policy_history_path();
+    let entries: Vec<PolicyChange> = if path.exists() {
+        std::fs::read_to_string(&path)?
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let newest_first: Vec<&PolicyChange> = entries.iter().rev().take(last).collect();
+
+    match format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&newest_first)?);
+        }
+        OutputFormat::Text => {
+            if newest_first.is_empty() {
+                println!(
+                    "No recorded policy changes at {}.\nChanges made with `gang policy \
+                     allow`/`allow-peer` are recorded automatically; hand-edits to \
+                     policy.toml are not.",
+                    path.display()
+                );
+                return Ok(());
+            }
+            println!("Policy changes (newest first, {}):\n", path.display());
+            for c in newest_first {
+                let what = match (&c.pattern, &c.access) {
+                    (Some(p), Some(a)) => format!("{} \"{}\" ({})", c.target, p, a),
+                    (Some(p), None) => format!("{} \"{}\"", c.target, p),
+                    _ => c.target.clone(),
+                };
+                let expiry = c
+                    .expires
+                    .as_deref()
+                    .map(|e| format!("  [until {e}]"))
+                    .unwrap_or_default();
+                println!("  {}  {}  {}{}", c.ts, c.action, what, expiry);
+                println!("      by {}: {}", c.actor, c.outcome);
+                if let Some(r) = &c.reason {
+                    println!("      reason: {r}");
+                }
+            }
+            println!(
+                "\nNote: hand-edits to policy.toml bypass this trail — prefer `gang \
+                 policy allow` (and `gang policy lint` in CI) to keep it complete."
+            );
         }
     }
     Ok(())
@@ -6249,5 +6587,69 @@ mod wit_sync_tests {
                 "run: cp crates/gang-wasm-host/wit/ganglion.wit crates/gang-cli/wit/"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_cli_tests {
+    use super::{PolicyChange, parse_until};
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-08-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn parse_until_durations() {
+        assert_eq!(parse_until("90s", now()).unwrap(), "2026-08-14T12:01:30Z");
+        assert_eq!(parse_until("45m", now()).unwrap(), "2026-08-14T12:45:00Z");
+        assert_eq!(parse_until("2h", now()).unwrap(), "2026-08-14T14:00:00Z");
+        assert_eq!(parse_until("7d", now()).unwrap(), "2026-08-21T12:00:00Z");
+    }
+
+    #[test]
+    fn parse_until_absolute_rfc3339() {
+        assert_eq!(
+            parse_until("2026-09-01T00:00:00Z", now()).unwrap(),
+            "2026-09-01T00:00:00Z"
+        );
+        // Offset instants normalize to UTC.
+        assert_eq!(
+            parse_until("2026-09-01T02:00:00+02:00", now()).unwrap(),
+            "2026-09-01T00:00:00Z"
+        );
+        // Past instants refused.
+        assert!(parse_until("2020-01-01T00:00:00Z", now()).is_err());
+    }
+
+    #[test]
+    fn parse_until_rejects_garbage() {
+        assert!(parse_until("soon", now()).is_err());
+        assert!(parse_until("2w", now()).is_err()); // weeks unsupported
+        assert!(parse_until("-5m", now()).is_err());
+        assert!(parse_until("0h", now()).is_err());
+        assert!(parse_until("400d", now()).is_err()); // > a year
+    }
+
+    #[test]
+    fn policy_change_roundtrips_and_omits_empty_fields() {
+        let c = PolicyChange {
+            ts: "2026-08-14T12:00:00Z".into(),
+            actor: "gang-abc".into(),
+            action: "allow".into(),
+            target: "ganglion:ros/interface".into(),
+            pattern: Some("/cmd_vel".into()),
+            access: None,
+            expires: Some("2026-08-14T14:00:00Z".into()),
+            outcome: "added".into(),
+            reason: None,
+        };
+        let line = serde_json::to_string(&c).unwrap();
+        assert!(!line.contains("\"access\""));
+        assert!(!line.contains("\"reason\""));
+        assert!(line.contains("\"expires\""));
+        let back: PolicyChange = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.pattern.as_deref(), Some("/cmd_vel"));
     }
 }

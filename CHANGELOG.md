@@ -4,6 +4,38 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`gang doctor --profile-out` — the customer link as a CI test case.**
+  Measures the actual link (median TCP connect RTT + failure rate against the
+  configured relay) and emits a deterministic degraded-link fixture: fixed
+  netem delay (RTT split evenly per side), statistic-nth loss, measured
+  spread recorded in comments but deliberately not reproduced (gate
+  determinism contract). Rates are operator-supplied (`--uplink-kbit`/
+  `--downlink-kbit`) since a handshake probe cannot measure them — the header
+  says which numbers were measured vs supplied. `run-matrix.sh
+  --profile-file` replays any external fixture. Closes #33.
+
+- **Time-boxed policy allows (`gang policy allow --until`).** The
+  sudo-timestamp analog: `--until 2h` (or RFC3339) records the widening as a
+  `timed_patterns` entry the engine ignores after expiry — enforcement at
+  evaluation time, no daemon. Malformed expiries fail closed. Re-allowing
+  without `--until` upgrades to permanent and drops the shadowed timed entry;
+  `gang policy lint` flags expired leftovers as dead weight. Closes #34.
+
+- **`gang policy check` — pre-flight a signed component against local
+  policy.** The same evaluation and remedies as the deploy denial path, run
+  offline before any robot is involved; every declared capability gets its
+  own verdict, `--as-peer` evaluates someone else's deploy, non-zero exit on
+  denial for capability-authoring CI. Closes #35.
+
+- **Policy change audit (`gang policy history`).** Denials were already
+  logged; now the widenings that answer them are too: every `gang policy
+  allow`/`allow-peer` records who (local gang id), what (group, pattern,
+  access, expiry), when, and why (`--reason`) to a size-capped
+  `policy-history.jsonl`. Hand-edits bypass the trail and the rendering says
+  so. Closes #36.
+
 ## [2.3.0] - 2026-08-14
 
 ### Added

@@ -27,6 +27,57 @@ pub struct CapabilityRule {
     /// Maximum access level (for ROS interface).
     #[serde(default)]
     pub max_access: Option<String>,
+    /// Time-boxed patterns (`gang policy allow --until`): each behaves like
+    /// an `allowed_patterns` entry until its expiry, then is ignored by the
+    /// engine — the sudo-timestamp analog for field-session widenings. An
+    /// expired entry stays in the file (so `gang policy lint` can flag the
+    /// leftover for cleanup) but grants nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timed_patterns: Vec<TimedPattern>,
+}
+
+/// One time-boxed allowed pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimedPattern {
+    /// The pattern, same semantics as `allowed_patterns` entries.
+    pub pattern: String,
+    /// RFC3339 expiry instant (UTC), e.g. `2026-08-15T12:00:00Z`. An entry
+    /// whose expiry fails to parse is treated as ALREADY EXPIRED — a
+    /// malformed timestamp must fail closed, never become permanent.
+    pub expires: String,
+}
+
+impl TimedPattern {
+    /// Whether this entry is still live at `now` (unix seconds). Malformed
+    /// expiries are expired (fail closed).
+    pub fn live_at(&self, now_unix: i64) -> bool {
+        chrono::DateTime::parse_from_rfc3339(&self.expires)
+            .map(|t| t.timestamp() > now_unix)
+            .unwrap_or(false)
+    }
+}
+
+impl CapabilityRule {
+    /// The patterns in force at `now`: permanent ones plus unexpired timed
+    /// ones.
+    pub fn effective_patterns(&self, now_unix: i64) -> Vec<String> {
+        let mut out = self.allowed_patterns.clone();
+        out.extend(
+            self.timed_patterns
+                .iter()
+                .filter(|t| t.live_at(now_unix))
+                .map(|t| t.pattern.clone()),
+        );
+        out
+    }
+}
+
+/// Current unix time for policy evaluation.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// A rule governing what a given peer is authorized to deploy.
@@ -65,41 +116,49 @@ impl Policy {
                     group: "ganglion:ros/interface".into(),
                     allowed_patterns: vec!["**".into()],
                     max_access: Some("read_write".into()),
+                    timed_patterns: Vec::new(),
                 },
                 CapabilityRule {
                     group: "ganglion:logs/stream".into(),
                     allowed_patterns: vec!["**".into()],
                     max_access: None,
+                    timed_patterns: Vec::new(),
                 },
                 CapabilityRule {
                     group: "ganglion:fs/bounded".into(),
                     allowed_patterns: vec!["/tmp/gang/**".into()],
                     max_access: None,
+                    timed_patterns: Vec::new(),
                 },
                 CapabilityRule {
                     group: "ganglion:diagnostics/collect".into(),
                     allowed_patterns: vec!["**".into()],
                     max_access: None,
+                    timed_patterns: Vec::new(),
                 },
                 CapabilityRule {
                     group: "ganglion:artifacts/publish".into(),
                     allowed_patterns: vec!["**".into()],
                     max_access: None,
+                    timed_patterns: Vec::new(),
                 },
                 CapabilityRule {
                     group: "ganglion:process/spawn".into(),
                     allowed_patterns: vec!["**".into()],
                     max_access: None,
+                    timed_patterns: Vec::new(),
                 },
                 CapabilityRule {
                     group: "ganglion:network/probe".into(),
                     allowed_patterns: vec!["**".into()],
                     max_access: None,
+                    timed_patterns: Vec::new(),
                 },
                 CapabilityRule {
                     group: "ganglion:metrics/emit".into(),
                     allowed_patterns: vec!["**".into()],
                     max_access: None,
+                    timed_patterns: Vec::new(),
                 },
             ],
             peer_rules: vec![PeerRule {
@@ -116,12 +175,23 @@ impl Policy {
         declared: &[CapabilityGroup],
         deployer: &PeerId,
     ) -> Result<(), PolicyError> {
+        self.evaluate_at(declared, deployer, unix_now())
+    }
+
+    /// [`Policy::evaluate`] at an explicit instant — timed patterns
+    /// (`--until`) are live only until their expiry. Deterministic for tests.
+    pub fn evaluate_at(
+        &self,
+        declared: &[CapabilityGroup],
+        deployer: &PeerId,
+        now_unix: i64,
+    ) -> Result<(), PolicyError> {
         // Check peer authorization
         self.check_peer_authorized(deployer)?;
 
         // Check each declared capability against rules
         for cap in declared {
-            self.check_capability_permitted(cap)?;
+            self.check_capability_permitted(cap, now_unix)?;
         }
 
         Ok(())
@@ -151,7 +221,11 @@ impl Policy {
         Ok(())
     }
 
-    fn check_capability_permitted(&self, cap: &CapabilityGroup) -> Result<(), PolicyError> {
+    fn check_capability_permitted(
+        &self,
+        cap: &CapabilityGroup,
+        now_unix: i64,
+    ) -> Result<(), PolicyError> {
         let group_name = cap.name();
 
         let rule = self.capability_rules.iter().find(|r| r.group == group_name);
@@ -164,12 +238,13 @@ impl Policy {
                 });
             }
         };
+        let effective = rule.effective_patterns(now_unix);
 
         // Check patterns within the capability against the rule's allowed patterns
         match cap {
             CapabilityGroup::RosInterface { patterns, .. } => {
                 for pattern in patterns {
-                    if !pattern_matches_any(&pattern.pattern, &rule.allowed_patterns) {
+                    if !pattern_matches_any(&pattern.pattern, &effective) {
                         return Err(PolicyError::PatternExceedsPolicy {
                             capability: group_name.into(),
                             pattern: pattern.pattern.clone(),
@@ -192,7 +267,7 @@ impl Policy {
             }
             CapabilityGroup::LogStream { patterns, .. } => {
                 for pattern in patterns {
-                    if !pattern_matches_any(pattern, &rule.allowed_patterns) {
+                    if !pattern_matches_any(pattern, &effective) {
                         return Err(PolicyError::PatternExceedsPolicy {
                             capability: group_name.into(),
                             pattern: pattern.clone(),
@@ -202,7 +277,7 @@ impl Policy {
             }
             CapabilityGroup::FsBounded { paths, .. } => {
                 for path in paths {
-                    if !pattern_matches_any(&path.pattern, &rule.allowed_patterns) {
+                    if !pattern_matches_any(&path.pattern, &effective) {
                         return Err(PolicyError::PatternExceedsPolicy {
                             capability: group_name.into(),
                             pattern: path.pattern.clone(),
@@ -220,7 +295,7 @@ impl Policy {
                 allowed_commands, ..
             } => {
                 for cmd in allowed_commands {
-                    if !pattern_matches_any(cmd, &rule.allowed_patterns) {
+                    if !pattern_matches_any(cmd, &effective) {
                         return Err(PolicyError::PatternExceedsPolicy {
                             capability: group_name.into(),
                             pattern: cmd.clone(),
@@ -413,6 +488,12 @@ pub enum AllowOutcome {
     AlreadyAllowed,
     /// The pattern was appended to the group's existing rule.
     AddedPattern,
+    /// The pattern was added time-boxed; the engine ignores it after
+    /// `expires`.
+    AddedTimedPattern {
+        /// RFC3339 expiry instant.
+        expires: String,
+    },
     /// The existing rule's `max_access` was raised.
     RaisedAccess,
     /// A new rule was created for the group.
@@ -424,6 +505,16 @@ impl Policy {
     /// structured report for the FIRST failure [`Policy::evaluate`] would
     /// hit, or `None` if the set is fully permitted.
     pub fn explain(&self, declared: &[CapabilityGroup], deployer: &PeerId) -> Option<DenialReport> {
+        self.explain_at(declared, deployer, unix_now())
+    }
+
+    /// [`Policy::explain`] at an explicit instant (timed patterns respected).
+    pub fn explain_at(
+        &self,
+        declared: &[CapabilityGroup],
+        deployer: &PeerId,
+        now_unix: i64,
+    ) -> Option<DenialReport> {
         if self.check_peer_authorized(deployer).is_err() {
             return Some(DenialReport {
                 group: String::new(),
@@ -434,14 +525,19 @@ impl Policy {
             });
         }
         for cap in declared {
-            if let Some(report) = self.explain_capability(cap, deployer) {
+            if let Some(report) = self.explain_capability(cap, deployer, now_unix) {
                 return Some(report);
             }
         }
         None
     }
 
-    fn explain_capability(&self, cap: &CapabilityGroup, deployer: &PeerId) -> Option<DenialReport> {
+    fn explain_capability(
+        &self,
+        cap: &CapabilityGroup,
+        deployer: &PeerId,
+        now_unix: i64,
+    ) -> Option<DenialReport> {
         let group_name = cap.name().to_string();
         let report = |pattern: Option<String>, access: Option<String>, kind: DenialKind| {
             Some(DenialReport {
@@ -490,13 +586,14 @@ impl Policy {
             }
         };
 
+        let effective = rule.effective_patterns(now_unix);
         for (pattern, access) in &requested {
-            if !pattern_matches_any(pattern, &rule.allowed_patterns) {
+            if !pattern_matches_any(pattern, &effective) {
                 return report(
                     Some(pattern.clone()),
                     access.clone(),
                     DenialKind::PatternNotCovered {
-                        allowed: rule.allowed_patterns.clone(),
+                        allowed: effective.clone(),
                     },
                 );
             }
@@ -519,28 +616,86 @@ impl Policy {
     /// only if `access` requires it), or create a new single-pattern rule.
     /// Never touches any other rule.
     pub fn allow(&mut self, group: &str, pattern: &str, access: Option<&str>) -> AllowOutcome {
+        self.allow_until(group, pattern, access, None, unix_now())
+    }
+
+    /// [`Policy::allow`] with an optional expiry: `expires` (RFC3339) makes
+    /// the widening a [`TimedPattern`] that the engine ignores after that
+    /// instant — the sudo-timestamp analog. A permanent covering pattern
+    /// makes any timed request a no-op (`AlreadyAllowed`); a live timed
+    /// pattern covering the request keeps a NEW permanent request meaningful
+    /// (it upgrades the grant to permanent).
+    pub fn allow_until(
+        &mut self,
+        group: &str,
+        pattern: &str,
+        access: Option<&str>,
+        expires: Option<&str>,
+        now_unix: i64,
+    ) -> AllowOutcome {
         if let Some(rule) = self.capability_rules.iter_mut().find(|r| r.group == group) {
-            let pattern_covered = pattern_matches_any(pattern, &rule.allowed_patterns);
+            let covered_permanent = pattern_matches_any(pattern, &rule.allowed_patterns);
+            let covered_effective =
+                pattern_matches_any(pattern, &rule.effective_patterns(now_unix));
             let needs_access_raise =
                 access == Some("read_write") && rule.max_access.as_deref() == Some("read_only");
-            if pattern_covered && !needs_access_raise {
+            // A permanent grant covers everything a timed one would; a timed
+            // grant does NOT satisfy a permanent request.
+            let covered_for_request = if expires.is_some() {
+                covered_effective
+            } else {
+                covered_permanent
+            };
+            if covered_for_request && !needs_access_raise {
                 return AllowOutcome::AlreadyAllowed;
             }
-            if !pattern_covered {
-                rule.allowed_patterns.push(pattern.to_string());
+            if !covered_for_request {
+                match expires {
+                    Some(exp) => rule.timed_patterns.push(TimedPattern {
+                        pattern: pattern.to_string(),
+                        expires: exp.to_string(),
+                    }),
+                    None => {
+                        rule.allowed_patterns.push(pattern.to_string());
+                        // Upgrading a timed grant to permanent: drop shadowed
+                        // timed entries for the identical pattern.
+                        rule.timed_patterns.retain(|t| t.pattern != pattern);
+                    }
+                }
             }
             if needs_access_raise {
                 rule.max_access = Some("read_write".into());
                 return AllowOutcome::RaisedAccess;
             }
-            return AllowOutcome::AddedPattern;
+            return match expires {
+                Some(exp) => AllowOutcome::AddedTimedPattern {
+                    expires: exp.to_string(),
+                },
+                None => AllowOutcome::AddedPattern,
+            };
         }
+        let (allowed_patterns, timed_patterns) = match expires {
+            Some(exp) => (
+                Vec::new(),
+                vec![TimedPattern {
+                    pattern: pattern.to_string(),
+                    expires: exp.to_string(),
+                }],
+            ),
+            None => (vec![pattern.to_string()], Vec::new()),
+        };
         self.capability_rules.push(CapabilityRule {
             group: group.to_string(),
-            allowed_patterns: vec![pattern.to_string()],
+            allowed_patterns,
             max_access: access.map(|a| a.to_string()),
+            timed_patterns,
         });
-        AllowOutcome::NewRule
+        match expires {
+            Some(exp) => AllowOutcome::AddedTimedPattern {
+                expires: exp.to_string(),
+            },
+            None => AllowOutcome::NewRule,
+        }
     }
 
     /// Flag rules whose breadth undermines the default-deny posture. This is
@@ -548,9 +703,15 @@ impl Policy {
     /// `allowed_patterns = ["**"]` is caught as a finding, not discovered in
     /// an incident.
     pub fn lint(&self) -> Vec<LintFinding> {
+        self.lint_at(unix_now())
+    }
+
+    /// [`Policy::lint`] at an explicit instant (expired timed patterns are
+    /// judged against `now_unix`). Deterministic for tests.
+    pub fn lint_at(&self, now_unix: i64) -> Vec<LintFinding> {
         let mut findings = Vec::new();
         for rule in &self.capability_rules {
-            let wide = rule.allowed_patterns.iter().any(|p| p == "**");
+            let wide = rule.effective_patterns(now_unix).iter().any(|p| p == "**");
             if wide {
                 findings.push(LintFinding {
                     location: rule.group.clone(),
@@ -568,6 +729,23 @@ impl Policy {
                                  cap it to read_only or scope the patterns"
                         .into(),
                 });
+            }
+        }
+        for rule in &self.capability_rules {
+            for timed in &rule.timed_patterns {
+                if !timed.live_at(now_unix) {
+                    findings.push(LintFinding {
+                        location: rule.group.clone(),
+                        finding: format!(
+                            "expired timed pattern \"{}\" (expired {}) is dead weight",
+                            timed.pattern, timed.expires
+                        ),
+                        suggestion: "it grants nothing anymore — delete the \
+                                     [[capability_rules.timed_patterns]] entry, or re-allow \
+                                     with a new --until if still needed"
+                            .into(),
+                    });
+                }
             }
         }
         for rule in &self.peer_rules {
@@ -607,6 +785,176 @@ mod tests {
     use super::*;
     use crate::capability::AccessPattern;
     use crate::identity::Keypair;
+
+    fn ros_read_cap(pattern: &str) -> CapabilityGroup {
+        CapabilityGroup::RosInterface {
+            version: "1.0".into(),
+            patterns: vec![AccessPattern {
+                pattern: pattern.into(),
+                access: RosAccess::ReadOnly,
+            }],
+        }
+    }
+
+    fn open_peer_policy(rules: Vec<CapabilityRule>) -> Policy {
+        Policy {
+            capability_rules: rules,
+            peer_rules: vec![PeerRule {
+                peer_id: "*".into(),
+                can_deploy: true,
+                allowed_capabilities: Vec::new(),
+            }],
+        }
+    }
+
+    const T0: i64 = 1_700_000_000;
+
+    #[test]
+    fn timed_pattern_lives_then_expires() {
+        let tp = TimedPattern {
+            pattern: "/cmd_vel".into(),
+            expires: "2023-11-14T22:14:00Z".into(), // T0 + 40s
+        };
+        assert!(tp.live_at(T0));
+        assert!(!tp.live_at(T0 + 3600));
+        // Malformed expiry fails closed.
+        let bad = TimedPattern {
+            pattern: "/x".into(),
+            expires: "tomorrow-ish".into(),
+        };
+        assert!(!bad.live_at(0));
+    }
+
+    #[test]
+    fn evaluate_honors_timed_pattern_until_expiry() {
+        let policy = open_peer_policy(vec![CapabilityRule {
+            group: "ganglion:ros/interface".into(),
+            allowed_patterns: vec!["/diagnostics/**".into()],
+            max_access: Some("read_only".into()),
+            timed_patterns: vec![TimedPattern {
+                pattern: "/cmd_vel".into(),
+                expires: "2023-11-14T22:14:00Z".into(), // T0 + 40s
+            }],
+        }]);
+        let peer = Keypair::generate().peer_id();
+        let caps = vec![ros_read_cap("/cmd_vel")];
+        assert!(policy.evaluate_at(&caps, &peer, T0).is_ok());
+        assert!(policy.evaluate_at(&caps, &peer, T0 + 3600).is_err());
+        // The denial explanation after expiry shows only live patterns.
+        let report = policy.explain_at(&caps, &peer, T0 + 3600).unwrap();
+        match report.kind {
+            DenialKind::PatternNotCovered { ref allowed } => {
+                assert_eq!(allowed, &vec!["/diagnostics/**".to_string()]);
+            }
+            ref k => panic!("wrong kind: {k:?}"),
+        }
+    }
+
+    #[test]
+    fn allow_until_adds_timed_pattern_and_upgrade_drops_it() {
+        let mut policy = open_peer_policy(vec![CapabilityRule {
+            group: "ganglion:ros/interface".into(),
+            allowed_patterns: vec!["/diagnostics/**".into()],
+            max_access: None,
+            timed_patterns: Vec::new(),
+        }]);
+        let out = policy.allow_until(
+            "ganglion:ros/interface",
+            "/cmd_vel",
+            None,
+            Some("2023-11-14T23:00:00Z"),
+            T0,
+        );
+        assert!(matches!(out, AllowOutcome::AddedTimedPattern { .. }));
+        assert_eq!(policy.capability_rules[0].timed_patterns.len(), 1);
+
+        // Same timed request again while live: no-op.
+        let out = policy.allow_until(
+            "ganglion:ros/interface",
+            "/cmd_vel",
+            None,
+            Some("2023-11-15T23:00:00Z"),
+            T0,
+        );
+        assert_eq!(out, AllowOutcome::AlreadyAllowed);
+
+        // A PERMANENT request is not satisfied by the live timed grant: it
+        // upgrades, and the shadowed timed entry is dropped.
+        let out = policy.allow_until("ganglion:ros/interface", "/cmd_vel", None, None, T0);
+        assert_eq!(out, AllowOutcome::AddedPattern);
+        assert!(policy.capability_rules[0].timed_patterns.is_empty());
+        assert!(
+            policy.capability_rules[0]
+                .allowed_patterns
+                .contains(&"/cmd_vel".to_string())
+        );
+    }
+
+    #[test]
+    fn allow_until_on_new_group_creates_timed_only_rule() {
+        let mut policy = open_peer_policy(vec![]);
+        let out = policy.allow_until(
+            "ganglion:logs/stream",
+            "syslog",
+            None,
+            Some("2023-11-14T23:00:00Z"),
+            T0,
+        );
+        assert!(matches!(out, AllowOutcome::AddedTimedPattern { .. }));
+        let rule = &policy.capability_rules[0];
+        assert!(rule.allowed_patterns.is_empty());
+        assert_eq!(rule.timed_patterns[0].pattern, "syslog");
+    }
+
+    #[test]
+    fn timed_patterns_roundtrip_toml() {
+        let policy = open_peer_policy(vec![CapabilityRule {
+            group: "ganglion:ros/interface".into(),
+            allowed_patterns: vec!["/diagnostics/**".into()],
+            max_access: None,
+            timed_patterns: vec![TimedPattern {
+                pattern: "/cmd_vel".into(),
+                expires: "2023-11-14T23:00:00Z".into(),
+            }],
+        }]);
+        let toml_str = policy.to_toml_pretty().unwrap();
+        assert!(toml_str.contains("timed_patterns"));
+        let back = Policy::from_toml(&toml_str).unwrap();
+        assert_eq!(
+            back.capability_rules[0].timed_patterns,
+            policy.capability_rules[0].timed_patterns
+        );
+        // Policies without the field still parse (serde default).
+        let legacy = "[[capability_rules]]\ngroup = \"g\"\nallowed_patterns = [\"x\"]\n";
+        assert!(Policy::from_toml(legacy).is_ok());
+    }
+
+    #[test]
+    fn lint_flags_expired_timed_pattern_and_live_wide_timed() {
+        let policy = open_peer_policy(vec![CapabilityRule {
+            group: "ganglion:ros/interface".into(),
+            allowed_patterns: vec!["/diagnostics/**".into()],
+            max_access: None,
+            timed_patterns: vec![
+                TimedPattern {
+                    pattern: "/old".into(),
+                    expires: "2023-11-14T22:00:00Z".into(), // before T0
+                },
+                TimedPattern {
+                    pattern: "**".into(),
+                    expires: "2023-11-15T22:00:00Z".into(), // live at T0
+                },
+            ],
+        }]);
+        let findings = policy.lint_at(T0);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.finding.contains("expired timed pattern \"/old\""))
+        );
+        // The live "**" timed pattern trips the wide-open finding too.
+        assert!(findings.iter().any(|f| f.finding.contains("\"**\"")));
+    }
 
     #[test]
     fn permissive_policy_allows_everything() {
@@ -648,6 +996,7 @@ mod tests {
                 group: "ganglion:ros/interface".into(),
                 allowed_patterns: vec!["/diagnostics/**".into(), "/rosout".into()],
                 max_access: Some("read_only".into()),
+                timed_patterns: Vec::new(),
             }],
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
@@ -698,6 +1047,7 @@ mod tests {
                 group: "ganglion:diagnostics/collect".into(),
                 allowed_patterns: vec!["**".into()],
                 max_access: None,
+                timed_patterns: Vec::new(),
             }],
             peer_rules: vec![PeerRule {
                 peer_id: allowed.peer_id().as_str().to_string(),
@@ -722,6 +1072,7 @@ mod tests {
                 group: "ganglion:ros/interface".into(),
                 allowed_patterns: vec!["**".into()],
                 max_access: Some("read_only".into()),
+                timed_patterns: Vec::new(),
             }],
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
@@ -757,6 +1108,7 @@ mod tests {
                 group: "ganglion:ros/interface".into(),
                 allowed_patterns: vec!["**".into()],
                 max_access: Some("read_write".into()),
+                timed_patterns: Vec::new(),
             }],
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
@@ -782,6 +1134,7 @@ mod tests {
                 group: "ganglion:ros/interface".into(),
                 allowed_patterns: vec!["/diagnostics/**".into()],
                 max_access: Some("read_only".into()),
+                timed_patterns: Vec::new(),
             }],
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
@@ -853,6 +1206,7 @@ mod tests {
                 group: "ganglion:ros/interface".into(),
                 allowed_patterns: vec!["/cmd_vel".into()],
                 max_access: Some("read_only".into()),
+                timed_patterns: Vec::new(),
             }],
             peer_rules: policy.peer_rules.clone(),
         };
@@ -870,6 +1224,7 @@ mod tests {
                 group: "ganglion:ros/interface".into(),
                 allowed_patterns: vec!["/diagnostics".into()],
                 max_access: Some("read_only".into()),
+                timed_patterns: Vec::new(),
             }],
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
@@ -933,6 +1288,7 @@ mod tests {
                 group: "ganglion:ros/interface".into(),
                 allowed_patterns: vec!["/diagnostics/**".into()],
                 max_access: Some("read_only".into()),
+                timed_patterns: Vec::new(),
             }],
             peer_rules: vec![PeerRule {
                 peer_id: "12D3-abc".into(),

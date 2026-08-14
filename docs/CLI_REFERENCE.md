@@ -1128,9 +1128,58 @@ are refused unless `--wide-open` is passed. Restart the agent to apply.
 gang policy allow ganglion:ros/interface "/scan" --access read_only
 ```
 
+**Time-boxed widenings (`--until`, #34).** The sudo-timestamp analog: a
+widening applied to unblock a field session should not become permanent by
+default-forgetting. `--until` takes a duration (`45m`, `2h`, `7d`) or an
+RFC3339 instant and records the pattern as a `[[capability_rules.timed_patterns]]`
+entry; the engine ignores it after expiry — enforcement happens at evaluation
+time, no daemon involved — and `gang policy lint` flags the expired leftover
+for cleanup. A malformed expiry fails closed (treated as already expired).
+Re-allowing the same pattern *without* `--until` upgrades the grant to
+permanent and drops the shadowed timed entry.
+
+```bash
+# Unblock today's debugging session, not next quarter's incident:
+gang policy allow ganglion:ros/interface "/cmd_vel" --access read_only \
+    --until 2h --reason "field debug, ticket OPS-441"
+```
+
+`--reason` (here and on `allow-peer`) is recorded in the change history below.
+
 ### `gang policy allow-peer <gang-id>`
 
 Authorize an operator to deploy (adds a `[[peer_rules]]` entry).
+
+### `gang policy check <component.wasm> [--manifest <path>] [--as-peer <gang-id>]`
+
+Pre-flight a signed component against the **local** policy without deploying
+(#35). Deploy is otherwise the first moment a component meets the robot
+policy; this runs the same evaluation offline — every declared capability gets
+its own verdict (not just the first failure), and each denial carries the same
+remedy the deploy error would. Defaults to evaluating as the local identity;
+`--as-peer` answers "would *their* deploy pass?". Exits non-zero on any
+denial, so it slots into capability-authoring CI.
+
+```bash
+$ gang policy check demo-tool.wasm
+Pre-flight: demo-tool v0.1.0 as 12D3-dcfc… against ~/.gang/policy.toml
+
+  [ OK ] ganglion:ros/interface@1.0
+  [DENY] ganglion:logs/stream@1.0
+         policy denied: ganglion:logs/stream pattern "**"
+         ...remedy...
+
+Verdict: 1 denial(s) — apply the remedies above, then re-run. Nothing was deployed.
+```
+
+### `gang policy history [--last N]`
+
+The other half of the audit story (#36): denials are logged, and so are the
+widenings that answer them. Every change made through `gang policy allow` /
+`allow-peer` appends who (local gang id), what (group, pattern, access,
+expiry), when, and why (`--reason`) to `policy-history.jsonl` (size-capped,
+beside `policy.toml`). Newest first. Hand-edits to `policy.toml` bypass the
+trail — the rendering says so, and `gang policy lint` in CI is the backstop.
 
 ### `gang policy denials [--last N]`
 
@@ -1143,9 +1192,9 @@ remedy. The deny → review → narrow-allow loop closes here.
 
 The drift tripwire: flags wide-open rules (`**` patterns, `**` combined with
 `max_access = "read_write"`, `peer_id = "*"` deploy rights, or a missing
-policy file entirely). `--strict` exits non-zero when findings exist, so a
-fleet can run it in CI or cron and catch erosion as a finding instead of an
-incident.
+policy file entirely) and expired `--until` patterns that are now dead weight.
+`--strict` exits non-zero when findings exist, so a fleet can run it in CI or
+cron and catch erosion as a finding instead of an incident.
 
 ## Configuration
 

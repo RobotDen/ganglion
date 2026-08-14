@@ -1,8 +1,8 @@
 mod commands;
 mod doctor;
-mod link_profile;
 mod fleet_html;
 mod foxglove;
+mod link_profile;
 mod mcp;
 mod tui;
 
@@ -794,11 +794,40 @@ enum PolicyAction {
         /// keeps them a deliberate act instead of a reflex.
         #[arg(long)]
         wide_open: bool,
+        /// Time-box the widening (sudo-timestamp analog): a duration
+        /// ("45m", "2h", "7d") or an RFC3339 instant. The engine ignores the
+        /// pattern after expiry; `gang policy lint` flags the leftover. (#34)
+        #[arg(long, value_name = "DURATION|RFC3339")]
+        until: Option<String>,
+        /// Free-text reason recorded in the policy change history (#36).
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Authorize a peer to deploy capabilities.
     AllowPeer {
         /// The operator's gang id (from `gang identity show`).
         peer_id: String,
+        /// Free-text reason recorded in the policy change history (#36).
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Pre-flight a signed component against the local policy WITHOUT
+    /// deploying: per-capability verdicts, each denial with its remedy. (#35)
+    Check {
+        /// Path to the signed component (.wasm with a .manifest.cbor sidecar).
+        wasm_path: std::path::PathBuf,
+        /// Explicit manifest path (default: <wasm>.manifest.cbor).
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+        /// Evaluate as this deploying peer (default: the local identity).
+        #[arg(long, value_name = "GANG_ID")]
+        as_peer: Option<String>,
+    },
+    /// Show the policy change history: who widened what, when, and why. (#36)
+    History {
+        /// Show at most this many entries (newest first).
+        #[arg(long, default_value_t = 20)]
+        last: usize,
     },
     /// Review recent policy denials with the minimal rule that would permit
     /// each — firewall-log style.
@@ -1125,13 +1154,37 @@ async fn main() -> anyhow::Result<()> {
                 pattern,
                 access,
                 wide_open,
+                until,
+                reason,
             } => {
-                commands::policy_allow(&group, &pattern, access.as_deref(), wide_open, &cli.format)
-                    .await?
+                commands::policy_allow(
+                    &group,
+                    &pattern,
+                    access.as_deref(),
+                    wide_open,
+                    until.as_deref(),
+                    reason.as_deref(),
+                    &cli.format,
+                )
+                .await?
             }
-            PolicyAction::AllowPeer { peer_id } => {
-                commands::policy_allow_peer(&peer_id, &cli.format).await?
+            PolicyAction::AllowPeer { peer_id, reason } => {
+                commands::policy_allow_peer(&peer_id, reason.as_deref(), &cli.format).await?
             }
+            PolicyAction::Check {
+                wasm_path,
+                manifest,
+                as_peer,
+            } => {
+                commands::policy_check(
+                    &wasm_path,
+                    manifest.as_deref(),
+                    as_peer.as_deref(),
+                    &cli.format,
+                )
+                .await?
+            }
+            PolicyAction::History { last } => commands::policy_history(last, &cli.format).await?,
             PolicyAction::Denials { last } => commands::policy_denials(last, &cli.format).await?,
             PolicyAction::Lint { strict } => commands::policy_lint(strict, &cli.format).await?,
         },
