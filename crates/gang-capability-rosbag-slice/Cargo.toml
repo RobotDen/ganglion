@@ -6,6 +6,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords.workspace = true
+categories = ["wasm", "science::robotics"]
 rust-version.workspace = true
 
 [dependencies]

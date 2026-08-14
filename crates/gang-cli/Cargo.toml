@@ -6,7 +6,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "network-programming", "science::robotics"]
 rust-version.workspace = true
+
+# `cargo binstall gang` — resolve the prebuilt tarball from the GitHub
+# release (gang-v<version>-<target>.tar.gz, binary at the archive root)
+# instead of compiling from source.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
 
 [[bin]]
 name = "gang"

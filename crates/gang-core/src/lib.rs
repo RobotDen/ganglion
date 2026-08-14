@@ -22,21 +22,16 @@
 //! Error types live in [`error`].
 #![warn(missing_docs)]
 
-/// Minimal alerting primitive: metric → threshold → webhook.
 pub mod alert;
-/// Content-addressed artifact storage.
 pub mod artifacts;
 /// Append-only, hash-chained audit log.
 pub mod audit;
-/// Named bandwidth profiles for degraded-link streaming presets.
 pub mod bandwidth;
 /// Layer 3 broker request/response types and trait.
 pub mod broker;
 /// Capability groups and installed-capability descriptors.
 pub mod capability;
-/// Error types shared across the crate.
 pub mod error;
-/// The robot→operator event subscription wire model.
 pub mod events;
 /// Peer identity, keypairs, and the local peer registry.
 pub mod identity;
@@ -44,13 +39,11 @@ pub mod identity;
 pub mod manifest;
 /// Wire message framing and control/tool/bulk protocol messages.
 pub mod message;
-/// One-line robot enrollment: the pairing-token trust model (`gang pair`).
 pub mod pairing;
 /// The default-deny capability policy engine.
 pub mod policy;
 /// Stream protocol identifiers.
 pub mod protocol;
-/// The capability registry.
 pub mod registry;
 /// The robot→operator live topic streaming wire model.
 pub mod topics;
