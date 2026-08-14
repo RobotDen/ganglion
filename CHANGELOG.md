@@ -6,6 +6,18 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **Degraded-link CI matrix (`test-harness/degraded-link/`).** The
+  e2e-dispatch round-trip (deploy → invoke → verify over the relay circuit)
+  now runs as a required gate on every main push under five deterministic
+  link profiles — clean, lossy (statistic-nth 3% loss + 40ms), high-latency
+  (250ms RTT), asymmetric (192kbit uplink cap), and nat-relay (direct path
+  firewalled; relay-only) — with a per-run JSON artifact recording the exact
+  shaping commands. A nightly non-blocking chaos run applies seeded random
+  netem impairment and opens an issue carrying the replay seed on failure.
+  Gate profiles use only mechanisms that reproduce exactly run-to-run;
+  netem's random distributions are chaos-only because its per-packet draw is
+  kernel RNG and cannot be seeded. Closes #32.
+
 - **Live ROS topic streaming + full Foxglove projection (`gang view
   --topics`).** A dedicated `/ganglion/topics/1.0` substream (mirroring the
   ADR-024 push shape): the operator sends one `TopicStreamRequest`; the robot
