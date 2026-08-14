@@ -816,7 +816,7 @@ enum PolicyAction {
     Check {
         /// Path to the signed component (.wasm with a .manifest.cbor sidecar).
         wasm_path: std::path::PathBuf,
-        /// Explicit manifest path (default: <wasm>.manifest.cbor).
+        /// Explicit manifest path (default: `<wasm>.manifest.cbor`).
         #[arg(long)]
         manifest: Option<std::path::PathBuf>,
         /// Evaluate as this deploying peer (default: the local identity).
