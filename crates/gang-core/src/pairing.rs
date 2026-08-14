@@ -30,7 +30,7 @@
 //!   decoding or changes the secret, both of which the operator rejects.
 //! - **Replay / reuse:** the operator consumes the token on first successful
 //!   enrollment; a second presentation of the same secret is rejected
-//!   ([`PairingError::AlreadyUsed`](crate::pairing::PairingError::AlreadyUsed)
+//!   ([`PairingError::AlreadyUsed`]
 //!   at the call site).
 //! - **Expiry:** [`PairingToken::verify`](crate::pairing::PairingToken::verify)
 //!   rejects a token past `expires_at_ms`.
