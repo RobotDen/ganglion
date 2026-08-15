@@ -1138,6 +1138,14 @@ for cleanup. A malformed expiry fails closed (treated as already expired).
 Re-allowing the same pattern *without* `--until` upgrades the grant to
 permanent and drops the shadowed timed entry.
 
+Two boundaries to know: expiry gates **future evaluations** — a capability
+deployed while the pattern was live is not un-deployed when it expires (the
+robot re-evaluates on the next deploy/stream request, not continuously); and
+expiry is judged against the **robot's clock**, so a robot with badly skewed
+time will honor the window early or late. Both are visible: `gang policy
+lint` flags the expired entry, and the deploy that created the grant is in
+`gang policy history`.
+
 ```bash
 # Unblock today's debugging session, not next quarter's incident:
 gang policy allow ganglion:ros/interface "/cmd_vel" --access read_only \

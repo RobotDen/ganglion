@@ -1118,23 +1118,27 @@ fn local_actor() -> String {
 /// best-effort observability: failures are reported to stderr, never fatal —
 /// the policy write itself has already succeeded.
 fn record_policy_change(change: &PolicyChange) {
-    let path = policy_history_path();
+    record_policy_change_to(&policy_history_path(), change);
+}
+
+/// Path-injectable body of [`record_policy_change`], unit-testable.
+fn record_policy_change_to(path: &std::path::Path, change: &PolicyChange) {
     let write = || -> std::io::Result<()> {
-        if let Ok(meta) = std::fs::metadata(&path)
+        if let Ok(meta) = std::fs::metadata(path)
             && meta.len() > POLICY_HISTORY_MAX_BYTES
         {
             // Keep the newest half of the lines.
-            let contents = std::fs::read_to_string(&path)?;
+            let contents = std::fs::read_to_string(path)?;
             let lines: Vec<&str> = contents.lines().collect();
             let keep = &lines[lines.len() / 2..];
-            std::fs::write(&path, format!("{}\n", keep.join("\n")))?;
+            std::fs::write(path, format!("{}\n", keep.join("\n")))?;
         }
         let line = serde_json::to_string(change).map_err(std::io::Error::other)?;
         use std::io::Write as _;
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)?;
+            .open(path)?;
         writeln!(f, "{line}")
     };
     if let Err(e) = write() {
@@ -6630,6 +6634,67 @@ mod policy_cli_tests {
         assert!(parse_until("-5m", now()).is_err());
         assert!(parse_until("0h", now()).is_err());
         assert!(parse_until("400d", now()).is_err()); // > a year
+    }
+
+    fn change(n: usize) -> PolicyChange {
+        PolicyChange {
+            ts: format!("2026-08-14T12:00:{n:02}Z"),
+            actor: "gang-abc".into(),
+            action: "allow".into(),
+            target: "ganglion:ros/interface".into(),
+            pattern: Some(format!("/topic/{n}")),
+            access: None,
+            expires: None,
+            outcome: "added".into(),
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn history_appends_one_line_per_change() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("policy-history.jsonl");
+        for n in 0..3 {
+            super::record_policy_change_to(&path, &change(n));
+        }
+        let lines: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 3);
+        let back: PolicyChange = serde_json::from_str(&lines[2]).unwrap();
+        assert_eq!(back.pattern.as_deref(), Some("/topic/2"));
+    }
+
+    #[test]
+    fn history_rotation_keeps_newest_half() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("policy-history.jsonl");
+        // Pre-fill past the cap with valid JSONL lines.
+        let filler: String = (0..4000)
+            .map(|n| serde_json::to_string(&change(n % 60)).unwrap() + "\n")
+            .collect();
+        assert!(filler.len() as u64 > super::POLICY_HISTORY_MAX_BYTES);
+        std::fs::write(&path, &filler).unwrap();
+        super::record_policy_change_to(&path, &change(59));
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let count = contents.lines().count();
+        // Rotated to ~half + the new entry, and every surviving line parses.
+        assert!(count <= 2001, "rotation did not trim: {count} lines");
+        for line in contents.lines() {
+            let _: PolicyChange = serde_json::from_str(line).unwrap();
+        }
+        // Newest entry survived at the tail.
+        assert!(contents.lines().last().unwrap().contains("12:00:59Z"));
+    }
+
+    #[test]
+    fn history_failure_is_not_fatal() {
+        // A directory path can't be opened for append — record must not
+        // panic (the policy write itself has already succeeded).
+        let dir = tempfile::TempDir::new().unwrap();
+        super::record_policy_change_to(dir.path(), &change(0));
     }
 
     #[test]

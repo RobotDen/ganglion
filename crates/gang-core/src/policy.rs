@@ -417,7 +417,21 @@ impl DenialReport {
                     Some(access) => format!(" --access {access}"),
                     None => String::new(),
                 };
-                format!("gang policy allow {} \"{}\"{}", self.group, pattern, access)
+                // The printed command must run VERBATIM: `gang policy allow`
+                // refuses everything-matching patterns without --wide-open,
+                // so a "**" remedy has to say so (and honestly flag what it
+                // is). A component requesting "**" is usually one signed with
+                // the permissive default capability set — narrowing the
+                // declaration is the better fix, and render() says that.
+                let wide = if pattern == "**" || pattern == "*" {
+                    " --wide-open"
+                } else {
+                    ""
+                };
+                format!(
+                    "gang policy allow {} \"{}\"{}{}",
+                    self.group, pattern, access, wide
+                )
             }
         }
     }
@@ -462,10 +476,21 @@ impl DenialReport {
             .map(|l| format!("    {l}"))
             .collect::<Vec<_>>()
             .join("\n");
-        format!(
+        let mut out = format!(
             "policy denied: {what}\n  why: {why}\n  to permit exactly this, on the robot run:\n    {}\n  or add to policy.toml:\n{snippet}",
             self.suggested_command()
-        )
+        );
+        // An everything-matching request usually means the component was
+        // signed with the permissive default capability set — the narrow fix
+        // is upstream of the policy.
+        if self.pattern.as_deref() == Some("**") || self.pattern.as_deref() == Some("*") {
+            out.push_str(
+                "\n  note: this component requests EVERYTHING in the group — prefer \
+                 re-signing it with the specific patterns it needs \
+                 (gang sign --capabilities ...) over widening policy",
+            );
+        }
+        out
     }
 }
 
@@ -808,6 +833,92 @@ mod tests {
     }
 
     const T0: i64 = 1_700_000_000;
+
+    #[test]
+    fn wide_pattern_remedy_is_runnable_verbatim() {
+        // `gang policy allow` refuses "**" without --wide-open, so the
+        // suggested command for an everything-matching request must carry
+        // the flag — a remedy the CLI rejects is worse than none.
+        let report = DenialReport {
+            group: "ganglion:logs/stream".into(),
+            pattern: Some("**".into()),
+            requested_access: None,
+            deployer: "gang-abc".into(),
+            kind: DenialKind::NoRuleForGroup,
+        };
+        assert!(report.suggested_command().ends_with("--wide-open"));
+        assert!(
+            report
+                .render()
+                .contains("re-signing it with the specific patterns")
+        );
+        // Specific patterns get neither the flag nor the note.
+        let narrow = DenialReport {
+            pattern: Some("/cmd_vel".into()),
+            ..report
+        };
+        assert!(!narrow.suggested_command().contains("--wide-open"));
+        assert!(!narrow.render().contains("re-signing"));
+    }
+
+    #[test]
+    fn explain_and_evaluate_never_disagree() {
+        // `gang policy check` (offline, explain_at) and deploy (evaluate_at)
+        // must reach the same verdict for the same inputs — the pre-flight
+        // is only trustworthy if this property holds across rule shapes.
+        let peer = Keypair::generate().peer_id();
+        let policies = [
+            Policy::default(),
+            Policy::permissive(),
+            open_peer_policy(vec![]),
+            open_peer_policy(vec![CapabilityRule {
+                group: "ganglion:ros/interface".into(),
+                allowed_patterns: vec!["/diagnostics/**".into()],
+                max_access: Some("read_only".into()),
+                timed_patterns: vec![TimedPattern {
+                    pattern: "/cmd_vel".into(),
+                    expires: "2023-11-14T22:14:00Z".into(), // live at T0, dead at T0+3600
+                }],
+            }]),
+            open_peer_policy(vec![CapabilityRule {
+                group: "ganglion:logs/stream".into(),
+                allowed_patterns: vec!["syslog".into()],
+                max_access: None,
+                timed_patterns: Vec::new(),
+            }]),
+        ];
+        let requests: Vec<Vec<CapabilityGroup>> = vec![
+            vec![ros_read_cap("/diagnostics/motors")],
+            vec![ros_read_cap("/cmd_vel")],
+            vec![ros_read_cap("/anything/else")],
+            vec![CapabilityGroup::RosInterface {
+                version: "1.0".into(),
+                patterns: vec![AccessPattern {
+                    pattern: "/cmd_vel".into(),
+                    access: RosAccess::ReadWrite,
+                }],
+            }],
+            vec![CapabilityGroup::LogStream {
+                version: "1.0".into(),
+                patterns: vec!["syslog".into()],
+            }],
+            vec![CapabilityGroup::DiagnosticsCollect {
+                version: "1.0".into(),
+            }],
+        ];
+        for (pi, policy) in policies.iter().enumerate() {
+            for (ri, caps) in requests.iter().enumerate() {
+                for now in [T0, T0 + 3600] {
+                    let evaluated_ok = policy.evaluate_at(caps, &peer, now).is_ok();
+                    let explained_ok = policy.explain_at(caps, &peer, now).is_none();
+                    assert_eq!(
+                        evaluated_ok, explained_ok,
+                        "divergence: policy {pi}, request {ri}, now {now}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn timed_pattern_lives_then_expires() {
