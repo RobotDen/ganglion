@@ -729,15 +729,20 @@ Wrote deterministic site profile 'acme-east' to acme-east.profile.
 Replay it in CI: test-harness/degraded-link/run-matrix.sh --profile-file acme-east.profile
 ```
 
-The measurement is RTT (median of N TCP connects to the configured relay) and
-connect-failure rate; the emitted shape uses only fixed netem delay (measured
-RTT split evenly across both directions) and iptables statistic-nth loss, per
-the matrix gate determinism contract — measured jitter is recorded in the
-header comments but deliberately not reproduced. Rates are **not** measurable
-from a handshake probe: `--uplink-kbit` / `--downlink-kbit` fold
-operator-supplied caps (e.g. from a site speed test) into the profile, and the
-header says which numbers were measured and which were supplied. `--samples N`
-controls probe count. The command refuses to profile an unreachable link. (#33)
+The measurement is RTT (median of N TCP connects to the configured relay,
+default 40) and a two-part loss estimate: hard connect failures **plus
+SYN-retransmit detections** — a connect landing ≥800ms over the median almost
+certainly lost its first SYN to the kernel's 1s retransmission timer, which is
+how light (1–5%) loss shows up in a connect probe without ever failing one
+(#38). The emitted shape uses only fixed netem delay (measured RTT split
+evenly across both directions) and iptables statistic-nth loss, per the matrix
+gate determinism contract — measured jitter is recorded in the header comments
+but deliberately not reproduced. Rates are **not** measurable from a handshake
+probe: `--uplink-kbit` / `--downlink-kbit` fold operator-supplied caps (e.g.
+from a site speed test) into the profile, and the header says which numbers
+were measured, which were detected, and which were supplied. `--samples N`
+controls probe count (N samples resolve ~1/N loss). The command refuses to
+profile an unreachable link. (#33)
 
 ### `gang profiles`
 
@@ -1138,13 +1143,21 @@ for cleanup. A malformed expiry fails closed (treated as already expired).
 Re-allowing the same pattern *without* `--until` upgrades the grant to
 permanent and drops the shadowed timed entry.
 
-Two boundaries to know: expiry gates **future evaluations** — a capability
-deployed while the pattern was live is not un-deployed when it expires (the
-robot re-evaluates on the next deploy/stream request, not continuously); and
-expiry is judged against the **robot's clock**, so a robot with badly skewed
-time will honor the window early or late. Both are visible: `gang policy
-lint` flags the expired entry, and the deploy that created the grant is in
-`gang policy history`.
+Expiry is enforced twice: at every evaluation (deploy, invoke,
+topic-stream), and by the agent's **policy re-sync sweep** (#37) — every 60
+seconds (configurable; 0 disables) the agent reloads `policy.toml` from disk
+and revokes any installed capability no longer permitted: the expired grant's
+capability is removed from the installed set (in-flight invocations finish;
+new ones are refused), its files are moved to `.revoked/` so a restart cannot
+resurrect it, and the revocation lands on the event feed, the denial log, and
+the audit log exactly like a deploy-time refusal. The sweep also picks up
+rules you narrow on disk — `gang policy allow` no longer needs an agent
+restart to apply, one sweep interval is enough. A policy file that becomes
+unreadable at runtime keeps the last good policy (loud warning) rather than
+failing open or revoking the fleet; startup remains fail-closed. One boundary
+remains: expiry is judged against the **robot's clock**, so badly skewed time
+honors the window early or late — `gang policy lint` and `gang policy
+history` make the window itself visible.
 
 ```bash
 # Unblock today's debugging session, not next quarter's incident:

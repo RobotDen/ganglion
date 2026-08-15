@@ -45,7 +45,9 @@ pub struct RobotAgent {
     runtime: Arc<gang_wasm_host::runtime::ComponentRuntime>,
 
     /// Policy engine.
-    policy: Policy,
+    /// Active policy, swappable at runtime by the re-sync sweep (#37). Std
+    /// RwLock (never held across await): reads are brief evaluations.
+    policy: std::sync::RwLock<Policy>,
 
     /// Trust store for verifying capability signatures.
     trust_store: TrustStore,
@@ -73,6 +75,14 @@ pub struct RobotAgent {
     /// When the agent was constructed, for reporting uptime in presence
     /// snapshots and heartbeats.
     started_at: Instant,
+
+    /// Where policy.toml lives, for the re-sync sweep's runtime reload (#37).
+    /// `None` on the permissive dev path — the sweep then only re-judges
+    /// expiry against the in-memory policy.
+    policy_path: Option<PathBuf>,
+
+    /// Interval between policy re-sync sweeps; zero disables the sweep.
+    policy_resync_interval: Duration,
 }
 
 /// Configuration for the robot agent.
@@ -85,6 +95,11 @@ pub struct AgentConfig {
     pub audit_max_size_bytes: u64,
     pub fs_allowed_patterns: Vec<FsRule>,
     pub log_allowed_sources: Vec<String>,
+    /// Seconds between policy re-sync sweeps (#37): reload policy.toml from
+    /// disk and revoke installed capabilities no longer permitted (e.g. a
+    /// `--until` timed grant expired, or a rule was narrowed). 0 disables
+    /// the sweep.
+    pub policy_resync_interval_secs: u64,
 }
 
 impl Default for AgentConfig {
@@ -96,6 +111,7 @@ impl Default for AgentConfig {
             capabilities_dir: PathBuf::from("/var/lib/gang/capabilities"),
             audit_log_path: PathBuf::from("/var/lib/gang/audit.log"),
             audit_max_size_bytes: 50 * 1024 * 1024, // 50 MB
+            policy_resync_interval_secs: 60,
             fs_allowed_patterns: vec![FsRule {
                 pattern: "/tmp/gang/**".into(),
                 read: true,
@@ -192,7 +208,7 @@ impl RobotAgent {
             log_broker,
             fs_broker,
             runtime,
-            policy,
+            policy: std::sync::RwLock::new(policy),
             trust_store,
             audit_log,
             denials_log_path,
@@ -203,6 +219,8 @@ impl RobotAgent {
             ))),
             event_bus: Arc::new(EventBus::default()),
             started_at: Instant::now(),
+            policy_path: config.policy_path,
+            policy_resync_interval: Duration::from_secs(config.policy_resync_interval_secs),
         };
 
         // Load any previously installed capabilities (CODE-21: propagate errors).
@@ -305,10 +323,12 @@ impl RobotAgent {
             .map(|g| g.name())
             .collect::<Vec<_>>()
             .join(",");
-        match self
+        let verdict = self
             .policy
-            .evaluate(&manifest.declared_capabilities, deployer)
-        {
+            .read()
+            .expect("policy lock poisoned")
+            .evaluate(&manifest.declared_capabilities, deployer);
+        match verdict {
             Ok(()) => {
                 let deployer = deployer.clone();
                 let group_summary = group_summary.clone();
@@ -342,6 +362,8 @@ impl RobotAgent {
                 // operations when the narrow edit is the easy edit.
                 if let Some(report) = self
                     .policy
+                    .read()
+                    .expect("policy lock poisoned")
                     .explain(&manifest.declared_capabilities, deployer)
                 {
                     self.record_denial(&report);
@@ -371,6 +393,7 @@ impl RobotAgent {
             installed_at: chrono::Utc::now(),
             component_path: wasm_path,
             manifest_path,
+            deployed_by: Some(deployer.clone()),
         };
 
         self.capabilities
@@ -380,6 +403,117 @@ impl RobotAgent {
 
         info!(name = %manifest.name, "Capability installed");
         Ok(manifest.name)
+    }
+
+    /// Policy re-sync sweep (#37): reload policy from disk (keep-last-good on
+    /// a runtime read error — a transient I/O failure must not brick a fleet;
+    /// startup remains fail-closed per SEC-01), then re-judge every installed
+    /// capability's declared groups against the fresh policy at the current
+    /// instant. Capabilities no longer permitted — a `--until` timed grant
+    /// expired, or a rule was narrowed on disk — are revoked: removed from
+    /// the installed map (in-flight invocations finish; the map's write lock
+    /// waits on them), their files moved to `.revoked/` so an agent restart
+    /// cannot resurrect them, and the denial emitted on the event feed,
+    /// denial log, and audit log exactly like a deploy-time refusal.
+    ///
+    /// Returns the names of revoked capabilities.
+    pub async fn policy_resync(&self) -> Vec<String> {
+        let now = chrono::Utc::now().timestamp();
+        self.policy_resync_at(now).await
+    }
+
+    /// [`RobotAgent::policy_resync`] at an explicit instant, for tests.
+    pub async fn policy_resync_at(&self, now_unix: i64) -> Vec<String> {
+        // 1. Reload policy from disk, keep-last-good on error.
+        if let Some(path) = &self.policy_path {
+            match Policy::load(path) {
+                Ok(fresh) => {
+                    *self.policy.write().expect("policy lock poisoned") = fresh;
+                }
+                Err(e) => {
+                    warn!(
+                        "policy re-sync: could not reload {} (keeping the last good                          policy): {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        // 2. Judge every installed capability under the fresh policy. The
+        //    denial report is computed under the read lock (cheap, pure);
+        //    revocation I/O happens after it is released.
+        let snapshot: Vec<InstalledCapability> = {
+            let caps = self.capabilities.read().await;
+            caps.values().cloned().collect()
+        };
+        let due: Vec<(InstalledCapability, gang_core::policy::DenialReport)> = {
+            let policy = self.policy.read().expect("policy lock poisoned");
+            snapshot
+                .into_iter()
+                .filter_map(|cap| {
+                    let label = cap
+                        .deployed_by
+                        .as_ref()
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "(re-sync)".to_string());
+                    policy
+                        .explain_capabilities_at(&cap.declared_capabilities, &label, now_unix)
+                        .map(|report| (cap, report))
+                })
+                .collect()
+        };
+
+        // 3. Revoke. The write lock waits for in-flight invocations (which
+        //    hold the read lock for their duration): prevent-new semantics,
+        //    running invocations complete.
+        let mut revoked = Vec::new();
+        for (cap, report) in due {
+            self.capabilities.write().await.remove(&cap.name);
+
+            // Move the on-disk bundle so a restart cannot resurrect the
+            // capability. Best-effort: a failed move is loud but does not
+            // abort the revocation (the map entry is already gone).
+            let cap_dir = self.capabilities_dir.join(&cap.name);
+            let graveyard = self.capabilities_dir.join(".revoked");
+            let dest = graveyard.join(format!("{}-{now_unix}", cap.name));
+            if cap_dir.exists()
+                && let Err(e) = std::fs::create_dir_all(&graveyard)
+                    .and_then(|()| std::fs::rename(&cap_dir, &dest))
+            {
+                warn!(
+                    name = %cap.name,
+                    "policy re-sync: revoked from memory but could not move {} \
+                     to {}: {e}",
+                    cap_dir.display(),
+                    dest.display()
+                );
+            }
+
+            // Same observability as a deploy-time denial: denial log with the
+            // remedy, audit record, and PolicyDecision + AuditAppended on the
+            // event feed (record_audit emits both for PolicyDenied).
+            self.record_denial(&report);
+            let reason = format!(
+                "revoked by policy re-sync: no longer permitted ({})",
+                report.render().lines().nth(1).unwrap_or("").trim()
+            );
+            let operator = cap
+                .deployed_by
+                .clone()
+                .unwrap_or_else(|| cap.author_peer_id.clone());
+            let started = chrono::Utc::now();
+            self.record_audit(
+                &operator,
+                &cap.name,
+                &cap,
+                started,
+                ExitStatus::PolicyDenied { reason },
+                Vec::new(),
+            );
+            info!(name = %cap.name, "Capability revoked by policy re-sync");
+            revoked.push(cap.name);
+        }
+        revoked
     }
 
     /// List installed capabilities.
@@ -702,6 +836,8 @@ impl RobotAgent {
                 };
                 match self
                     .policy
+                    .read()
+                    .expect("policy lock poisoned")
                     .evaluate(std::slice::from_ref(&group), subscriber)
                 {
                     Ok(()) => TopicVerdict {
@@ -847,6 +983,26 @@ impl RobotAgent {
         use gang_core::protocol::ProtocolId;
         use gang_core::transport::{StreamHandler, TransportAdapter};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Policy re-sync sweep (#37): periodic background task for the life
+        // of the serve loop. Interval 0 disables it.
+        if !self.policy_resync_interval.is_zero() {
+            let sweeper = Arc::clone(self);
+            let interval = self.policy_resync_interval;
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(interval);
+                // The first tick fires immediately; skip it so startup state
+                // (freshly validated at load) is not immediately re-judged.
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    let revoked = sweeper.policy_resync().await;
+                    if !revoked.is_empty() {
+                        warn!(?revoked, "policy re-sync revoked capabilities");
+                    }
+                }
+            });
+        }
 
         let agent = Arc::clone(self);
 
@@ -1222,6 +1378,9 @@ impl RobotAgent {
                 installed_at: chrono::Utc::now(),
                 component_path: wasm_path,
                 manifest_path,
+                // The deployer identity is not persisted; the policy re-sync
+                // sweep re-judges capability rules only for disk-loaded caps.
+                deployed_by: None,
             };
             info!(name = %cap_name, "Loaded installed capability");
             loaded.push((cap_name, installed));
@@ -1388,6 +1547,7 @@ mod tests {
                 write: true,
             }],
             log_allowed_sources: vec!["**".into()],
+            policy_resync_interval_secs: 0, // tests drive resync explicitly
         }
     }
 
@@ -1708,6 +1868,151 @@ can_deploy = true
             .unwrap()
     }
 
+    // --- #37: policy re-sync sweep ---
+
+    /// Agent with a policy whose ros/interface rule permits `/cmd_vel` ONLY
+    /// through a timed pattern expiring one hour from real now.
+    fn resync_fixture(dir: &std::path::Path) -> (RobotAgent, std::path::PathBuf) {
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(1))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let policy_toml = format!(
+            r#"
+[[capability_rules]]
+group = "ganglion:ros/interface"
+allowed_patterns = []
+max_access = "read_only"
+
+[[capability_rules.timed_patterns]]
+pattern = "/cmd_vel"
+expires = "{expires}"
+
+[[peer_rules]]
+peer_id = "*"
+can_deploy = true
+"#
+        );
+        let policy_path = dir.join("policy.toml");
+        std::fs::write(&policy_path, policy_toml).unwrap();
+        let mut config = test_config(dir);
+        config.policy_path = Some(policy_path.clone());
+        (RobotAgent::new(config).unwrap(), policy_path)
+    }
+
+    async fn deploy_cmd_vel(agent: &RobotAgent, kp: &Keypair) -> String {
+        let bytes: &[u8] = b"not-wasm";
+        let manifest = gang_core::manifest::ComponentManifest {
+            schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
+            name: "teleop-tap".into(),
+            version: "0.1.0".into(),
+            declared_capabilities: vec![CapabilityGroup::RosInterface {
+                version: "1.0".into(),
+                patterns: vec![gang_core::capability::AccessPattern {
+                    pattern: "/cmd_vel".into(),
+                    access: gang_core::capability::RosAccess::ReadOnly,
+                }],
+            }],
+            author_peer_id: kp.peer_id(),
+            component_hash: blake3::hash(bytes).to_hex().to_string(),
+            limits: Default::default(),
+            language: Default::default(),
+            description: String::new(),
+            tags: vec![],
+            min_ganglion_version: None,
+        };
+        let signed = SignedManifest::sign(&manifest, kp).unwrap();
+        agent
+            .deploy_capability(&signed.to_cbor().unwrap(), bytes, &kp.peer_id())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn resync_revokes_expired_timed_grant() {
+        let dir = TempDir::new().unwrap();
+        let (agent, _) = resync_fixture(dir.path());
+        let kp = Keypair::generate();
+        deploy_cmd_vel(&agent, &kp).await;
+        assert_eq!(agent.list_capabilities().await.len(), 1);
+
+        // Still live: sweep at real now revokes nothing.
+        let now = chrono::Utc::now().timestamp();
+        assert!(agent.policy_resync_at(now).await.is_empty());
+        assert_eq!(agent.list_capabilities().await.len(), 1);
+
+        // Two hours later the grant has expired: revoked.
+        let revoked = agent.policy_resync_at(now + 7200).await;
+        assert_eq!(revoked, vec!["teleop-tap".to_string()]);
+        assert!(agent.list_capabilities().await.is_empty());
+        let err = agent
+            .invoke_capability("teleop-tap", &[], &kp.peer_id())
+            .await;
+        assert!(err.is_err(), "revoked capability must not be invokable");
+
+        // On-disk bundle moved to the graveyard, live dir gone.
+        assert!(!dir.path().join("capabilities/teleop-tap").exists());
+        assert!(dir.path().join("capabilities/.revoked").exists());
+
+        // The denial log carries the revocation with its remedy.
+        let denials = std::fs::read_to_string(dir.path().join("denials.jsonl")).unwrap();
+        assert!(denials.contains("/cmd_vel"));
+
+        // A fresh agent over the same directories must NOT resurrect it.
+        let mut config = test_config(dir.path());
+        config.policy_path = None; // permissive: would load anything present
+        let reborn = RobotAgent::new(config).unwrap();
+        assert!(
+            reborn.list_capabilities().await.is_empty(),
+            "revoked capability must not survive an agent restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn resync_picks_up_policy_narrowed_on_disk() {
+        let dir = TempDir::new().unwrap();
+        let (agent, policy_path) = resync_fixture(dir.path());
+        let kp = Keypair::generate();
+        deploy_cmd_vel(&agent, &kp).await;
+
+        // Narrow the policy on disk: drop the ros rule entirely. The sweep
+        // must pick this up WITHOUT an agent restart.
+        std::fs::write(
+            &policy_path,
+            "[[peer_rules]]\npeer_id = \"*\"\ncan_deploy = true\n",
+        )
+        .unwrap();
+        let revoked = agent.policy_resync_at(chrono::Utc::now().timestamp()).await;
+        assert_eq!(revoked, vec!["teleop-tap".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn resync_keeps_last_good_policy_on_read_error() {
+        let dir = TempDir::new().unwrap();
+        let (agent, policy_path) = resync_fixture(dir.path());
+        let kp = Keypair::generate();
+        deploy_cmd_vel(&agent, &kp).await;
+
+        // Corrupt the file: the sweep must keep the last good policy (grant
+        // still live) rather than failing open OR revoking everything.
+        std::fs::write(&policy_path, "not [ valid { toml").unwrap();
+        let revoked = agent.policy_resync_at(chrono::Utc::now().timestamp()).await;
+        assert!(revoked.is_empty(), "keep-last-good must not revoke");
+        assert_eq!(agent.list_capabilities().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resync_on_permissive_dev_path_revokes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let agent = RobotAgent::new(test_config(dir.path())).unwrap();
+        let kp = Keypair::generate();
+        deploy_wasmish(&agent, &kp, "diag", b"not-wasm").await;
+        let revoked = agent
+            .policy_resync_at(chrono::Utc::now().timestamp() + 999_999)
+            .await;
+        assert!(revoked.is_empty());
+        assert_eq!(agent.list_capabilities().await.len(), 1);
+    }
+
     // --- SEC-01: fail-closed policy / trust-store loading ---
 
     #[tokio::test]
@@ -1750,6 +2055,8 @@ can_deploy = true
         assert!(
             agent
                 .policy
+                .read()
+                .unwrap()
                 .evaluate(
                     &[CapabilityGroup::DiagnosticsCollect {
                         version: "1.0".into(),

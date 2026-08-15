@@ -557,6 +557,29 @@ impl Policy {
         None
     }
 
+    /// Capability-rules-only analysis at an explicit instant, SKIPPING peer
+    /// authorization. This is the agent's policy re-sync sweep (#37): the
+    /// deploy-time peer check already happened against the authenticated
+    /// deployer, and installed capabilities loaded from disk after a restart
+    /// do not carry a deployer identity to re-check — so the sweep re-judges
+    /// only what CAN drift after deploy: the capability patterns (timed
+    /// grants expiring, rules narrowed on disk). `deployer_label` is used
+    /// verbatim in the report for rendering.
+    pub fn explain_capabilities_at(
+        &self,
+        declared: &[CapabilityGroup],
+        deployer_label: &str,
+        now_unix: i64,
+    ) -> Option<DenialReport> {
+        let label = PeerId::new(deployer_label);
+        for cap in declared {
+            if let Some(report) = self.explain_capability(cap, &label, now_unix) {
+                return Some(report);
+            }
+        }
+        None
+    }
+
     fn explain_capability(
         &self,
         cap: &CapabilityGroup,
@@ -833,6 +856,49 @@ mod tests {
     }
 
     const T0: i64 = 1_700_000_000;
+
+    #[test]
+    fn bench_evaluate_at_stays_fast() {
+        // Perf tripwire, not a microbenchmark: the agent evaluates policy on
+        // every deploy, invoke, topic-stream request, AND once per installed
+        // capability every re-sync sweep (#37). A realistic policy (8 rules,
+        // globs, timed patterns) must evaluate in well under 50µs — the
+        // ceiling is ~50x the measured cost so it flags order-of-magnitude
+        // regressions without flaking on slow CI runners.
+        let mut policy = Policy::permissive();
+        for rule in &mut policy.capability_rules {
+            rule.allowed_patterns = vec!["/diagnostics/**".into(), "/tf/**".into()];
+            rule.timed_patterns = vec![
+                TimedPattern {
+                    pattern: "/cmd_vel".into(),
+                    expires: "2023-11-14T23:00:00Z".into(),
+                },
+                TimedPattern {
+                    pattern: "/scan".into(),
+                    expires: "2020-01-01T00:00:00Z".into(), // expired
+                },
+            ];
+        }
+        let peer = Keypair::generate().peer_id();
+        let caps = vec![
+            ros_read_cap("/diagnostics/motors"),
+            ros_read_cap("/cmd_vel"),
+            CapabilityGroup::DiagnosticsCollect {
+                version: "1.0".into(),
+            },
+        ];
+        const ITERS: u32 = 10_000;
+        let start = std::time::Instant::now();
+        for i in 0..ITERS {
+            let _ = policy.evaluate_at(&caps, &peer, T0 + i as i64 % 100);
+        }
+        let per_op = start.elapsed() / ITERS;
+        eprintln!("policy::evaluate_at: {per_op:?}/op ({ITERS} iters)");
+        assert!(
+            per_op < std::time::Duration::from_micros(50),
+            "evaluate_at regressed to {per_op:?}/op (ceiling 50µs)"
+        );
+    }
 
     #[test]
     fn wide_pattern_remedy_is_runnable_verbatim() {

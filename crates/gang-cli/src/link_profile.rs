@@ -44,10 +44,42 @@ pub struct LinkMeasurement {
     pub rtts_ms: Vec<f64>,
 }
 
+/// A successful connect that took at least this much longer than the median
+/// almost certainly lost its first SYN: Linux's initial SYN retransmission
+/// timeout is 1s, so a retransmitted handshake lands ~1000ms above the true
+/// path RTT. 800ms leaves margin for RTT variance while staying far above
+/// any plausible jitter. (#38)
+const SYN_RETRANSMIT_THRESHOLD_MS: f64 = 800.0;
+
 impl LinkMeasurement {
-    /// Median connect RTT, or `None` when every probe failed.
+    /// Median connect RTT, or `None` when every probe failed. The median is
+    /// robust to retransmit-inflated outliers as long as fewer than half the
+    /// samples retransmitted, so the delay estimate stays clean on lossy
+    /// links.
     pub fn median_rtt_ms(&self) -> Option<f64> {
         percentile(&self.rtts_ms, 50.0)
+    }
+
+    /// Successful connects that almost certainly lost their first SYN:
+    /// landed ≥ [`SYN_RETRANSMIT_THRESHOLD_MS`] above the median. This is
+    /// how light (1–5%) loss shows up in a connect probe — the kernel
+    /// retries and the connect *succeeds*, just ~1s late — so counting only
+    /// hard failures misses it entirely. (#38)
+    pub fn syn_retransmits(&self) -> usize {
+        match self.median_rtt_ms() {
+            Some(median) => self
+                .rtts_ms
+                .iter()
+                .filter(|&&rtt| rtt >= median + SYN_RETRANSMIT_THRESHOLD_MS)
+                .count(),
+            None => 0,
+        }
+    }
+
+    /// Total loss events: hard connect failures plus retransmit-timing
+    /// detections.
+    pub fn loss_events(&self) -> usize {
+        self.failures + self.syn_retransmits()
     }
 
     /// Spread: p90 − p10 of the successful samples (0 for < 2 samples).
@@ -61,18 +93,21 @@ impl LinkMeasurement {
         }
     }
 
-    /// Measured failure rate mapped to the deterministic `statistic --mode
-    /// nth` form: drop every Nth packet. `None` when no probe failed (no loss
-    /// rule) or when *every* probe failed (that is an unreachable target, not
-    /// a lossy link — synthesizing "drop every packet" would be nonsense).
+    /// Measured loss rate mapped to the deterministic `statistic --mode
+    /// nth` form: drop every Nth packet. Loss events are hard failures plus
+    /// SYN-retransmit detections (#38). `None` when nothing was lost (no
+    /// loss rule) or when *every* probe hard-failed (that is an unreachable
+    /// target, not a lossy link — synthesizing "drop every packet" would be
+    /// nonsense).
     pub fn loss_every_nth(&self) -> Option<u32> {
-        if self.failures == 0 || self.failures >= self.samples {
+        let events = self.loss_events();
+        if events == 0 || self.failures >= self.samples {
             return None;
         }
-        // failures/samples ≈ 1/N  →  N = round(samples/failures), floor 2
-        // (N=1 means "every packet": excluded above).
-        let n = (self.samples as f64 / self.failures as f64).round() as u32;
-        Some(n.max(2))
+        // events/samples ≈ 1/N  →  N = round(samples/events), floor 2
+        // (N=1 means "every packet": excluded above), cap at samples.
+        let n = (self.samples as f64 / events as f64).round() as u32;
+        Some(n.clamp(2, self.samples as u32))
     }
 }
 
@@ -253,10 +288,12 @@ pub fn render_profile(p: &ProfileParams, m: &LinkMeasurement, generated_at: &str
     // Honest about the two structural limits of a connect-probe measurement:
     // resolution of the loss estimate, and which leg of the path was seen.
     let loss_line = format!(
-        "# loss: connect-failure proxy over {total} samples (resolves nothing finer \
-         than ~{res:.0}%;\n\
-         # kernel SYN retries can absorb light loss entirely — treat as a floor, \
-         not a measurement)",
+        "# loss: {fails} hard failure(s) + {retx} SYN-retransmit detection(s) \
+         (connect ≥800ms over median)\n\
+         # over {total} samples — resolves nothing finer than ~{res:.1}%; still a \
+         proxy, not a packet count",
+        fails = m.failures,
+        retx = m.syn_retransmits(),
         total = m.samples,
         res = 100.0 / m.samples as f64,
     );
@@ -382,6 +419,62 @@ mod tests {
     }
 
     #[test]
+    fn syn_retransmits_detected_from_timing() {
+        // 38 fast connects at ~30ms, 2 that lost their first SYN and landed
+        // ~1s late: 0 hard failures but 2 loss events → every-20th (5%).
+        let mut rtts = vec![30.0; 38];
+        rtts.push(1032.0);
+        rtts.push(1029.5);
+        let m = meas(&rtts, 0);
+        assert_eq!(m.syn_retransmits(), 2);
+        assert_eq!(m.loss_events(), 2);
+        assert_eq!(m.loss_every_nth(), Some(20));
+        // The delay estimate is NOT skewed by the retransmit outliers.
+        assert_eq!(m.median_rtt_ms(), Some(30.0));
+    }
+
+    #[test]
+    fn retransmits_and_failures_combine() {
+        // 1 hard failure + 1 retransmit over 40 samples → 2 events → every-20th.
+        let mut rtts = vec![25.0; 38];
+        rtts.push(1050.0);
+        let m = meas(&rtts, 1);
+        assert_eq!(m.loss_events(), 2);
+        assert_eq!(m.loss_every_nth(), Some(20));
+    }
+
+    #[test]
+    fn high_latency_link_is_not_misread_as_loss() {
+        // Satellite-ish 600ms RTT with ±40ms jitter: nothing lands 800ms
+        // over the median, so no retransmit detections.
+        let rtts: Vec<f64> = (0..40).map(|i| 600.0 + (i % 5) as f64 * 10.0).collect();
+        let m = meas(&rtts, 0);
+        assert_eq!(m.syn_retransmits(), 0);
+        assert_eq!(m.loss_every_nth(), None);
+    }
+
+    #[test]
+    fn bench_synthesis_pipeline_stays_fast() {
+        // Perf tripwire: statistics + synthesis + render for a 40-sample
+        // measurement is pure CPU and must stay trivially cheap next to the
+        // ~3s of wire time the probes themselves take.
+        let rtts: Vec<f64> = (0..40).map(|i| 30.0 + (i % 7) as f64).collect();
+        let m = meas(&rtts, 1);
+        const ITERS: u32 = 10_000;
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            let p = synthesize(&m, "Acme East", Some(384), None);
+            let _ = render_profile(&p, &m, "2026-08-14T00:00:00Z");
+        }
+        let per_op = start.elapsed() / ITERS;
+        eprintln!("link_profile synth+render: {per_op:?}/op ({ITERS} iters)");
+        assert!(
+            per_op < std::time::Duration::from_micros(100),
+            "synthesis pipeline regressed to {per_op:?}/op (ceiling 100µs)"
+        );
+    }
+
+    #[test]
     fn sanitizes_names() {
         assert_eq!(sanitize_name("Acme Plant #3 (east)"), "acme-plant-3-east");
         assert_eq!(sanitize_name("--weird__stuff--"), "weird-stuff");
@@ -446,7 +539,8 @@ mod tests {
         assert!(text.contains("measured against: relay.example:443 (3/4 probes ok)"));
         assert!(text.contains("not measurable from a handshake probe"));
         // The two structural-limit caveats are always present.
-        assert!(text.contains("treat as a floor"));
+        assert!(text.contains("SYN-retransmit detection"));
+        assert!(text.contains("still a proxy"));
         assert!(text.contains("ONE leg"));
         // No single quotes inside the shape strings (they are single-quoted).
         for line in text.lines().filter(|l| l.contains("_SHAPE='")) {

@@ -137,6 +137,7 @@ async fn start_up_robot(
             capabilities_dir: dir.join("capabilities"),
             audit_log_path: dir.join("audit.log"),
             audit_max_size_bytes: 10 * 1024 * 1024,
+            policy_resync_interval_secs: 0,
             fs_allowed_patterns: vec![FsRule {
                 pattern: format!("{}/**", dir.display()),
                 read: true,

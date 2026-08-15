@@ -2466,6 +2466,7 @@ pub async fn agent(
         capabilities_dir: data_dir.join("capabilities"),
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
+        policy_resync_interval_secs: 60,
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -2725,6 +2726,7 @@ pub async fn deploy(
         capabilities_dir: data_dir.join("capabilities"),
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
+        policy_resync_interval_secs: 60,
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -2832,6 +2834,7 @@ pub async fn run(
         capabilities_dir: data_dir.join("capabilities"),
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
+        policy_resync_interval_secs: 60,
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -2936,6 +2939,7 @@ pub async fn caps(
         capabilities_dir: data_dir.join("capabilities"),
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
+        policy_resync_interval_secs: 60,
         fs_allowed_patterns: vec![],
         log_allowed_sources: vec![],
     };
@@ -3010,6 +3014,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
         capabilities_dir: data_dir.join("capabilities"),
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
+        policy_resync_interval_secs: 60,
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -3300,6 +3305,7 @@ pub async fn up(
         capabilities_dir: robot_dir.join("capabilities"),
         audit_log_path: robot_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
+        policy_resync_interval_secs: 60,
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", robot_dir.display()),
             read: true,
@@ -3985,6 +3991,7 @@ pub async fn join(
         capabilities_dir: data_dir.join("capabilities"),
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
+        policy_resync_interval_secs: 60,
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,

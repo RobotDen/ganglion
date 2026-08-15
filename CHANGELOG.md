@@ -6,6 +6,32 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **Policy re-sync sweep: timed grants now revoke, not just expire.** The
+  robot agent reloads `policy.toml` every 60s (configurable) and revokes any
+  installed capability no longer permitted — an expired `--until` grant or a
+  rule narrowed on disk. Prevent-new semantics: in-flight invocations finish
+  (the installed-map write lock waits on them), new ones are refused; the
+  on-disk bundle moves to `.revoked/` so a restart cannot resurrect it; the
+  revocation is emitted on the event feed, denial log (with remedy), and
+  audit log exactly like a deploy-time refusal. Keep-last-good on runtime
+  policy read errors (startup stays fail-closed per SEC-01). Side effect:
+  `gang policy allow` applies within one sweep — no agent restart. Closes #37.
+
+- **SYN-retransmit loss detection in `gang doctor --profile-out`.** A connect
+  landing ≥800ms over the median almost certainly lost its first SYN to the
+  kernel's 1s retransmission timer — that is how light (1–5%) loss presents
+  in a connect probe without ever failing one. Loss events are now hard
+  failures + retransmit detections; default samples raised 20→40 (~2.5%
+  resolution); the profile header itemizes failures vs detections and the
+  delay median stays robust to retransmit-inflated outliers. Closes #38.
+
+- **Perf tripwires in the test suite.** `policy::evaluate_at` measured at
+  ~624ns/op and the profile synthesis pipeline at ~4.4µs/op (release, 10k
+  iters); tests assert generous ceilings (50µs / 100µs) so an
+  order-of-magnitude regression fails CI without flaking on slow runners.
+
+### Added
+
 - **`gang doctor --profile-out` — the customer link as a CI test case.**
   Measures the actual link (median TCP connect RTT + failure rate against the
   configured relay) and emits a deterministic degraded-link fixture: fixed

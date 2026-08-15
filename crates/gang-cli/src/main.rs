@@ -360,8 +360,9 @@ enum Commands {
         #[arg(long, value_name = "NAME", default_value = "site")]
         profile_name: String,
 
-        /// Number of RTT/loss probe samples for `--profile-out`.
-        #[arg(long, value_name = "N", default_value_t = 20)]
+        /// Number of RTT/loss probe samples for `--profile-out` (more
+        /// samples = finer loss resolution: 40 resolves ~2.5%).
+        #[arg(long, value_name = "N", default_value_t = 40)]
         samples: u16,
 
         /// Robot uplink cap to record in the profile, kbit/s (rates are not

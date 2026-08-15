@@ -156,4 +156,10 @@ pub struct InstalledCapability {
     pub component_path: std::path::PathBuf,
     /// Path to the manifest on disk.
     pub manifest_path: std::path::PathBuf,
+    /// The authenticated operator that deployed this capability, when known.
+    /// `None` for capabilities loaded from disk after an agent restart (the
+    /// deployer identity is not persisted) — the policy re-sync sweep (#37)
+    /// then re-judges capability rules only.
+    #[serde(default)]
+    pub deployed_by: Option<crate::identity::PeerId>,
 }
