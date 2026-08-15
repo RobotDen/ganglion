@@ -11,7 +11,7 @@ categories = ["wasm", "science::robotics"]
 rust-version.workspace = true
 
 [dependencies]
-gang-core = { path = "../gang-core", version = "2.3.0" }
+gang-core = { path = "../gang-core", version = "2.4.0" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

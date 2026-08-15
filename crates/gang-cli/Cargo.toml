@@ -40,9 +40,9 @@ name = "gang"
 path = "src/main.rs"
 
 [dependencies]
-gang-core = { path = "../gang-core", version = "2.3.0" }
-gang-libp2p = { path = "../gang-libp2p", version = "2.3.0" }
-gang-ros = { path = "../gang-ros", version = "2.3.0" }
+gang-core = { path = "../gang-core", version = "2.4.0" }
+gang-libp2p = { path = "../gang-libp2p", version = "2.4.0" }
+gang-ros = { path = "../gang-ros", version = "2.4.0" }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
