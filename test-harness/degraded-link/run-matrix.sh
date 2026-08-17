@@ -53,17 +53,23 @@ if [ "$MODE" = "chaos" ] && [ -z "$SEED" ]; then
   SEED="$(date +%s)"
 fi
 
-# Generate a randomized netem profile from the seed. awk srand(seed) makes
-# the PARAMETER GENERATION deterministic per seed.
+# Generate a randomized netem profile from the seed with a MINSTD LCG in
+# pure bash arithmetic. This used to use awk srand(seed) — but mawk (the
+# default awk on Debian/Ubuntu runners) IGNORES the srand seed entirely
+# (observed: three identical srand(42) invocations, three different draws),
+# which silently broke the replay contract: the recorded seed reproduced
+# nothing. Shell integer arithmetic is deterministic on every platform.
 chaos_params() {
-  awk -v seed="$1" 'BEGIN {
-    srand(seed)
-    delay  = 20 + int(rand() * 280)   # 20..300 ms
-    jitter = int(rand() * 60)         # 0..60 ms
-    loss   = rand() * 5               # 0..5 %
-    reord  = rand() * 3               # 0..3 %
-    printf "delay %dms %dms loss %.2f%% reorder %.2f%%", delay, jitter, loss, reord
-  }'
+  local x=$(( $1 % 2147483647 ))
+  [ "$x" -le 0 ] && x=$(( x + 2147483646 ))
+  x=$(( (x * 48271) % 2147483647 )); local delay=$(( 20 + x % 280 ))   # 20..299 ms
+  x=$(( (x * 48271) % 2147483647 )); local jitter=$(( x % 60 ))        # 0..59 ms
+  x=$(( (x * 48271) % 2147483647 )); local loss_c=$(( x % 500 ))       # 0.00..4.99 %
+  x=$(( (x * 48271) % 2147483647 )); local reord_c=$(( x % 300 ))      # 0.00..2.99 %
+  printf 'delay %dms %dms loss %d.%02d%% reorder %d.%02d%%' \
+    "$delay" "$jitter" \
+    $(( loss_c / 100 )) $(( loss_c % 100 )) \
+    $(( reord_c / 100 )) $(( reord_c % 100 ))
 }
 
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }

@@ -182,7 +182,11 @@ echo "PASS: deployed 'diagnostics' via relay"
 echo "Step 4: Invoke the capability and assert its real output"
 RUN_OUT=$(gang -q run e2e-robot diagnostics --format json)
 echo "$RUN_OUT" | head -20
-if ! echo "$RUN_OUT" | grep -q '"component": *"test-diagnostics"'; then
+# In placeholder mode the agent runs the direct-broker path: no WASM
+# component marker, but the system_info assertion below still proves the
+# full relay round-trip returned real broker output.
+if [ ! -f /test-data/placeholder-mode ] \
+    && ! echo "$RUN_OUT" | grep -q '"component": *"test-diagnostics"'; then
     echo "FAIL: run output missing component marker" >&2
     echo "$RUN_OUT" >&2
     exit 1

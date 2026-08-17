@@ -7,6 +7,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPONENT_DIR="$SCRIPT_DIR/test-component"
 OUT_DIR="$SCRIPT_DIR/test-data"
 
+# Placeholder mode (GANG_E2E_PLACEHOLDER=1): skip the WASM toolchain and ship
+# placeholder bytes instead of a real component. The robot agent executes
+# these via the direct-broker path, so the RELAY TRANSPORT semantics the
+# degraded-link matrix exercises are identical — only the in-sandbox WASM
+# execution (which netem never touches) is skipped. For environments without
+# cargo-component/wasm targets. GANG_BIN can point at a prebuilt gang binary
+# to skip cargo run for signing.
+if [ -n "${GANG_E2E_PLACEHOLDER:-}" ]; then
+    echo "Placeholder mode: skipping WASM build (transport semantics unchanged)"
+    mkdir -p "$OUT_DIR"
+    printf "placeholder-not-wasm" > "$OUT_DIR/diagnostics.wasm"
+    touch "$OUT_DIR/placeholder-mode"
+    cd "$SCRIPT_DIR/../.."
+    GANG="${GANG_BIN:-cargo run --bin gang --}"
+    $GANG sign "$OUT_DIR/diagnostics.wasm" --name diagnostics --component-version 0.1.0 \
+        --capabilities diagnostics
+    echo "Signed placeholder: $OUT_DIR/diagnostics.wasm"
+    exit 0
+fi
+rm -f "$OUT_DIR/placeholder-mode"
+
 # The workspace rust-toolchain.toml only installs the wasm32-wasip2 target,
 # but cargo-component builds a wasm32-wasip1 core module and adapts it into
 # a component (wasip2 support in cargo-component is not something we can
