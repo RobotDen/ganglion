@@ -28,6 +28,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      # The e2e harness builds + signs the test WASM component. Without this
+      # install `cargo component build` dies instantly ("no such command") —
+      # which is exactly what the first two nightly runs did, in ~4s, before
+      # any impairment was ever applied. The gate job in ci.yml has the same
+      # step; the nightly was missing it.
+      - name: Install cargo-component (builds the e2e test component)
+        run: cargo install cargo-component --locked
       - name: Run chaos profile
         id: chaos
         shell: bash
