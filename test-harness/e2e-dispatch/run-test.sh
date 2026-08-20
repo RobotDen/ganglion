@@ -207,6 +207,32 @@ if ! echo "$CAPS_OUT" | grep -q "diagnostics"; then
 fi
 echo "PASS: capability listed"
 
+echo "Step 6: Pull the robot's usage bundle over the control channel (ADR-027)"
+# The invoke in Step 4 must have accumulated exactly one diagnostics-group
+# invocation in the robot's LOCAL bundle. Pulling it proves the fetch RPC
+# end-to-end; the checkpoint-host grep after teardown still proves the
+# robot itself never transmitted anything.
+FLEET_OUT=$(gang -q telemetry fleet pull e2e-robot 2>&1) || {
+    echo "FAIL: fleet pull errored: $FLEET_OUT" >&2
+    exit 1
+}
+echo "$FLEET_OUT"
+if ! echo "$FLEET_OUT" | grep -q "1 merged"; then
+    echo "FAIL: fleet pull did not merge the robot bundle" >&2
+    exit 1
+fi
+FLEET_SHOW=$(gang -q telemetry fleet show)
+echo "$FLEET_SHOW"
+if ! echo "$FLEET_SHOW" | grep -q '"diagnostics"'; then
+    echo "FAIL: fleet payload missing the diagnostics category" >&2
+    exit 1
+fi
+if echo "$FLEET_SHOW" | grep -q "diagnostics.wasm\|e2e-robot"; then
+    echo "FAIL: robot/capability identifiers leaked into the fleet payload" >&2
+    exit 1
+fi
+echo "PASS: usage bundle pulled, aggregated, and free of identifiers"
+
 echo
 echo "=== e2e dispatch test passed ==="
 OPERATOR_SCRIPT

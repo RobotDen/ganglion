@@ -139,6 +139,7 @@ async fn start_up_robot(
             audit_max_size_bytes: 10 * 1024 * 1024,
             policy_resync_interval_secs: 0,
             credentials_path: None,
+            usage_bundle_path: None,
             fs_allowed_patterns: vec![FsRule {
                 pattern: format!("{}/**", dir.display()),
                 read: true,

@@ -2528,6 +2528,7 @@ pub async fn agent(
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
+        usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -2789,6 +2790,7 @@ pub async fn deploy(
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
+        usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -2900,6 +2902,7 @@ pub async fn run(
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
+        usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -3006,6 +3009,7 @@ pub async fn caps(
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
+        usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
         fs_allowed_patterns: vec![],
         log_allowed_sources: vec![],
     };
@@ -3051,6 +3055,128 @@ pub async fn caps(
     Ok(())
 }
 
+/// `gang telemetry fleet pull` (ADR-027) — fetch robots' local-only usage
+/// bundles over the authenticated control channel into the operator's local
+/// fleet accumulator. Nothing is forwarded anywhere by this command; that
+/// happens only at the daily flush and only behind `gang telemetry fleet on`.
+pub async fn fleet_pull(
+    robots: &[String],
+    explicit_peer: Option<&str>,
+    explicit_relay: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> anyhow::Result<()> {
+    use gang_core::message::ControlMessage;
+
+    // Targets: the named robots, or every registered robot peer.
+    let names: Vec<String> = if robots.is_empty() {
+        let registry =
+            gang_core::identity::PeerRegistry::load(&gang_core::identity::default_registry_path())
+                .unwrap_or_default();
+        registry
+            .list()
+            .filter(|(_, e)| matches!(e.role, gang_core::identity::Role::RobotAgent))
+            .map(|(n, _)| n.to_string())
+            .collect()
+    } else {
+        robots.to_vec()
+    };
+    if names.is_empty() {
+        anyhow::bail!(
+            "no robots to pull: none named on the command line and none registered \
+             (see `gang peer list`)"
+        );
+    }
+    if explicit_peer.is_some() && names.len() > 1 {
+        anyhow::bail!("--peer applies to exactly one robot; name a single robot with it");
+    }
+
+    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(CONTROL_TIMEOUT_SECS));
+    let (mut merged, mut empty, mut failed) = (0usize, 0usize, 0usize);
+
+    for name in &names {
+        let outcome: anyhow::Result<Option<(String, String)>> = async {
+            let target = resolve_target(name, explicit_peer, explicit_relay)?;
+            if target.is_local {
+                // Local dev agent: read the bundle straight from its data dir.
+                let data_dir = PathBuf::from(format!("/tmp/gang-agent-{name}"));
+                if !data_dir.exists() {
+                    anyhow::bail!("no agent data found for local robot '{name}'");
+                }
+                use gang_ros::agent::{AgentConfig, RobotAgent};
+                let config = AgentConfig {
+                    key_path: data_dir.join("identity.key"),
+                    policy_path: None,
+                    trust_store_path: data_dir.join("trusted_peers.json"),
+                    capabilities_dir: data_dir.join("capabilities"),
+                    audit_log_path: data_dir.join("audit.log"),
+                    audit_max_size_bytes: 50 * 1024 * 1024,
+                    policy_resync_interval_secs: 0,
+                    credentials_path: None,
+                    usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
+                    fs_allowed_patterns: vec![],
+                    log_allowed_sources: vec![],
+                };
+                let agent = RobotAgent::new(config)?;
+                let requester = agent.peer_id().clone();
+                let bundle = agent
+                    .fetch_usage_bundle(&requester)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                return Ok(bundle.map(|json| (format!("local:{name}"), json)));
+            }
+
+            let remote = prepare_remote(&target)?;
+            let response =
+                remote_dispatch(&remote, ControlMessage::FetchUsageBundle, timeout).await?;
+            match response {
+                ControlMessage::UsageBundleReport { bundle_json } => {
+                    Ok(bundle_json.map(|json| (remote.gang_id.to_string(), json)))
+                }
+                ControlMessage::Error { code, message, .. } => {
+                    anyhow::bail!("robot '{name}' refused ({code}): {message}")
+                }
+                other => anyhow::bail!("unexpected response from robot '{name}': {other:?}"),
+            }
+        }
+        .await;
+
+        match outcome {
+            Ok(Some((peer_key, json))) => {
+                match crate::telemetry::fleet_merge_bundle(&peer_key, &json) {
+                    Ok(()) => {
+                        println!("  {name}: bundle pulled and merged (robot counters reset)");
+                        merged += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("  {name}: {e}");
+                        failed += 1;
+                    }
+                }
+            }
+            Ok(None) => {
+                println!("  {name}: no bundle (disabled, compiled out, or nothing accumulated)");
+                empty += 1;
+            }
+            Err(e) => {
+                eprintln!("  {name}: pull failed: {e}");
+                failed += 1;
+            }
+        }
+    }
+
+    println!(
+        "Fleet pull: {merged} merged, {empty} empty, {failed} failed (of {}).",
+        names.len()
+    );
+    println!(
+        "Bundles stay on this machine unless fleet forwarding is on — \
+         `gang telemetry fleet status`."
+    );
+    if failed > 0 && merged == 0 && empty == 0 {
+        anyhow::bail!("every pull failed");
+    }
+    Ok(())
+}
+
 /// `gang demo` — self-contained local demo.
 pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
     use gang_core::capability::CapabilityGroup;
@@ -3082,6 +3208,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
+        usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -3376,6 +3503,7 @@ pub async fn up(
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
+        usage_bundle_path: Some(robot_dir.join("usage-bundle.json")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", robot_dir.display()),
             read: true,
@@ -4065,6 +4193,7 @@ pub async fn join(
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
+        usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,

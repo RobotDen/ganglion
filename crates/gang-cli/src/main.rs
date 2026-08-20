@@ -892,6 +892,43 @@ pub enum TelemetryAction {
     Off,
     /// Regenerate the anonymous id and clear pending counters.
     Reset,
+    /// Fleet usage bundles (ADR-027): pull robots' local-only usage
+    /// counters and, only with explicit opt-in, forward the aggregate.
+    Fleet {
+        #[command(subcommand)]
+        action: FleetAction,
+    },
+}
+
+/// `gang telemetry fleet` subcommands (ADR-027, TELEMETRY.md).
+#[derive(Subcommand)]
+pub enum FleetAction {
+    /// Show fleet-forwarding state and what has been pulled locally.
+    Status,
+    /// Enable forwarding of the aggregated fleet payload (default: off).
+    On,
+    /// Disable forwarding (the default). Pulled bundles stay local.
+    Off,
+    /// Fetch usage bundles from robots into the local accumulator. A
+    /// successful pull resets the robot-side counters (counts are deltas).
+    Pull {
+        /// Robot names (from `gang peer list`). With none given, every
+        /// registered peer is pulled.
+        robots: Vec<String>,
+        /// Explicit peer id override (single robot only).
+        #[arg(long)]
+        peer: Option<String>,
+        /// Explicit relay multiaddr override.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Per-robot timeout in seconds.
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
+    /// Print, byte-for-byte, the fleet payload the next flush would send.
+    Show,
+    /// Clear the local fleet accumulator.
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -1311,7 +1348,21 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Telemetry { action } => {
             reject_json(&cli.format, "telemetry")?;
-            telemetry::telemetry_cli(&action)?
+            match action {
+                TelemetryAction::Fleet {
+                    action:
+                        FleetAction::Pull {
+                            robots,
+                            peer,
+                            relay,
+                            timeout,
+                        },
+                } => {
+                    commands::fleet_pull(&robots, peer.as_deref(), relay.as_deref(), timeout)
+                        .await?
+                }
+                other => telemetry::telemetry_cli(&other)?,
+            }
         }
         Commands::Relay {
             listen_addr,

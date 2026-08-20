@@ -29,6 +29,7 @@ use crate::Commands;
 /// Operator commands that may record telemetry. Everything absent — most
 /// notably `agent`, `join`, `relay`, `doctor`, `diagnose`, `test-archetype`,
 /// `demo`, `up`, `mcp` — never touches this module (ADR-026 layer 1).
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub const ALLOWED_COMMANDS: &[&str] = &[
     "init",
     "status",
@@ -95,11 +96,21 @@ pub fn command_category(command: &Commands) -> &'static str {
 }
 
 #[cfg(feature = "telemetry")]
-pub use imp::{record_command, telemetry_cli};
+pub use imp::{fleet_merge_bundle, record_command, telemetry_cli};
 
 #[cfg(not(feature = "telemetry"))]
 /// Telemetry compiled out (`--no-default-features`): a no-op.
 pub fn record_command(_category: &str, _ok: bool, _notify: bool) {}
+
+#[cfg(not(feature = "telemetry"))]
+/// Fleet merge when telemetry is compiled out: refuse loudly — a pull that
+/// silently discarded the fetched bundle would be worse than an error.
+pub fn fleet_merge_bundle(_peer_id: &str, _bundle_json: &str) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "telemetry is compiled out of this binary (built without the `telemetry` \
+         cargo feature); there is no fleet accumulator to merge into"
+    )
+}
 
 #[cfg(not(feature = "telemetry"))]
 /// `gang telemetry` when compiled out: report that, truthfully.
@@ -236,7 +247,18 @@ mod imp {
         let _ = std::fs::write(dir.join("last-check"), &today);
 
         let payload = drain_payload(&dir);
-        if let Some(latest) = send(&payload)
+        let latest = send(&payload);
+
+        // ADR-027: fleet forwarding rides the same daily flush, and ONLY
+        // behind its own explicit opt-in (`gang telemetry fleet on`) on top
+        // of the disposition gate already passed above. Off by default.
+        if config_fleet_enabled()
+            && let Some(fleet) = drain_fleet_payload(&dir)
+        {
+            send_fleet(&fleet);
+        }
+
+        if let Some(latest) = latest
             && notify
         {
             maybe_print_update_notice(&dir, &latest);
@@ -446,6 +468,72 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
                 let _ = std::fs::remove_file(dir.join("pending.json"));
                 println!("Anonymous id and pending counters reset.");
             }
+            TelemetryAction::Fleet { action } => return fleet_cli(action),
+        }
+        Ok(())
+    }
+
+    /// `gang telemetry fleet <status|on|off|show|reset>`. (`pull` is async
+    /// and dispatched from `commands::fleet_pull`.)
+    fn fleet_cli(action: &crate::FleetAction) -> anyhow::Result<()> {
+        use crate::FleetAction;
+        match action {
+            FleetAction::Status => {
+                let forwarding = match (disposition(), config_fleet_enabled()) {
+                    (Disposition::Enabled, true) => "ON".to_string(),
+                    (Disposition::Enabled, false) => {
+                        "OFF (default — enable with `gang telemetry fleet on`)".to_string()
+                    }
+                    (Disposition::DisabledBy(layer), true) => {
+                        format!("OFF (opted in, but telemetry is disabled by {layer})")
+                    }
+                    (Disposition::DisabledBy(layer), false) => {
+                        format!("OFF (and telemetry is disabled by {layer})")
+                    }
+                };
+                println!("Fleet forwarding: {forwarding}");
+                let state = load_fleet_state();
+                println!(
+                    "Pulled since last flush: {} robot(s), {} agent version(s)",
+                    state.pulled.len(),
+                    state.agent_versions.len()
+                );
+                println!("Robot bundles are local-only until pulled; see TELEMETRY.md.");
+            }
+            FleetAction::On => {
+                set_config_fleet(true)?;
+                println!(
+                    "Fleet forwarding enabled in config.toml: pulled robot bundles will be \
+                     aggregated and included (bucketed robot count, summed counts, no \
+                     per-robot rows) in the daily checkpoint. `gang telemetry fleet show` \
+                     previews the exact payload. Environment opt-outs still win."
+                );
+            }
+            FleetAction::Off => {
+                set_config_fleet(false)?;
+                println!(
+                    "Fleet forwarding disabled in config.toml (the default). Pulled \
+                     bundles stay on this machine."
+                );
+            }
+            FleetAction::Show => match peek_fleet_payload() {
+                Some(payload) => {
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                    eprintln!(
+                        "\n(This is byte-for-byte what the next daily flush would send to \
+                         /v1/fleet — and only if fleet forwarding is on.)"
+                    );
+                }
+                None => println!(
+                    "Nothing pulled yet — `gang telemetry fleet pull <robot>` fetches \
+                     robot usage bundles into the local accumulator."
+                ),
+            },
+            FleetAction::Reset => {
+                let _ = std::fs::remove_file(fleet_state_path());
+                println!("Local fleet accumulator cleared.");
+            }
+            FleetAction::Pull { .. } => unreachable!("pull is dispatched in commands::fleet_pull"),
         }
         Ok(())
     }
@@ -475,6 +563,227 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
         }
         std::fs::write(&path, toml::to_string_pretty(&table)?)?;
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Fleet telemetry (ADR-027): operator-side accumulator + opt-in
+    // forwarding of robot usage bundles pulled with
+    // `gang telemetry fleet pull`.
+    // ------------------------------------------------------------------
+
+    /// Fleet endpoint (same worker, published in-repo like the checkpoint).
+    const FLEET_ENDPOINT: &str = "https://checkpoint.robotden.dev/v1/fleet";
+
+    /// The COMPLETE fleet payload (ADR-027: exhaustive; adding a field
+    /// requires amending the ADR and TELEMETRY.md, and bumping `schema`).
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct FleetPayload {
+        /// Payload schema version.
+        pub schema: u32,
+        /// The operator's ADR-026 anonymous id (random, resettable).
+        pub id: String,
+        /// Operator CLI version.
+        pub version: String,
+        /// Bucketed distinct-robot count: "1" | "2-5" | "6-20" | "21-100"
+        /// | "100+" — bucketed so small fleets aren't fingerprintable.
+        pub robots: String,
+        /// Unique agent versions seen across pulled bundles, sorted. No
+        /// per-version robot counts, for the same fingerprinting reason.
+        pub agent_versions: Vec<String>,
+        /// Capability-*group* ok/err counts, summed across the whole fleet
+        /// before sending. Per-robot rows never leave this machine.
+        pub counts: BTreeMap<String, CategoryCount>,
+        /// Per-category failure-kind breakouts, summed across the fleet.
+        /// Kinds are the robot runtime's CLOSED set ("trapped", "deadline",
+        /// "policy-denied", "fuel-exhausted", "hash-mismatch", "failed").
+        pub errors: BTreeMap<String, BTreeMap<String, u64>>,
+        /// Total policy denials across the fleet (a bare count).
+        pub denials: u64,
+    }
+
+    /// LOCAL fleet accumulator. `pulled` holds peer ids so distinct robots
+    /// are counted correctly across multiple pulls — that list is the
+    /// operator's own data (same as peers.json) and is reduced to the
+    /// bucketed `robots` string before anything is sent.
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    struct FleetState {
+        pulled: std::collections::BTreeSet<String>,
+        agent_versions: std::collections::BTreeSet<String>,
+        counts: BTreeMap<String, CategoryCount>,
+        errors: BTreeMap<String, BTreeMap<String, u64>>,
+        denials: u64,
+    }
+
+    /// The robot bundle as fetched (mirrors `gang-ros::usage_bundle`).
+    /// Unknown fields are rejected: a drifted future agent must not smuggle
+    /// new data through an old operator CLI unvalidated.
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RobotBundle {
+        schema: u32,
+        version: String,
+        #[allow(dead_code)]
+        os: String,
+        #[allow(dead_code)]
+        arch: String,
+        counts: BTreeMap<String, CategoryCount>,
+        /// Absent on bundles from agents predating error breakouts.
+        #[serde(default)]
+        errors: BTreeMap<String, BTreeMap<String, u64>>,
+        denials: u64,
+    }
+
+    fn fleet_state_path() -> PathBuf {
+        state_dir().join("fleet.json")
+    }
+
+    fn load_fleet_state() -> FleetState {
+        std::fs::read(fleet_state_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    fn store_fleet_state(state: &FleetState) {
+        let dir = state_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(bytes) = serde_json::to_vec(state) {
+            let _ = std::fs::write(fleet_state_path(), bytes);
+        }
+    }
+
+    /// `[telemetry] fleet = true` in config.toml — the explicit forwarding
+    /// opt-in (`gang telemetry fleet on`). Default: absent = off.
+    fn config_fleet_enabled() -> bool {
+        let path = gang_core::identity::default_config_dir().join("config.toml");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let Ok(table) = text.parse::<toml::Table>() else {
+            return false;
+        };
+        table
+            .get("telemetry")
+            .and_then(|t| t.get("fleet"))
+            .and_then(|e| e.as_bool())
+            == Some(true)
+    }
+
+    /// Persist `[telemetry] fleet = <value>` into config.toml, preserving
+    /// everything else (same discipline as [`set_config_enabled`]).
+    fn set_config_fleet(enabled: bool) -> anyhow::Result<()> {
+        let path = gang_core::identity::default_config_dir().join("config.toml");
+        let mut table: toml::Table = match std::fs::read_to_string(&path) {
+            Ok(text) => text.parse().map_err(|e| {
+                anyhow::anyhow!("config.toml is not valid TOML ({e}); refusing to rewrite it")
+            })?,
+            Err(_) => toml::Table::default(),
+        };
+        let telemetry = table
+            .entry("telemetry")
+            .or_insert(toml::Value::Table(Default::default()));
+        telemetry
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("[telemetry] is not a table"))?
+            .insert("fleet".into(), toml::Value::Boolean(enabled));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, toml::to_string_pretty(&table)?)?;
+        Ok(())
+    }
+
+    /// Merge one fetched robot bundle into the local fleet accumulator.
+    /// Validates the bundle strictly (schema 1, known fields only) — a
+    /// bundle that fails validation is discarded with an error rather than
+    /// merged. The peer id is used only for local distinct-robot counting.
+    pub fn fleet_merge_bundle(peer_id: &str, bundle_json: &str) -> anyhow::Result<()> {
+        let bundle: RobotBundle = serde_json::from_str(bundle_json)
+            .map_err(|e| anyhow::anyhow!("robot bundle failed validation, not merged: {e}"))?;
+        if bundle.schema != 1 {
+            anyhow::bail!(
+                "robot bundle schema {} is not supported by this CLI, not merged",
+                bundle.schema
+            );
+        }
+        let mut state = load_fleet_state();
+        state.pulled.insert(peer_id.to_string());
+        state.agent_versions.insert(bundle.version);
+        for (category, pair) in bundle.counts {
+            let entry = state.counts.entry(category).or_default();
+            entry.ok += pair.ok;
+            entry.err += pair.err;
+        }
+        for (category, kinds) in bundle.errors {
+            let entry = state.errors.entry(category).or_default();
+            for (kind, n) in kinds {
+                *entry.entry(kind).or_default() += n;
+            }
+        }
+        state.denials += bundle.denials;
+        store_fleet_state(&state);
+        Ok(())
+    }
+
+    fn robots_bucket(n: usize) -> &'static str {
+        match n {
+            0..=1 => "1",
+            2..=5 => "2-5",
+            6..=20 => "6-20",
+            21..=100 => "21-100",
+            _ => "100+",
+        }
+    }
+
+    fn state_to_payload(state: &FleetState, dir: &Path) -> FleetPayload {
+        FleetPayload {
+            schema: 1,
+            id: anon_id(dir),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            robots: robots_bucket(state.pulled.len()).to_string(),
+            agent_versions: state.agent_versions.iter().cloned().collect(),
+            counts: state.counts.clone(),
+            errors: state.errors.clone(),
+            denials: state.denials,
+        }
+    }
+
+    /// The fleet payload that WOULD be sent (for `gang telemetry fleet
+    /// show`); `None` when nothing has been pulled since the last flush.
+    pub fn peek_fleet_payload() -> Option<FleetPayload> {
+        let state = load_fleet_state();
+        if state.pulled.is_empty() {
+            return None;
+        }
+        Some(state_to_payload(&state, &state_dir()))
+    }
+
+    /// Build the fleet payload and reset the accumulator (checkpoint
+    /// semantics: flushed whether or not the send succeeds; no retries).
+    fn drain_fleet_payload(dir: &Path) -> Option<FleetPayload> {
+        let state = load_fleet_state();
+        if state.pulled.is_empty() {
+            return None;
+        }
+        let _ = std::fs::remove_file(fleet_state_path());
+        Some(state_to_payload(&state, dir))
+    }
+
+    /// One POST to the fleet endpoint. Same discipline as [`send`]: 2s
+    /// budget, no retries, every failure silent and equivalent.
+    fn send_fleet(payload: &FleetPayload) {
+        let Ok(body) = serde_json::to_vec(payload) else {
+            return;
+        };
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(SEND_TIMEOUT))
+            .max_redirects(0)
+            .build()
+            .into();
+        let _ = agent
+            .post(FLEET_ENDPOINT)
+            .header("content-type", "application/json")
+            .send(&body[..]);
     }
 
     #[cfg(test)]
@@ -534,6 +843,81 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
                 vec!["arch", "counts", "dist", "id", "os", "schema", "version"],
                 "payload gained a field — amend ADR-026 + TELEMETRY.md first"
             );
+        }
+
+        /// ADR-027: the fleet payload field list is exhaustive too.
+        #[test]
+        fn fleet_payload_field_list_is_locked() {
+            let payload = FleetPayload {
+                schema: 1,
+                id: "x".into(),
+                version: "0.0.0".into(),
+                robots: "1".into(),
+                agent_versions: vec![],
+                counts: BTreeMap::new(),
+                errors: BTreeMap::new(),
+                denials: 0,
+            };
+            let value = serde_json::to_value(&payload).unwrap();
+            let mut keys: Vec<&str> = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|s| s.as_str())
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                vec![
+                    "agent_versions",
+                    "counts",
+                    "denials",
+                    "errors",
+                    "id",
+                    "robots",
+                    "schema",
+                    "version"
+                ],
+                "fleet payload gained a field — amend ADR-027 + TELEMETRY.md first"
+            );
+        }
+
+        /// ADR-027: bucketed robot counts, never exact ones.
+        #[test]
+        fn robots_bucket_boundaries() {
+            for (n, want) in [
+                (0, "1"),
+                (1, "1"),
+                (2, "2-5"),
+                (5, "2-5"),
+                (6, "6-20"),
+                (20, "6-20"),
+                (21, "21-100"),
+                (100, "21-100"),
+                (101, "100+"),
+                (5000, "100+"),
+            ] {
+                assert_eq!(robots_bucket(n), want, "bucket({n})");
+            }
+        }
+
+        /// ADR-027: a robot bundle that drifts (unknown fields, wrong
+        /// schema) is rejected at merge, never forwarded unvalidated.
+        #[test]
+        fn robot_bundle_validation_is_strict() {
+            let good = r#"{"schema":1,"version":"2.6.0","os":"linux","arch":"x86_64",
+                "counts":{"ros":{"ok":1,"err":0}},"denials":0}"#;
+            assert!(serde_json::from_str::<RobotBundle>(good).is_ok());
+
+            let unknown_field = r#"{"schema":1,"version":"2.6.0","os":"linux","arch":"x86_64",
+                "counts":{},"denials":0,"robot_name":"acme-line3"}"#;
+            assert!(
+                serde_json::from_str::<RobotBundle>(unknown_field).is_err(),
+                "unknown fields must be rejected, not silently forwarded"
+            );
+
+            let missing = r#"{"schema":1,"version":"2.6.0"}"#;
+            assert!(serde_json::from_str::<RobotBundle>(missing).is_err());
         }
 
         #[test]
@@ -643,6 +1027,36 @@ mod boundary_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// ADR-027: the robot-side usage bundle is local-only by construction.
+    /// Its module must never grow a network client or endpoint reference —
+    /// the *transmission* boundary is the prime constraint, and this
+    /// tripwire keeps the send path structurally impossible on robots.
+    #[test]
+    fn usage_bundle_module_has_no_network_code() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../gang-ros/src/usage_bundle.rs");
+        if !path.exists() {
+            return; // packaged build outside the workspace
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        for token in [
+            "ureq",
+            "reqwest",
+            "hyper",
+            "TcpStream",
+            "UdpSocket",
+            "robotden.dev",
+            "http://",
+            "https://",
+        ] {
+            assert!(
+                !text.contains(token),
+                "usage_bundle.rs contains '{token}' — the robot bundle must have no \
+                 send path (ADR-027)"
+            );
         }
     }
 }

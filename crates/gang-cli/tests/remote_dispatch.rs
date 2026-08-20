@@ -104,6 +104,7 @@ fn agent_config(dir: &Path) -> AgentConfig {
         audit_max_size_bytes: 10 * 1024 * 1024,
         policy_resync_interval_secs: 0,
         credentials_path: None,
+        usage_bundle_path: Some(dir.join("usage-bundle.json")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", dir.display()),
             read: true,
@@ -373,6 +374,37 @@ async fn circuit_dispatch_deploy_invoke_list_and_replay() {
             );
         }
         other => panic!("unexpected list response: {other:?}"),
+    }
+
+    // Fetch the usage bundle over the same circuit (ADR-027): the invoke
+    // above must appear as one diagnostics-group success; the capability
+    // name must not appear anywhere; the fetch resets robot-side counters.
+    let response = rpc(&operator, &robot_id, &ControlMessage::FetchUsageBundle).await;
+    match response {
+        ControlMessage::UsageBundleReport { bundle_json } => {
+            let json = bundle_json.expect("bundle accumulated on the robot");
+            let value: serde_json::Value =
+                serde_json::from_str(&json).expect("bundle is valid JSON");
+            assert_eq!(
+                value["counts"]["diagnostics"]["ok"], 1,
+                "one successful diagnostics invocation expected: {value}"
+            );
+            assert!(
+                !json.contains("circuit-diag"),
+                "capability name leaked into the usage bundle: {json}"
+            );
+        }
+        other => panic!("unexpected bundle response: {other:?}"),
+    }
+    let response = rpc(&operator, &robot_id, &ControlMessage::FetchUsageBundle).await;
+    match response {
+        ControlMessage::UsageBundleReport { bundle_json } => {
+            assert!(
+                bundle_json.is_none(),
+                "second fetch must be empty — counters reset on fetch (no double counting)"
+            );
+        }
+        other => panic!("unexpected second bundle response: {other:?}"),
     }
 }
 

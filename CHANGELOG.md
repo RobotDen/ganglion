@@ -6,6 +6,22 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **Fleet usage bundles (ADR-027).** Robots accumulate a local-only
+  anonymous usage file — capability-*group* ok/err counts and a bare
+  policy-denial count; never capability names, never identifiers, and no
+  send path in the robot at all (guard-test enforced, harness-asserted).
+  Operators pull bundles over the authenticated control channel
+  (`gang telemetry fleet pull`, additive `FetchUsageBundle` message;
+  robot-side counters reset on fetch so counts are deltas) into a local
+  accumulator; forwarding is a separate explicit opt-in
+  (`gang telemetry fleet on`, default off, additionally gated by every
+  ADR-026 opt-out layer) that adds one aggregated payload to the daily
+  checkpoint: bucketed robot count, fleet-summed counts, agent-version
+  set, denial total — per-robot rows never leave the operator's machine.
+  `gang telemetry fleet show` previews the exact wire bytes; the payloads
+  are exhaustive and test-locked; the `/v1/fleet` worker endpoint ships
+  in-repo with the same IP-discarding, aggregate-only handling.
+
 - **Anonymous, opt-out telemetry (ADR-026, TELEMETRY.md).** At most one
   request per day from operator commands: random resettable id, version,
   OS/arch, install channel, per-command success/error counts — and nothing

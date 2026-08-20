@@ -43,13 +43,16 @@ path = "src/main.rs"
 # Anonymous, opt-out, operator-side-only telemetry (ADR-026, TELEMETRY.md).
 # Build with --no-default-features to compile it out entirely — the binary
 # then contains no telemetry code and `gang telemetry status` says so.
-default = ["telemetry"]
+default = ["telemetry", "usage-bundle"]
 telemetry = ["dep:ureq", "dep:uuid"]
+# ADR-027: robot-side local-only usage bundle in the embedded agent.
+# `--no-default-features` compiles out both telemetry and the bundle.
+usage-bundle = ["gang-ros/usage-bundle"]
 
 [dependencies]
 gang-core = { path = "../gang-core", version = "2.5.0" }
 gang-libp2p = { path = "../gang-libp2p", version = "2.5.0" }
-gang-ros = { path = "../gang-ros", version = "2.5.0" }
+gang-ros = { path = "../gang-ros", version = "2.5.0", default-features = false }
 clap = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

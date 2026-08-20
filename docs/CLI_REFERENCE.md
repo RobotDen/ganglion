@@ -1237,6 +1237,33 @@ Environment opt-outs (`DO_NOT_TRACK`, `GANG_TELEMETRY=off`, `CI`) always win
 over config. Binaries built with `--no-default-features` contain no
 telemetry code at all.
 
+### `gang telemetry fleet <status|on|off|pull|show|reset>`
+
+Fleet usage bundles (ADR-027). Robots accumulate a **local-only** anonymous
+usage file — capability-*group* ok/err counts and a bare policy-denial
+count; never capability names, never identifiers, and **no send path in the
+robot at all**. Operators pull bundles over the same authenticated control
+channel used for deploys; forwarding an aggregate is a separate, explicit
+opt-in on top of every ADR-026 opt-out layer.
+
+| Subcommand | Effect |
+|---|---|
+| `status` | Forwarding on/off (default **off**), robots pulled since the last flush. |
+| `pull [robot…]` | Fetch bundles into the local accumulator (all registered robots when none named). A successful pull resets the robot's counters — counts are deltas. |
+| `show` | Print byte-for-byte the fleet payload the next daily flush would send: bucketed robot count, fleet-summed counts, agent-version set, denial total. |
+| `on` / `off` | Persist the forwarding opt-in in `config.toml`. Off keeps pulled bundles local. |
+| `reset` | Clear the local fleet accumulator. |
+
+```bash
+gang telemetry fleet pull            # pull every registered robot
+gang telemetry fleet show            # inspect exactly what would be sent
+gang telemetry fleet on              # opt in to forwarding the aggregate
+```
+
+Robot-side: `DO_NOT_TRACK=1` or `GANG_TELEMETRY=off` in the agent's
+environment stops accumulation; building `gang-ros` without the
+`usage-bundle` feature compiles it out.
+
 ## HTTP egress, named exports, and credential slots (v2.5)
 
 Three additions that make Ganglion a substrate for API-integration

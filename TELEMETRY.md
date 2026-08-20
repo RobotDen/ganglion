@@ -2,8 +2,12 @@
 
 Ganglion's CLI collects **anonymous, aggregate usage data** to help us build
 better tools — which commands get used, on which platforms, on which
-versions. That's the entire purpose. This page is the complete story: what
-is sent, when, what never is, and every way to turn it off.
+versions. That's the entire purpose. **Telemetry is enabled by default**
+(the same opt-out model as Homebrew, Next.js, and the HashiCorp tools);
+every way to turn it off is documented below, and nothing is ever sent
+before the one-time disclosure notice has been shown. This page is the
+complete story: what is sent, when, what never is, and every way to turn
+it off.
 
 > **Production guidance — read this first.**
 > Telemetry never runs from `gang agent`, `gang join`, or `gang relay` — the
@@ -16,6 +20,10 @@ is sent, when, what never is, and every way to turn it off.
 > run `gang telemetry off` on every operator workstation, or set
 > `DO_NOT_TRACK=1` fleet-wide.** Disabling changes nothing about how
 > Ganglion works.
+>
+> Robots themselves need nothing disabled to be safe: the agent's local
+> usage bundle (see below) has **no send path at all** — it is a local file,
+> and only an operator's explicit opt-in ever forwards an aggregate of it.
 
 ## How to disable it (any ONE of these)
 
@@ -117,6 +125,54 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
   environments, DISABLE IT OUTRIGHT: `gang telemetry off` on every
   operator workstation. Nothing was sent today; sending starts tomorrow.
 ```
+
+## Fleet usage bundles (local-only on robots; forwarding is opt-in)
+
+Robots running `gang agent` accumulate a **usage bundle**: a local JSON
+file of anonymous, ganglion-usage-only counters — per-capability-**group**
+ok/err counts (`ros`, `fs`, `diagnostics`, …) and a bare policy-denial
+count. **The robot never transmits it.** There is no send path in the
+robot's code (a guard test keeps it that way), so the transmission boundary
+above is unchanged: nothing leaves a robot or a customer network on its
+own, ever.
+
+The complete bundle — this list is exhaustive:
+
+```json
+{
+  "schema": 1,
+  "version": "2.6.0",
+  "os": "linux",
+  "arch": "aarch64",
+  "counts": { "ros": {"ok": 41, "err": 2}, "fs": {"ok": 7, "err": 0} },
+  "errors": { "ros": {"trapped": 1, "deadline": 1} },
+  "denials": 3
+}
+```
+
+`errors` breaks failures out by kind from a **closed set the runtime
+defines** (`trapped`, `deadline`, `policy-denied`, `fuel-exhausted`,
+`hash-mismatch`, `failed`) — never error messages or free text.
+
+**Never in a bundle, by construction:** capability *names* (operator-named
+capabilities can identify customers or sites — categories, never names),
+robot or peer identifiers, topics, patterns, paths, policy contents,
+arguments, error text, hostnames, or IPs.
+
+Operators may fetch bundles over the same authenticated channel used for
+deploys — `gang telemetry fleet pull` — into a **local** accumulator, and
+nothing goes further unless the operator explicitly runs
+`gang telemetry fleet on` (default: **off**). When on, the daily checkpoint
+also sends one aggregated fleet payload: bucketed robot count ("2-5",
+"6-20", …), counts **summed across the fleet** (per-robot rows never leave
+the operator's machine), the set of agent versions, and the total denial
+count. `gang telemetry fleet show` prints the exact payload beforehand.
+Every opt-out above also disables fleet forwarding.
+
+Robot-side controls: set `DO_NOT_TRACK=1` or `GANG_TELEMETRY=off` in the
+agent's environment (e.g. in its systemd unit) to stop accumulation, or
+build `gang-ros` without the `usage-bundle` feature to compile it out.
+Design: ADR-027.
 
 ## Relay operators (opt-in only)
 

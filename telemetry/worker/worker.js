@@ -15,6 +15,7 @@
  * Endpoints:
  *   POST /v1/checkpoint   — daily CLI checkpoint; responds {"latest": "x.y.z"}
  *   POST /v1/relay-stats  — opt-in daily relay aggregates (unique peer count)
+ *   POST /v1/fleet        — opt-in aggregated fleet usage (ADR-027)
  *
  * Bindings expected (wrangler.toml):
  *   AE          — Analytics Engine dataset (aggregate rows)
@@ -37,6 +38,9 @@ export default {
     }
     if (url.pathname === "/v1/relay-stats") {
       return relayStats(request, env);
+    }
+    if (url.pathname === "/v1/fleet") {
+      return fleet(request, env);
     }
     return new Response("not found", { status: 404 });
   },
@@ -132,6 +136,100 @@ async function checkpoint(request, env, ctx) {
     }
   }
   return Response.json({ latest });
+}
+
+/**
+ * Exhaustive schema check for the ADR-027 fleet payload, mirroring the
+ * client's FleetPayload struct. Same style as validCheckpoint: exact key
+ * set, bounded strings, bounded counts.
+ */
+const FLEET_ROBOT_BUCKETS = ["1", "2-5", "6-20", "21-100", "100+"];
+
+const FLEET_ERROR_KINDS = [
+  "trapped",
+  "deadline",
+  "policy-denied",
+  "fuel-exhausted",
+  "hash-mismatch",
+  "failed",
+];
+
+function validFleet(p) {
+  if (typeof p !== "object" || p === null) return false;
+  const keys = Object.keys(p).sort().join(",");
+  if (keys !== "agent_versions,counts,denials,errors,id,robots,schema,version")
+    return false;
+  if (p.schema !== 1) return false;
+  for (const field of ["id", "version"]) {
+    if (typeof p[field] !== "string" || p[field].length > 64) return false;
+  }
+  if (!FLEET_ROBOT_BUCKETS.includes(p.robots)) return false;
+  if (!Array.isArray(p.agent_versions) || p.agent_versions.length > 32) return false;
+  for (const v of p.agent_versions) {
+    if (typeof v !== "string" || v.length > 64) return false;
+  }
+  if (!Number.isFinite(p.denials)) return false;
+  if (typeof p.counts !== "object" || p.counts === null) return false;
+  const entries = Object.entries(p.counts);
+  if (entries.length > 64) return false;
+  for (const [category, count] of entries) {
+    if (category.length > 32) return false;
+    if (typeof count !== "object" || count === null) return false;
+    if (!Number.isFinite(count.ok) || !Number.isFinite(count.err)) return false;
+  }
+  // errors: {category: {kind: n}} — kinds are the CLOSED runtime set only.
+  if (typeof p.errors !== "object" || p.errors === null) return false;
+  const errorEntries = Object.entries(p.errors);
+  if (errorEntries.length > 64) return false;
+  for (const [category, kinds] of errorEntries) {
+    if (category.length > 32) return false;
+    if (typeof kinds !== "object" || kinds === null) return false;
+    for (const [kind, n] of Object.entries(kinds)) {
+      if (!FLEET_ERROR_KINDS.includes(kind)) return false;
+      if (!Number.isFinite(n)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Opt-in fleet aggregates (ADR-027). Same handling guarantees as the
+ * checkpoint: IP discarded, schema-validated, aggregate rows only. The id
+ * is the operator's checkpoint id, hashed with the same server secret so
+ * fleet rows join checkpoint rows only inside the aggregate store.
+ */
+async function fleet(request, env) {
+  const p = await readBoundedJson(request);
+  if (!p || !validFleet(p)) {
+    return new Response("bad request", { status: 400 });
+  }
+  const idHash = await hashId(env, p.id);
+  const day = new Date().toISOString().slice(0, 10);
+  const versions = p.agent_versions.slice(0, 32).join(" ");
+  for (const [category, count] of Object.entries(p.counts)) {
+    env.AE?.writeDataPoint({
+      blobs: [day, p.version, p.robots, versions, "fleet", category, idHash],
+      doubles: [count.ok, count.err],
+      indexes: [idHash.slice(0, 32)],
+    });
+  }
+  for (const [category, kinds] of Object.entries(p.errors)) {
+    for (const [kind, n] of Object.entries(kinds)) {
+      env.AE?.writeDataPoint({
+        blobs: [day, p.version, p.robots, versions, "fleet-errors", `${category}/${kind}`, idHash],
+        doubles: [n, 0],
+        indexes: [idHash.slice(0, 32)],
+      });
+    }
+  }
+  // Denials + a row even when counts are empty, so pulled-but-idle fleets
+  // still register (robot-count visibility).
+  env.AE?.writeDataPoint({
+    blobs: [day, p.version, p.robots, versions, "fleet", "denials", idHash],
+    doubles: [p.denials, 0],
+    indexes: [idHash.slice(0, 32)],
+  });
+  return Response.json({ ok: true });
 }
 
 /** Opt-in relay daily aggregates: {schema:1, day, unique_peers, version}. */

@@ -58,18 +58,24 @@ That is the whole local loop. To go to a **real multi-host deployment** — stan
 
 The `gang` CLI sends **at most one anonymous request per day** from operator
 commands — version, OS/arch, install channel, and per-command success/error
-counts — to help us build better tools. No arguments, names, patterns,
-peers, or anything from your network, ever. The random id is resettable and
-derived from nothing. The **entire pipeline is in this repository** — client
+counts — to help us build better tools. **Enabled by default** (the standard
+OSS opt-out model), and nothing is sent before a one-time disclosure notice.
+No arguments, names, patterns, peers, or anything from your network, ever.
+The random id is resettable and derived from nothing. The **entire pipeline
+is in this repository** — client
 ([`telemetry.rs`](crates/gang-cli/src/telemetry.rs)) and server
 ([`telemetry/worker/`](telemetry/worker/)) — and `gang telemetry show`
 prints the exact payload before anything is sent.
 
-Telemetry never runs from `gang agent`, `gang join`, or `gang relay` — that
-boundary is enforced by tests and the CI harness. **Even so, it should not
-run on your robots or in your customers' environments: if you use Ganglion
-in production, disable it** — `gang telemetry off` on every operator
-workstation, or `DO_NOT_TRACK=1` fleet-wide. Every detail and every opt-out:
+Telemetry never *transmits* from `gang agent`, `gang join`, or `gang relay`
+— that boundary is enforced by tests and the CI harness. Robots keep a
+**local-only** usage bundle (capability-group counts, no names, no
+identifiers, no send path) that operators can pull with
+`gang telemetry fleet pull`; forwarding the fleet aggregate is a separate
+explicit opt-in (ADR-027). **Workstation telemetry should still not run in
+your customers' environments: if you use Ganglion in production, disable
+it** — `gang telemetry off` on every operator workstation, or
+`DO_NOT_TRACK=1` fleet-wide. Every detail and every opt-out:
 [TELEMETRY.md](TELEMETRY.md).
 
 ## What works today

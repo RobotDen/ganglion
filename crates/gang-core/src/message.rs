@@ -220,6 +220,24 @@ pub enum ControlMessage {
         /// Human-readable error message.
         message: String,
     },
+    /// Fetch the robot's local usage bundle (ADR-027, additive).
+    ///
+    /// The bundle is the robot's local-only, anonymous ganglion-usage
+    /// counter file (capability-*group* ok/err counts + a policy-denial
+    /// count — categories, never capability names, never identifiers). The
+    /// robot never transmits it on its own; this authenticated pull is the
+    /// only way it moves, and a successful fetch resets the robot-side
+    /// counters so counts are deltas. Subscriber trust check matches
+    /// [`ControlMessage::SubscribeEvents`]. An idempotent-safe read paired
+    /// with a reset; no nonce (worst case on replay: counters reset early,
+    /// losing data, never duplicating it).
+    FetchUsageBundle,
+    /// Response to a [`ControlMessage::FetchUsageBundle`].
+    UsageBundleReport {
+        /// The bundle JSON, or `None` when bundles are disabled, compiled
+        /// out, or nothing has accumulated since the last fetch.
+        bundle_json: Option<String>,
+    },
 }
 
 /// Terminal status of a capability invocation.

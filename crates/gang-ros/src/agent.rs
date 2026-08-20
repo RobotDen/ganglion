@@ -86,6 +86,10 @@ pub struct RobotAgent {
 
     /// Credential slot bindings file (#43), consulted at every invoke.
     credentials_path: Option<PathBuf>,
+
+    /// Local-only usage bundle recorder (ADR-027). Counts capability-group
+    /// invocations and policy denials into a local file; never transmits.
+    usage_bundle: crate::usage_bundle::UsageBundleRecorder,
 }
 
 /// Configuration for the robot agent.
@@ -109,6 +113,11 @@ pub struct AgentConfig {
     /// `None` (or a missing file) binds nothing — declared-but-unbound slots
     /// are simply not injected.
     pub credentials_path: Option<PathBuf>,
+    /// Where the local-only usage bundle (ADR-027) accumulates. `None`
+    /// disables accumulation entirely, as do `DO_NOT_TRACK` /
+    /// `GANG_TELEMETRY=off` in the agent's environment or building without
+    /// the `usage-bundle` feature. The bundle never transmits regardless.
+    pub usage_bundle_path: Option<PathBuf>,
 }
 
 impl Default for AgentConfig {
@@ -128,6 +137,7 @@ impl Default for AgentConfig {
                 write: true,
             }],
             log_allowed_sources: vec!["**".into()],
+            usage_bundle_path: Some(PathBuf::from("/var/lib/gang/usage-bundle.json")),
         }
     }
 }
@@ -236,6 +246,7 @@ impl RobotAgent {
             policy_path: config.policy_path,
             policy_resync_interval: Duration::from_secs(config.policy_resync_interval_secs),
             credentials_path: config.credentials_path,
+            usage_bundle: crate::usage_bundle::UsageBundleRecorder::new(config.usage_bundle_path),
         };
 
         // Load any previously installed capabilities (CODE-21: propagate errors).
@@ -253,6 +264,9 @@ impl RobotAgent {
     /// 1 MiB by dropping the oldest half when exceeded. A failure to record
     /// never fails the caller — the denial itself already did.
     fn record_denial(&self, report: &gang_core::policy::DenialReport) {
+        // ADR-027: bump the local usage bundle's bare denial count. The
+        // report's patterns/contents never enter the bundle.
+        self.usage_bundle.record_denial();
         #[derive(serde::Serialize)]
         struct Entry<'a> {
             ts: chrono::DateTime<chrono::Utc>,
@@ -612,6 +626,14 @@ impl RobotAgent {
             .get(name)
             .ok_or_else(|| CapabilityError::NotFound(name.into()))?;
 
+        // ADR-027: the usage bundle records capability *groups* only — the
+        // operator-authored capability name never enters it.
+        let bundle_groups: Vec<String> = cap
+            .declared_capabilities
+            .iter()
+            .map(|g| g.name().to_string())
+            .collect();
+
         let started_at = chrono::Utc::now();
         info!(name = %name, operator = %operator_peer_id, "Invoking capability");
 
@@ -654,6 +676,8 @@ impl RobotAgent {
                     },
                     vec![],
                 );
+                self.usage_bundle
+                    .record_invocation(&bundle_groups, Some("hash-mismatch"));
                 return Err(ManifestError::HashMismatch {
                     expected: cap.component_hash.clone(),
                     actual: actual_hash,
@@ -701,6 +725,7 @@ impl RobotAgent {
                         ExitStatus::Success,
                         vec![],
                     );
+                    self.usage_bundle.record_invocation(&bundle_groups, None);
                     return Ok(comp_result.data);
                 }
                 Err(e) => {
@@ -711,6 +736,8 @@ impl RobotAgent {
                         "WASM execution failed — terminal error (no broker fallback)"
                     );
                     self.record_audit(operator_peer_id, name, cap, started_at, exit_status, vec![]);
+                    self.usage_bundle
+                        .record_invocation(&bundle_groups, Some(bundle_error_kind(&e)));
                     return Err(anyhow::anyhow!("WASM execution of '{name}' failed: {e}"));
                 }
             }
@@ -793,8 +820,23 @@ impl RobotAgent {
             ExitStatus::Success,
             io_stats,
         );
+        self.usage_bundle.record_invocation(&bundle_groups, None);
 
         Ok(output)
+    }
+
+    /// Fetch and reset the local usage bundle (ADR-027) for an authenticated
+    /// operator. Same trust check as event subscriptions: with a non-empty
+    /// trust store, only trusted peers may pull. Returns `None` when bundles
+    /// are disabled, compiled out, or empty — never an error.
+    pub fn fetch_usage_bundle(&self, requester: &PeerId) -> Result<Option<String>, SubscribeError> {
+        if !self.trust_store.trusted_peers.is_empty() && !self.trust_store.is_trusted(requester) {
+            warn!(peer = %requester, "Rejecting usage-bundle fetch from untrusted peer");
+            return Err(SubscribeError::Unauthorized {
+                peer: requester.to_string(),
+            });
+        }
+        Ok(self.usage_bundle.fetch_and_reset())
     }
 
     /// Load the manifest-declared resource limits for an installed capability.
@@ -1191,6 +1233,19 @@ impl RobotAgent {
                         let req = EventSubscribeRequest::new(since_seq, max_events);
                         match agent.build_event_subscription(&remote_peer, &req).await {
                             Ok(events) => ControlMessage::Events { events },
+                            Err(e) => ControlMessage::Error {
+                                request_id: None,
+                                code: "unauthorized".into(),
+                                message: e.to_string(),
+                            },
+                        }
+                    }
+                    ControlMessage::FetchUsageBundle => {
+                        // ADR-027: authenticated pull of the local usage
+                        // bundle; a successful fetch resets robot-side
+                        // counters (deltas — no double counting possible).
+                        match agent.fetch_usage_bundle(&remote_peer) {
+                            Ok(bundle_json) => ControlMessage::UsageBundleReport { bundle_json },
                             Err(e) => ControlMessage::Error {
                                 request_id: None,
                                 code: "unauthorized".into(),
@@ -1595,6 +1650,19 @@ where
 /// audit [`ExitStatus`] (SEC-13 / SEC-08). Fuel exhaustion and deadlines are
 /// recorded distinctly, undeclared-capability access is a policy denial, and
 /// everything else is a trap/failure.
+/// Map an invocation error to its CLOSED usage-bundle failure kind
+/// (ADR-027). Kind strings only — never the error's message.
+fn bundle_error_kind(err: &gang_wasm_host::InvocationError) -> &'static str {
+    use gang_wasm_host::InvocationError as IE;
+    match err {
+        IE::DeadlineExceeded { .. } => "deadline",
+        IE::Trapped(_) => "trapped",
+        IE::UndeclaredCapability(_) => "policy-denied",
+        IE::FuelExhausted { .. } => "fuel-exhausted",
+        _ => "failed",
+    }
+}
+
 fn wasm_exit_status(err: &gang_wasm_host::InvocationError) -> ExitStatus {
     use gang_wasm_host::InvocationError as IE;
     match err {
@@ -1635,6 +1703,7 @@ mod tests {
             log_allowed_sources: vec!["**".into()],
             policy_resync_interval_secs: 0, // tests drive resync explicitly
             credentials_path: None,
+            usage_bundle_path: Some(dir.join("usage-bundle.json")),
         }
     }
 
@@ -1882,6 +1951,72 @@ can_deploy = true
         // Should have system_info in the output
         let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert!(result.get("system_info").is_some());
+    }
+
+    /// ADR-027: invocations land in the usage bundle by capability *group*
+    /// category; the operator-authored capability name never appears; a
+    /// fetch returns the bundle and resets it.
+    #[tokio::test]
+    async fn usage_bundle_records_categories_and_resets_on_fetch() {
+        let dir = TempDir::new().unwrap();
+        let agent = RobotAgent::new(test_config(dir.path())).unwrap();
+
+        let operator_kp = Keypair::generate();
+        let component_bytes = b"fake wasm bytes for testing";
+        let component_hash = blake3::hash(component_bytes).to_hex().to_string();
+        let manifest = gang_core::manifest::ComponentManifest {
+            schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
+            // Distinctive, customer-identifying style name: must never
+            // appear in the bundle.
+            name: "acme-line3-plc-probe".into(),
+            version: "0.1.0".into(),
+            declared_capabilities: vec![CapabilityGroup::DiagnosticsCollect {
+                version: "1.0".into(),
+            }],
+            author_peer_id: operator_kp.peer_id(),
+            component_hash,
+            limits: gang_core::manifest::ResourceLimits::default(),
+            language: Default::default(),
+            description: String::new(),
+            tags: vec![],
+            min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
+        };
+        let signed = SignedManifest::sign(&manifest, &operator_kp).unwrap();
+        let manifest_cbor = signed.to_cbor().unwrap();
+        agent
+            .deploy_capability(&manifest_cbor, component_bytes, &operator_kp.peer_id())
+            .await
+            .unwrap();
+
+        agent
+            .invoke_capability("acme-line3-plc-probe", &[], &operator_kp.peer_id())
+            .await
+            .unwrap();
+        agent
+            .invoke_capability("acme-line3-plc-probe", &[], &operator_kp.peer_id())
+            .await
+            .unwrap();
+
+        let json = agent
+            .fetch_usage_bundle(&operator_kp.peer_id())
+            .unwrap()
+            .expect("bundle accumulated");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["counts"]["diagnostics"]["ok"], 2);
+        assert!(
+            !json.contains("acme"),
+            "capability names must never enter the bundle: {json}"
+        );
+
+        // Fetch reset the counters: nothing on a second pull.
+        assert!(
+            agent
+                .fetch_usage_bundle(&operator_kp.peer_id())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

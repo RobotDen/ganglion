@@ -30,6 +30,13 @@ ureq = { workspace = true }
 ciborium = { workspace = true }
 toml = { workspace = true }
 
+[features]
+# ADR-027: robot-side local-only usage bundle. Compiling without this
+# feature removes the accumulator entirely (`FetchUsageBundle` then always
+# answers "no data"). The bundle never transmits either way.
+default = ["usage-bundle"]
+usage-bundle = []
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
