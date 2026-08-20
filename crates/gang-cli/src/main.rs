@@ -212,6 +212,19 @@ enum Commands {
         /// (#42). Declarative, for pre-flight visibility.
         #[arg(long, value_delimiter = ',')]
         exports: Vec<String>,
+        /// CPU fuel budget written into the manifest (#48). 0/omitted = host
+        /// default (1e6). Clamped host-side to the hard cap (1e10). Heavy
+        /// interpreters (componentize-py/CPython) typically need >= 5e9.
+        #[arg(long = "cpu-fuel", value_name = "UNITS", default_value_t = 0)]
+        cpu_fuel: u64,
+        /// Wall-clock deadline in seconds written into the manifest (#48).
+        /// 0/omitted = host default (300). Clamped host-side to 3600.
+        #[arg(long = "wall-clock-secs", value_name = "SECS", default_value_t = 0)]
+        wall_clock_secs: u64,
+        /// Linear-memory ceiling in bytes written into the manifest (#48).
+        /// 0/omitted = host default (256 MiB). Clamped host-side to 1 GiB.
+        #[arg(long = "max-memory-bytes", value_name = "BYTES", default_value_t = 0)]
+        max_memory_bytes: u64,
     },
 
     /// Run the robot agent (for development/testing).
@@ -1035,6 +1048,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             http_endpoints,
             credential_slots,
             exports,
+            cpu_fuel,
+            wall_clock_secs,
+            max_memory_bytes,
         } => {
             reject_json(&cli.format, "sign")?;
             commands::sign(
@@ -1046,6 +1062,11 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 &http_endpoints,
                 &credential_slots,
                 &exports,
+                gang_core::manifest::ResourceLimits {
+                    cpu_fuel,
+                    wall_clock_secs,
+                    max_memory_bytes,
+                },
             )
             .await?
         }

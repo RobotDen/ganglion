@@ -2369,9 +2369,10 @@ pub async fn sign(
     http_endpoints: &[String],
     credential_slots: &[String],
     exports: &[String],
+    limits: gang_core::manifest::ResourceLimits,
 ) -> anyhow::Result<()> {
     use gang_core::capability::CapabilityGroup;
-    use gang_core::manifest::{ComponentManifest, ResourceLimits, SignedManifest};
+    use gang_core::manifest::{ComponentManifest, SignedManifest};
 
     let key_path = key_path
         .map(PathBuf::from)
@@ -2463,6 +2464,9 @@ pub async fn sign(
         }
     }
 
+    // Resource limits (#48): written into the signed manifest verbatim; the
+    // robot's runtime applies host defaults for zeros and clamps every value
+    // to its hard cap, so a signer can request but never exceed host policy.
     let manifest = ComponentManifest {
         schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
         name: name.clone(),
@@ -2470,7 +2474,7 @@ pub async fn sign(
         declared_capabilities,
         author_peer_id: keypair.peer_id(),
         component_hash: component_hash.clone(),
-        limits: ResourceLimits::default(),
+        limits,
         language: gang_core::registry::CapabilityLanguage::Rust,
         description: String::new(),
         tags: vec![],
@@ -2493,6 +2497,21 @@ pub async fn sign(
     println!("  Capabilities:");
     for cap in &manifest.declared_capabilities {
         println!("    - {}", cap.qualified_name());
+    }
+    if manifest.limits.cpu_fuel != 0
+        || manifest.limits.wall_clock_secs != 0
+        || manifest.limits.max_memory_bytes != 0
+    {
+        println!("  Limits (0 = host default; host clamps to its hard caps):");
+        if manifest.limits.cpu_fuel != 0 {
+            println!("    cpu_fuel:         {}", manifest.limits.cpu_fuel);
+        }
+        if manifest.limits.wall_clock_secs != 0 {
+            println!("    wall_clock_secs:  {}", manifest.limits.wall_clock_secs);
+        }
+        if manifest.limits.max_memory_bytes != 0 {
+            println!("    max_memory_bytes: {}", manifest.limits.max_memory_bytes);
+        }
     }
     Ok(())
 }

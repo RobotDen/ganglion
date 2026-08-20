@@ -331,6 +331,12 @@ Signed component: my-diagnostics.wasm
 | `--name <name>` | Component name. Default: derived from filename. |
 | `--component-version <ver>` (alias `--version`) | Component semantic version. Default: `0.1.0`. Distinct from the CLI's own `-V`/`--version`. |
 | `--capabilities <c1,c2,...>` | Declared capability groups (e.g. `diagnostics,logs,ros,fs,artifacts,process,network,metrics`). |
+| `--cpu-fuel <units>` | CPU fuel budget written into the manifest (#48). 0/omitted = host default (1e6); clamped host-side to 1e10. componentize-py/CPython components typically need `5000000000`. |
+| `--wall-clock-secs <secs>` | Wall-clock deadline (#48). 0/omitted = host default (300 s); clamped host-side to 3600. |
+| `--max-memory-bytes <bytes>` | Linear-memory ceiling (#48). 0/omitted = host default (256 MiB); clamped host-side to 1 GiB. |
+
+Resource-limit zeros mean "host default", never "unlimited" — the runtime
+clamps every request to its hard caps (#49).
 
 If `--capabilities` is omitted, signing falls back to a permissive default set
 (`diagnostics` + `logs "**"`) and prints a loud warning — declare capabilities

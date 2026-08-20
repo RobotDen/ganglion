@@ -71,13 +71,21 @@ The full WIT definition is at `crates/gang-wasm-host/wit/ganglion.wit`.
 
 ## Sandbox constraints
 
-- **Fuel metering**: each WASM instruction costs fuel. Default budget: 1,000,000 units.
-- **Wall-clock deadline**: default 300 seconds (5 minutes).
-- **Memory limit**: default 256 MB.
+- **Fuel metering**: each WASM instruction costs fuel. Default budget:
+  1,000,000 units; hard cap 10,000,000,000. There is no "unlimited" — a
+  manifest value of 0 means the default, and every request is clamped to
+  the cap (#49). Heavy interpreters (componentize-py/CPython) typically
+  need `--cpu-fuel 5000000000` at sign time.
+- **Wall-clock deadline**: default 300 seconds (5 minutes); hard cap 3600.
+  0 in the manifest means the default — every invocation has a deadline.
+- **Memory limit**: default 256 MB; hard cap 1 GiB. 0 means the default.
 - **No ambient authority**: no network sockets, no filesystem access outside the `fs-bounded` interface, no environment variables.
 - **Default-deny policy**: the robot operator's policy file controls which interfaces and patterns are allowed per capability.
 
-Override resource limits in the manifest at signing time or via policy.
+Override resource limits at signing time (#48): `gang sign tool.wasm
+--cpu-fuel 5000000000 --wall-clock-secs 600 --max-memory-bytes 536870912`.
+The robot's runtime applies its defaults for zeros and clamps every value
+to its hard caps — a signer can request but never exceed host policy.
 
 ## Language-specific instructions
 

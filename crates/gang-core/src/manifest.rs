@@ -67,13 +67,19 @@ fn default_schema_version() -> String {
 /// Optional resource limits for a WASM component.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResourceLimits {
-    /// Maximum memory in bytes (0 = use default).
+    /// Linear-memory ceiling in bytes. 0 = use the host default (256 MiB).
+    /// The runtime clamps any request to its hard cap (1 GiB) — a manifest
+    /// can request less than host policy, never more. (#49)
     #[serde(default)]
     pub max_memory_bytes: u64,
-    /// CPU fuel budget (0 = unlimited).
+    /// CPU fuel budget. 0 = use the host default (1_000_000 units) — NOT
+    /// unlimited. The runtime clamps any request to its hard cap
+    /// (10_000_000_000); there is no unlimited setting, by design. (#49)
     #[serde(default)]
     pub cpu_fuel: u64,
-    /// Wall-clock deadline in seconds (0 = no deadline).
+    /// Wall-clock deadline in seconds. 0 = use the host default (300 s) —
+    /// NOT "no deadline". The runtime clamps any request to its hard cap
+    /// (3600 s); every invocation always has a deadline, by design. (#49)
     #[serde(default)]
     pub wall_clock_secs: u64,
 }

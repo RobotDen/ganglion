@@ -6,6 +6,22 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Added
 
+- **`gang sign` resource-limit flags (#48).** `--cpu-fuel`,
+  `--wall-clock-secs`, and `--max-memory-bytes` write `ResourceLimits`
+  into the signed manifest, unblocking heavy components (componentize-py/
+  CPython needs ~5e9 fuel) on the stock sign→run path. The runtime still
+  applies host defaults for zeros and clamps every request to its hard
+  caps — a signer can request but never exceed host policy.
+
+### Fixed
+
+- **`ResourceLimits` docs matched to behavior (#49).** `cpu_fuel: 0` was
+  documented "unlimited" but has always meant "host default (1e6),
+  clamped to the 1e10 hard cap"; `wall_clock_secs: 0` likewise means the
+  300 s default, never "no deadline". Docs now state the real semantics
+  (there is no unlimited setting, by design) and a regression test locks
+  them to the implementation.
+
 - **Fleet usage bundles (ADR-027).** Robots accumulate a local-only
   anonymous usage file — capability-*group* ok/err counts and a bare
   policy-denial count; never capability names, never identifiers, and no

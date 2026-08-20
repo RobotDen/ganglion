@@ -819,6 +819,20 @@ mod tests {
         assert_eq!(effective_wall_clock_secs(&limits), HARD_MAX_WALL_CLOCK_SECS);
     }
 
+    /// #49: zero means "host default", NOT unlimited — locked as a test so
+    /// the docs and the implementation can never drift apart again.
+    #[test]
+    fn zero_limits_mean_host_defaults_not_unlimited() {
+        let limits = ResourceLimits::default();
+        assert_eq!(limits.cpu_fuel, 0, "default manifest declares zeros");
+        assert_eq!(effective_fuel(&limits), DEFAULT_CPU_FUEL);
+        assert_eq!(effective_wall_clock_secs(&limits), DEFAULT_WALL_CLOCK_SECS);
+        assert_eq!(
+            effective_memory_bytes(&limits),
+            DEFAULT_MAX_MEMORY_BYTES as usize
+        );
+    }
+
     /// SEC-04: a module whose declared memory exceeds the store limit must be
     /// stopped at instantiation (the ResourceLimiter denies the growth) rather
     /// than allowed to allocate and OOM the host. We exercise the exact store
