@@ -11,7 +11,7 @@ categories = ["network-programming", "science::robotics"]
 rust-version.workspace = true
 
 [dependencies]
-gang-core = { path = "../gang-core", version = "2.4.0" }
+gang-core = { path = "../gang-core", version = "2.5.0" }
 libp2p = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }

@@ -1680,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "gang"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "gang-capability-canary-probe"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "gang-capability-diagnostic-bundle"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "gang-capability-diagnostics"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "ciborium",
  "serde",
@@ -1739,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "gang-capability-log-normalize"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1749,7 +1749,7 @@ dependencies = [
 
 [[package]]
 name = "gang-capability-network-archetype"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "gang-capability-param-inspect"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1769,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "gang-capability-rosbag-slice"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "gang-capability-topic-echo"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1789,7 +1789,7 @@ dependencies = [
 
 [[package]]
 name = "gang-core"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "gang-libp2p"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "gang-ros"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1863,7 +1863,7 @@ dependencies = [
 
 [[package]]
 name = "gang-wasm-host"
-version = "2.4.0"
+version = "2.5.0"
 dependencies = [
  "anyhow",
  "async-trait",

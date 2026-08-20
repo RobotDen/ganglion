@@ -4,6 +4,8 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-08-20
+
 ### Added
 
 - **`ganglion:http/egress` — the ninth capability group (ADR-025).**
