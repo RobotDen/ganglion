@@ -218,6 +218,17 @@ chmod +x test-data/run-operator-test.sh
 echo "--- Starting e2e scenario ---"
 docker compose up --build --abort-on-container-exit --exit-code-from operator 2>&1 || EXIT_CODE=$?
 
+# ADR-026 layer 4: telemetry must never leave the robot. The compose logs
+# capture every process's output including connection errors and DNS
+# attempts; ANY mention of the checkpoint host in a run that includes a
+# full robot lifecycle is a boundary violation and fails the test.
+docker compose logs --no-color > test-data/compose-check.log 2>/dev/null || true
+if grep -q "checkpoint.robotden.dev" test-data/compose-check.log 2>/dev/null; then
+    echo "FAIL: telemetry checkpoint host appeared in container logs (ADR-026 violation)" >&2
+    EXIT_CODE=1
+fi
+rm -f test-data/compose-check.log
+
 if [ $EXIT_CODE -eq 0 ]; then
     echo
     echo "=== E2E DISPATCH TEST PASSED ==="

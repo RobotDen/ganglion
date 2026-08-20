@@ -4,6 +4,7 @@ mod fleet_html;
 mod foxglove;
 mod link_profile;
 mod mcp;
+mod telemetry;
 mod tui;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -610,6 +611,19 @@ enum Commands {
     /// behind NAT to accept inbound connections. This is the bootstrap relay
     /// described in the design spec (relay.gang.tafy.dev).
     #[command(display_order = 31)]
+    /// Inspect or control anonymous usage telemetry (see TELEMETRY.md).
+    ///
+    /// Ganglion's telemetry is operator-side only, anonymous, opt-out, and
+    /// sends at most ONE request per day. It never runs from `gang agent`,
+    /// `gang join`, or `gang relay`. If you operate Ganglion in production —
+    /// on robots or in customer environments — disable it outright with
+    /// `gang telemetry off` on every operator workstation.
+    #[command(display_order = 60)]
+    Telemetry {
+        #[command(subcommand)]
+        action: TelemetryAction,
+    },
+
     Relay {
         /// Multiaddr(s) to listen on. Can be specified multiple times.
         /// Default: /ip4/0.0.0.0/tcp/4001 and /ip4/0.0.0.0/udp/4001/quic-v1
@@ -863,6 +877,23 @@ enum PolicyAction {
     },
 }
 
+/// `gang telemetry` subcommands (ADR-026, TELEMETRY.md).
+#[derive(Subcommand)]
+pub enum TelemetryAction {
+    /// Show whether telemetry is enabled, which opt-out layer applies if
+    /// not, the anonymous id, and the endpoint.
+    Status,
+    /// Print, byte-for-byte, the payload the next daily checkpoint would
+    /// send. Nothing is sent.
+    Show,
+    /// Enable telemetry in config.toml (environment opt-outs still win).
+    On,
+    /// Disable telemetry in config.toml. Recommended for production fleets.
+    Off,
+    /// Regenerate the anonymous id and clear pending counters.
+    Reset,
+}
+
 #[derive(Subcommand)]
 enum IdentityAction {
     /// Show your peer ID and public key.
@@ -906,6 +937,21 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(derived));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    // Telemetry (ADR-026): category + notify computed before dispatch; the
+    // outcome recorded after. Operator-side only — the module's allowlist
+    // excludes agent/join/relay/doctor/diagnose/test-archetype entirely, so
+    // a robot or field-triage invocation never touches telemetry code.
+    let telemetry_category = telemetry::command_category(&cli.command);
+    let telemetry_notify = matches!(cli.format, OutputFormat::Text) && !cli.quiet;
+
+    let result = dispatch(cli).await;
+    telemetry::record_command(telemetry_category, result.is_ok(), telemetry_notify);
+    result
+}
+
+/// The CLI command dispatcher (extracted from `main` so telemetry can record
+/// each allowlisted command's outcome in exactly one place).
+async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Init { force, yes, json } => {
             commands::init(cli.data_dir.as_deref(), force, yes, json, &cli.format).await?
@@ -1262,6 +1308,10 @@ async fn main() -> anyhow::Result<()> {
                 events_transport.map(Into::into),
             )
             .await?
+        }
+        Commands::Telemetry { action } => {
+            reject_json(&cli.format, "telemetry")?;
+            telemetry::telemetry_cli(&action)?
         }
         Commands::Relay {
             listen_addr,

@@ -1,6 +1,6 @@
 # ADR-026: Telemetry — anonymous, opt-out, operator-side only
 
-- Status: Proposed (design review; no implementation yet)
+- Status: Accepted (implemented; amended in review to add explicit production-disable guidance to the notice, README, and TELEMETRY.md)
 - Date: 2026-08-20
 
 ## Context
@@ -87,10 +87,13 @@ the day, the CLI sends one request and prints an update notice when a newer
 version exists — the user gets real value from the same request that carries
 the telemetry. Mechanics:
 
-- Fire-and-forget on a detached thread: 2-second total timeout, **no
-  retries**, failure completely silent, never blocks or delays the command,
-  never prints errors. The command's exit code and output are byte-identical
-  whether the checkpoint succeeds, fails, or is blocked.
+- One synchronous request with a 2-second total budget (amended from the
+  detached-thread draft: a detached thread can be killed at process exit
+  mid-send, making delivery nondeterministic; a bounded synchronous send is
+  simpler and honest about its worst case — one command per day may take up
+  to 2s longer). **No retries**, failure completely silent, never prints
+  errors. The command's exit code and output are byte-identical whether the
+  checkpoint succeeds, fails, or is blocked.
 - State in `~/.gang/telemetry/`: `last-check` (day stamp), `id` (the
   anonymous id, below), `pending.json` (component D's accumulator).
 - Update notice (`gang 2.6.0 available — you have 2.5.0. brew upgrade gang`)

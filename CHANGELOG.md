@@ -4,6 +4,21 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Anonymous, opt-out telemetry (ADR-026, TELEMETRY.md).** At most one
+  request per day from operator commands: random resettable id, version,
+  OS/arch, install channel, per-command success/error counts — and nothing
+  else (the field list is exhaustive and test-enforced). Never runs from
+  `gang agent`/`join`/`relay` or the field-triage commands; the boundary is
+  enforced by a command allowlist, a crate-boundary guard test, a
+  compile-time feature (`--no-default-features` removes the code entirely),
+  and an e2e-harness assertion. Six opt-out layers including `DO_NOT_TRACK`;
+  `gang telemetry status|show|on|off|reset`; notice-before-first-send with
+  explicit production-disable guidance; the complete server side (a
+  Cloudflare Worker that discards IPs and stores only aggregates) is
+  published in-repo under `telemetry/worker/` for auditability.
+
 ## [2.5.0] - 2026-08-20
 
 ### Added

@@ -54,6 +54,24 @@ gang tui     # The live dashboard — peers, tunnels, policy allow/deny, and a t
 
 That is the whole local loop. To go to a **real multi-host deployment** — stand up a relay, connect a robot that dials out, and enrol it in one line with `gang pair` / `gang join` — follow the full walkthrough with real transcripts in **[docs/QUICKSTART.md](docs/QUICKSTART.md)**. Every command and flag is in **[docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md)**.
 
+## Telemetry (anonymous, opt-out — disable in production)
+
+The `gang` CLI sends **at most one anonymous request per day** from operator
+commands — version, OS/arch, install channel, and per-command success/error
+counts — to help us build better tools. No arguments, names, patterns,
+peers, or anything from your network, ever. The random id is resettable and
+derived from nothing. The **entire pipeline is in this repository** — client
+([`telemetry.rs`](crates/gang-cli/src/telemetry.rs)) and server
+([`telemetry/worker/`](telemetry/worker/)) — and `gang telemetry show`
+prints the exact payload before anything is sent.
+
+Telemetry never runs from `gang agent`, `gang join`, or `gang relay` — that
+boundary is enforced by tests and the CI harness. **Even so, it should not
+run on your robots or in your customers' environments: if you use Ganglion
+in production, disable it** — `gang telemetry off` on every operator
+workstation, or `DO_NOT_TRACK=1` fleet-wide. Every detail and every opt-out:
+[TELEMETRY.md](TELEMETRY.md).
+
 ## What works today
 
 Everything local, the connectivity layer, **and** the remote dispatch hop are built and verified: `gang demo`, identity, component signing, the policy/audit pipeline, the relay server, robot agents that dial out and hold a circuit reservation, the peer registry, and **remote `deploy`/`run`/`caps` over the relay circuit** with SSH-style TOFU host-key verification, replay-protected control, and honest non-zero exits.

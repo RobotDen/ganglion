@@ -39,6 +39,13 @@ bin-dir = "{ bin }{ binary-ext }"
 name = "gang"
 path = "src/main.rs"
 
+[features]
+# Anonymous, opt-out, operator-side-only telemetry (ADR-026, TELEMETRY.md).
+# Build with --no-default-features to compile it out entirely — the binary
+# then contains no telemetry code and `gang telemetry status` says so.
+default = ["telemetry"]
+telemetry = ["dep:ureq", "dep:uuid"]
+
 [dependencies]
 gang-core = { path = "../gang-core", version = "2.5.0" }
 gang-libp2p = { path = "../gang-libp2p", version = "2.5.0" }
@@ -52,6 +59,8 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
+ureq = { workspace = true, optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
 serde = { workspace = true }
 ciborium = { workspace = true }
 dirs = "6"

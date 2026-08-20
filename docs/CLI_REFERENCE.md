@@ -1217,6 +1217,26 @@ policy file entirely) and expired `--until` patterns that are now dead weight.
 `--strict` exits non-zero when findings exist, so a fleet can run it in CI or
 cron and catch erosion as a finding instead of an incident.
 
+## Telemetry
+
+### `gang telemetry <status|show|on|off|reset>`
+
+Inspect or control the CLI's anonymous usage telemetry (full story:
+`TELEMETRY.md` at the repo root; design: ADR-026). Operator-side only —
+never `agent`/`join`/`relay`, never the field-triage commands — at most one
+request per UTC day, aggregate counts only, silent no-op when blocked.
+
+| Subcommand | Effect |
+|---|---|
+| `status` | Enabled/disabled (and which opt-out layer applies), anonymous id, last checkpoint day, endpoint. |
+| `show` | Print byte-for-byte the payload the next checkpoint would send. Sends nothing. |
+| `on` / `off` | Persist the choice in `config.toml`. **Use `off` for production fleets.** |
+| `reset` | Regenerate the anonymous id, clear pending counters. |
+
+Environment opt-outs (`DO_NOT_TRACK`, `GANG_TELEMETRY=off`, `CI`) always win
+over config. Binaries built with `--no-default-features` contain no
+telemetry code at all.
+
 ## HTTP egress, named exports, and credential slots (v2.5)
 
 Three additions that make Ganglion a substrate for API-integration
