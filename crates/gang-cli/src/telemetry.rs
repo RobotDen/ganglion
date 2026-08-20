@@ -458,9 +458,9 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
         // config.toml is preserved. A malformed file is an error, never a
         // silent overwrite of the user's configuration.
         let mut table: toml::Table = match std::fs::read_to_string(&path) {
-            Ok(text) => text
-                .parse()
-                .map_err(|e| anyhow::anyhow!("config.toml is not valid TOML ({e}); refusing to rewrite it"))?,
+            Ok(text) => text.parse().map_err(|e| {
+                anyhow::anyhow!("config.toml is not valid TOML ({e}); refusing to rewrite it")
+            })?,
             Err(_) => toml::Table::default(),
         };
         let telemetry = table
