@@ -187,10 +187,12 @@ mod imp {
         let Ok(text) = std::fs::read_to_string(path) else {
             return false;
         };
-        let Ok(value) = text.parse::<toml::Value>() else {
+        // NB: a TOML *document* parses to `toml::Table`, not `toml::Value`
+        // (Value::from_str rejects table content in toml 1.x).
+        let Ok(table) = text.parse::<toml::Table>() else {
             return false;
         };
-        value
+        table
             .get("telemetry")
             .and_then(|t| t.get("enabled"))
             .and_then(|e| e.as_bool())
@@ -452,15 +454,15 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
     /// everything else in the file.
     fn set_config_enabled(enabled: bool) -> anyhow::Result<()> {
         let path = gang_core::identity::default_config_dir().join("config.toml");
-        let mut value: toml::Value = match std::fs::read_to_string(&path) {
+        // Parse the existing DOCUMENT as a Table so every other setting in
+        // config.toml is preserved. A malformed file is an error, never a
+        // silent overwrite of the user's configuration.
+        let mut table: toml::Table = match std::fs::read_to_string(&path) {
             Ok(text) => text
                 .parse()
-                .unwrap_or(toml::Value::Table(Default::default())),
-            Err(_) => toml::Value::Table(Default::default()),
+                .map_err(|e| anyhow::anyhow!("config.toml is not valid TOML ({e}); refusing to rewrite it"))?,
+            Err(_) => toml::Table::default(),
         };
-        let table = value
-            .as_table_mut()
-            .ok_or_else(|| anyhow::anyhow!("config.toml is not a TOML table"))?;
         let telemetry = table
             .entry("telemetry")
             .or_insert(toml::Value::Table(Default::default()));
@@ -471,7 +473,7 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, toml::to_string_pretty(&value)?)?;
+        std::fs::write(&path, toml::to_string_pretty(&table)?)?;
         Ok(())
     }
 
@@ -554,6 +556,32 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
             assert!(version_is_newer("3.0.0-rc1", "2.9.0"));
             assert!(!version_is_newer("latest", "2.5.0"));
             assert!(!version_is_newer("", "2.5.0"));
+        }
+
+        #[test]
+        fn config_document_parses_as_table_and_off_preserves_other_settings() {
+            // Regression: toml::Value rejects document content in toml 1.x —
+            // the config check must parse a Table, and `telemetry off` must
+            // never clobber unrelated settings.
+            let text = "default_relay = \"/dns4/r/tcp/443\"\n\n[telemetry]\nenabled = false\n";
+            let table: toml::Table = text.parse().unwrap();
+            assert_eq!(
+                table
+                    .get("telemetry")
+                    .and_then(|t| t.get("enabled"))
+                    .and_then(|e| e.as_bool()),
+                Some(false)
+            );
+            // Round-trip preserves the unrelated key.
+            let mut table = table;
+            table
+                .get_mut("telemetry")
+                .and_then(|t| t.as_table_mut())
+                .unwrap()
+                .insert("enabled".into(), toml::Value::Boolean(true));
+            let out = toml::to_string_pretty(&table).unwrap();
+            assert!(out.contains("default_relay"));
+            assert!(out.contains("enabled = true"));
         }
 
         #[test]
