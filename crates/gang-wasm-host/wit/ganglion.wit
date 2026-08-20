@@ -192,6 +192,28 @@ interface metrics-emit {
     emit-batch: func(metrics: list<metric-point>) -> result<_, string>;
 }
 
+/// URL-pattern-allowlisted outbound HTTP — v0.5 (ADR-025).
+/// The URL and method of every call are validated against the component's
+/// own declared endpoints before the broker runs; the broker enforces
+/// scheme, size and time bounds, and never follows redirects.
+interface http-egress {
+    /// An HTTP response. The body is bounded by the broker's size cap.
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    /// Perform an outbound HTTP request. `method` is an HTTP verb;
+    /// endpoints declared `read-only` permit only GET and HEAD.
+    request: func(
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    ) -> result<http-response, string>;
+}
+
 /// The world that Ganglion capabilities target.
 /// A component imports whichever interfaces it needs.
 world ganglion-capability {
@@ -203,7 +225,12 @@ world ganglion-capability {
     import process-spawn;
     import network-probe;
     import metrics-emit;
+    import http-egress;
 
     /// The capability's entry point. Returns serialized result data.
+    /// The default entry point. Components implementing richer contracts
+    /// (e.g. an adapter lifecycle) may export ADDITIONAL named functions of
+    /// this same signature; the host invokes them by name (#42). `run` stays
+    /// the default when no export is named.
     export run: func(args: list<string>) -> result<list<u8>, string>;
 }

@@ -3,6 +3,7 @@ pub mod archetype;
 pub mod diagnostics;
 pub mod events;
 pub mod filesystem;
+pub mod http_egress;
 pub mod logs;
 pub mod metrics;
 pub mod network;

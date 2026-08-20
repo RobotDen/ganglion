@@ -194,10 +194,23 @@ enum Commands {
         )]
         version: String,
         /// Declared capability groups, comma-separated (e.g.
-        /// "diagnostics,logs,ros,fs,artifacts,process,network,metrics").
+        /// "diagnostics,logs,ros,fs,artifacts,process,network,metrics,http").
         /// If omitted, a permissive default set is used with a warning.
         #[arg(long, value_delimiter = ',')]
         capabilities: Option<Vec<String>>,
+        /// Declare an allowed HTTP endpoint URL pattern (repeatable; implies
+        /// the http group). Read-only (GET/HEAD) unless suffixed `:rw`, e.g.
+        /// `--http-endpoint "https://api.example.com/v1/**:rw"`. (ADR-025)
+        #[arg(long = "http-endpoint", value_name = "PATTERN[:rw]")]
+        http_endpoints: Vec<String>,
+        /// Credential slot names this component consumes, comma-separated
+        /// (#43). Bound to secret files robot-side in credentials.toml.
+        #[arg(long = "credential-slots", value_delimiter = ',')]
+        credential_slots: Vec<String>,
+        /// Exported entry points beyond the default `run`, comma-separated
+        /// (#42). Declarative, for pre-flight visibility.
+        #[arg(long, value_delimiter = ',')]
+        exports: Vec<String>,
     },
 
     /// Run the robot agent (for development/testing).
@@ -255,6 +268,10 @@ enum Commands {
         /// Overall timeout in seconds for a remote invocation (default: 30).
         #[arg(long, value_name = "SECS")]
         timeout: Option<u64>,
+        /// Invoke this exported function instead of the default `run` (#42).
+        /// The export must have the standard capability signature.
+        #[arg(long, value_name = "NAME")]
+        export: Option<String>,
     },
 
     /// List capabilities installed on a robot.
@@ -932,6 +949,9 @@ async fn main() -> anyhow::Result<()> {
             name,
             version,
             capabilities,
+            http_endpoints,
+            credential_slots,
+            exports,
         } => {
             reject_json(&cli.format, "sign")?;
             commands::sign(
@@ -940,6 +960,9 @@ async fn main() -> anyhow::Result<()> {
                 name.as_deref(),
                 &version,
                 capabilities.as_deref(),
+                &http_endpoints,
+                &credential_slots,
+                &exports,
             )
             .await?
         }
@@ -974,6 +997,7 @@ async fn main() -> anyhow::Result<()> {
             peer,
             relay,
             timeout,
+            export,
         } => {
             commands::run(
                 &robot,
@@ -982,6 +1006,7 @@ async fn main() -> anyhow::Result<()> {
                 peer.as_deref(),
                 relay.as_deref(),
                 timeout,
+                export.as_deref(),
                 &cli.format,
             )
             .await?

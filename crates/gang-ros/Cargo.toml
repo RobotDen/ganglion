@@ -26,6 +26,9 @@ glob-match = { workspace = true }
 hostname = "0.4"
 chrono = { workspace = true }
 blake3 = { workspace = true }
+ureq = { workspace = true }
+ciborium = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

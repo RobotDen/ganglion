@@ -386,6 +386,8 @@ mod tests {
             description: String::new(),
             tags: vec![],
             min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
         };
         let signed = SignedManifest::sign(&manifest, kp).unwrap();
 
@@ -533,6 +535,8 @@ mod tests {
             description: String::new(),
             tags: vec![],
             min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
         };
         let signed = SignedManifest::sign(&manifest, &kp).unwrap();
 

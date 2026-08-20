@@ -4,6 +4,33 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`ganglion:http/egress` — the ninth capability group (ADR-025).**
+  URL-pattern-allowlisted outbound HTTP for API-integration capabilities:
+  endpoints declared as URL globs with read_only (GET/HEAD) or read_write
+  access, gated by the policy engine like every other group, re-validated
+  per call against the component's own declaration (query strings stripped),
+  with host-side TLS, a 256 KiB response cap that errors rather than
+  truncates, a 10 s deadline, redirects returned as data (never followed),
+  and transport-owned headers refused. Path- and method-scoped — strictly
+  stronger than address allowlists. Closes #41.
+
+- **Named-export invocation.** `gang run <robot> <cap> --export <name>`
+  invokes a declared export instead of the default `run`; the runtime
+  resolves exports by name, the wire field is additive (old agents ignore
+  it), and manifests may declare their export set for pre-flight visibility
+  (`gang sign --exports`). The enabler for multi-operation capability
+  contracts such as adapter lifecycles. Closes #42.
+
+- **Credential slots.** Manifests declare slot names (`gang sign
+  --credential-slots`); robots bind slots to secret files in
+  `~/.gang/credentials.toml`; the agent re-reads the file at every invoke
+  (rotation without redeploy) and injects `GANG_CREDENTIAL_<SLOT>` into the
+  sandbox's otherwise-empty WASI environment. Values never enter manifests,
+  policy, logs, or the event feed; unbound slots are skipped loudly.
+  `gang policy check` lists slots and exports. Closes #43.
+
 ## [2.4.0] - 2026-08-15
 
 ### Added

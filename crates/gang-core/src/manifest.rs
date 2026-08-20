@@ -47,6 +47,17 @@ pub struct ComponentManifest {
     /// Minimum Ganglion version required (v2.0).
     #[serde(default)]
     pub min_ganglion_version: Option<String>,
+    /// Credential slot names this component consumes (#43). The robot binds
+    /// slots to secret files locally; values are injected into the sandbox
+    /// as environment variables and never appear in manifests, policy, logs,
+    /// or the event feed. Additive: absent in older manifests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_slots: Vec<String>,
+    /// Exported entry points beyond the default `run` (#42), for pre-flight
+    /// visibility. Purely declarative; the host resolves exports by name at
+    /// invoke time. Additive: absent in older manifests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exports: Vec<String>,
 }
 
 fn default_schema_version() -> String {
@@ -264,6 +275,8 @@ mod tests {
             description: "A test capability".into(),
             tags: vec!["test".into()],
             min_ganglion_version: Some("0.4.0".into()),
+            credential_slots: vec![],
+            exports: vec![],
         }
     }
 

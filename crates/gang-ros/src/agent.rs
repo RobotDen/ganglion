@@ -83,6 +83,9 @@ pub struct RobotAgent {
 
     /// Interval between policy re-sync sweeps; zero disables the sweep.
     policy_resync_interval: Duration,
+
+    /// Credential slot bindings file (#43), consulted at every invoke.
+    credentials_path: Option<PathBuf>,
 }
 
 /// Configuration for the robot agent.
@@ -100,6 +103,12 @@ pub struct AgentConfig {
     /// `--until` timed grant expired, or a rule was narrowed). 0 disables
     /// the sweep.
     pub policy_resync_interval_secs: u64,
+    /// Credential slot bindings file (#43): TOML mapping declared slot names
+    /// to secret file paths, e.g. `[slots]\n"api.token" = "/etc/gang/secret"`.
+    /// Files are re-read at every invoke, so rotation needs no redeploy.
+    /// `None` (or a missing file) binds nothing — declared-but-unbound slots
+    /// are simply not injected.
+    pub credentials_path: Option<PathBuf>,
 }
 
 impl Default for AgentConfig {
@@ -112,6 +121,7 @@ impl Default for AgentConfig {
             audit_log_path: PathBuf::from("/var/lib/gang/audit.log"),
             audit_max_size_bytes: 50 * 1024 * 1024, // 50 MB
             policy_resync_interval_secs: 60,
+            credentials_path: None,
             fs_allowed_patterns: vec![FsRule {
                 pattern: "/tmp/gang/**".into(),
                 read: true,
@@ -192,6 +202,10 @@ impl RobotAgent {
         );
         brokers.insert("ganglion:logs/stream".into(), log_broker.clone());
         brokers.insert("ganglion:fs/bounded".into(), fs_broker.clone());
+        brokers.insert(
+            "ganglion:http/egress".into(),
+            Arc::new(crate::http_egress::HttpEgressBroker::new()),
+        );
         let runtime = Arc::new(gang_wasm_host::runtime::ComponentRuntime::new(
             engine, brokers,
         )?);
@@ -221,6 +235,7 @@ impl RobotAgent {
             started_at: Instant::now(),
             policy_path: config.policy_path,
             policy_resync_interval: Duration::from_secs(config.policy_resync_interval_secs),
+            credentials_path: config.credentials_path,
         };
 
         // Load any previously installed capabilities (CODE-21: propagate errors).
@@ -393,6 +408,7 @@ impl RobotAgent {
             installed_at: chrono::Utc::now(),
             component_path: wasm_path,
             manifest_path,
+            credential_slots: manifest.credential_slots,
             deployed_by: Some(deployer.clone()),
         };
 
@@ -526,11 +542,70 @@ impl RobotAgent {
     /// Prefer WASM execution when component bytes are available. Fall back to
     /// direct broker invocation for non-WASM capabilities (e.g., when the
     /// component file is missing or contains placeholder bytes from testing).
+    /// Resolve declared credential slots (#43) to (env-name, value) pairs
+    /// from the bindings file. Secret files are re-read on every call so
+    /// rotation needs no redeploy. Declared-but-unbound slots are skipped
+    /// with a warning (the component sees a missing variable); values are
+    /// NEVER logged. Env name: `GANG_CREDENTIAL_<SLOT>` with `.`/`-` mapped
+    /// to `_` and uppercased.
+    fn resolve_credentials(&self, slots: &[String]) -> Vec<(String, String)> {
+        if slots.is_empty() {
+            return Vec::new();
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct Bindings {
+            #[serde(default)]
+            slots: std::collections::HashMap<String, String>,
+        }
+        let bindings: Bindings = self
+            .credentials_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for slot in slots {
+            let Some(path) = bindings.slots.get(slot) else {
+                warn!(slot = %slot, "credential slot declared but not bound — not injected");
+                continue;
+            };
+            match std::fs::read_to_string(path) {
+                Ok(value) => {
+                    let env_name = format!(
+                        "GANG_CREDENTIAL_{}",
+                        slot.to_uppercase().replace(['.', '-'], "_")
+                    );
+                    out.push((env_name, value.trim_end_matches('\n').to_string()));
+                }
+                Err(e) => {
+                    warn!(slot = %slot, "credential file unreadable — not injected: {e}");
+                }
+            }
+        }
+        out
+    }
+
     pub async fn invoke_capability(
         &self,
         name: &str,
         args: &[String],
         operator_peer_id: &PeerId,
+    ) -> Result<Vec<u8>, anyhow::Error> {
+        self.invoke_capability_export(name, args, operator_peer_id, None)
+            .await
+    }
+
+    /// [`RobotAgent::invoke_capability`] with an explicit export name (#42):
+    /// `None` calls the component's default `run` export; `Some(name)` calls
+    /// that exported function (same standard signature). Credential slots
+    /// (#43) declared by the manifest are resolved from the bindings file
+    /// and injected as sandbox-only environment on every path.
+    pub async fn invoke_capability_export(
+        &self,
+        name: &str,
+        args: &[String],
+        operator_peer_id: &PeerId,
+        export: Option<&str>,
     ) -> Result<Vec<u8>, anyhow::Error> {
         let caps = self.capabilities.read().await;
         let cap = caps
@@ -596,14 +671,20 @@ impl RobotAgent {
             // SEC-06: the shared runtime already holds the agent's real,
             // configured broker instances — no permissive brokers are
             // synthesized here.
+            // #43: resolve declared credential slots to values, re-reading
+            // the secret files at every invoke (rotation without redeploy).
+            // Values are sandbox-only; they are never logged or evented.
+            let credentials = self.resolve_credentials(&cap.credential_slots);
             let result = self
                 .runtime
-                .invoke(
+                .invoke_export(
                     &wasm_bytes,
                     &cap.component_hash,
                     cap.declared_capabilities.clone(),
                     &limits,
                     args.to_vec(),
+                    export,
+                    &credentials,
                 )
                 .await;
 
@@ -1083,8 +1164,12 @@ impl RobotAgent {
                         name,
                         args,
                         request_id,
+                        export,
                         ..
-                    } => match agent.invoke_capability(&name, &args, &remote_peer).await {
+                    } => match agent
+                        .invoke_capability_export(&name, &args, &remote_peer, export.as_deref())
+                        .await
+                    {
                         Ok(output) => ControlMessage::InvokeResult {
                             request_id,
                             status: InvokeStatus::Success,
@@ -1378,6 +1463,7 @@ impl RobotAgent {
                 installed_at: chrono::Utc::now(),
                 component_path: wasm_path,
                 manifest_path,
+                credential_slots: manifest.credential_slots,
                 // The deployer identity is not persisted; the policy re-sync
                 // sweep re-judges capability rules only for disk-loaded caps.
                 deployed_by: None,
@@ -1548,6 +1634,7 @@ mod tests {
             }],
             log_allowed_sources: vec!["**".into()],
             policy_resync_interval_secs: 0, // tests drive resync explicitly
+            credentials_path: None,
         }
     }
 
@@ -1655,6 +1742,8 @@ can_deploy = true
             description: String::new(),
             tags: vec![],
             min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
         };
         let signed = SignedManifest::sign(&manifest, &kp).unwrap();
         let manifest_cbor = signed.to_cbor().unwrap();
@@ -1706,6 +1795,8 @@ can_deploy = true
             description: String::new(),
             tags: vec![],
             min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
         };
         let signed = SignedManifest::sign(&manifest, &kp).unwrap();
         agent
@@ -1763,6 +1854,8 @@ can_deploy = true
             description: String::new(),
             tags: vec![],
             min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
         };
 
         let signed = SignedManifest::sign(&manifest, &operator_kp).unwrap();
@@ -1825,6 +1918,8 @@ can_deploy = true
             description: String::new(),
             tags: vec![],
             min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
         };
         let signed = SignedManifest::sign(&manifest, &untrusted_kp).unwrap();
         let manifest_cbor = signed.to_cbor().unwrap();
@@ -1859,6 +1954,8 @@ can_deploy = true
             description: String::new(),
             tags: vec![],
             min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
         };
         let signed = SignedManifest::sign(&manifest, kp).unwrap();
         let manifest_cbor = signed.to_cbor().unwrap();
@@ -1919,6 +2016,8 @@ can_deploy = true
             description: String::new(),
             tags: vec![],
             min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
         };
         let signed = SignedManifest::sign(&manifest, kp).unwrap();
         agent
@@ -2011,6 +2110,45 @@ can_deploy = true
             .await;
         assert!(revoked.is_empty());
         assert_eq!(agent.list_capabilities().await.len(), 1);
+    }
+
+    // --- #43: credential slots ---
+
+    #[tokio::test]
+    async fn credential_slots_resolve_and_rotate_without_redeploy() {
+        let dir = TempDir::new().unwrap();
+        let secret = dir.path().join("api-token");
+        std::fs::write(&secret, "first-value\n").unwrap();
+        let bindings = dir.path().join("credentials.toml");
+        std::fs::write(
+            &bindings,
+            format!("[slots]\n\"api.token\" = \"{}\"\n", secret.display()),
+        )
+        .unwrap();
+        let mut config = test_config(dir.path());
+        config.credentials_path = Some(bindings);
+        let agent = RobotAgent::new(config).unwrap();
+
+        // Declared + bound: injected with the canonical env name, newline
+        // trimmed. Declared-but-unbound: skipped, never invented.
+        let creds =
+            agent.resolve_credentials(&["api.token".to_string(), "unbound.slot".to_string()]);
+        assert_eq!(
+            creds,
+            vec![(
+                "GANG_CREDENTIAL_API_TOKEN".to_string(),
+                "first-value".to_string()
+            )]
+        );
+
+        // Rotation: overwrite the secret file, resolve again — no redeploy,
+        // no restart, new value.
+        std::fs::write(&secret, "rotated-value").unwrap();
+        let creds = agent.resolve_credentials(&["api.token".to_string()]);
+        assert_eq!(creds[0].1, "rotated-value");
+
+        // No declared slots: nothing read, nothing injected.
+        assert!(agent.resolve_credentials(&[]).is_empty());
     }
 
     // --- SEC-01: fail-closed policy / trust-store loading ---

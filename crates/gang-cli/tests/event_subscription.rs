@@ -121,6 +121,7 @@ fn base_agent_config(dir: &Path) -> AgentConfig {
         audit_log_path: dir.join("audit.log"),
         audit_max_size_bytes: 10 * 1024 * 1024,
         policy_resync_interval_secs: 0,
+        credentials_path: None,
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", dir.display()),
             read: true,
@@ -256,6 +257,8 @@ fn signed_manifest(
         description: String::new(),
         tags: vec![],
         min_ganglion_version: None,
+        credential_slots: vec![],
+        exports: vec![],
     };
     SignedManifest::sign(&manifest, author)
         .expect("sign")
@@ -295,6 +298,7 @@ async fn invoke(operator: &Libp2pTransportAdapter, robot: &PeerId, name: &str) {
         args: vec![],
         request_id: fresh_nonce(),
         nonce: fresh_nonce(),
+        export: None,
         timestamp_ms: unix_millis_now(),
     };
     let bytes = encode_message(&msg).unwrap();

@@ -1217,6 +1217,48 @@ policy file entirely) and expired `--until` patterns that are now dead weight.
 `--strict` exits non-zero when findings exist, so a fleet can run it in CI or
 cron and catch erosion as a finding instead of an incident.
 
+## HTTP egress, named exports, and credential slots (v2.5)
+
+Three additions that make Ganglion a substrate for API-integration
+capabilities (ADR-025; #41 #42 #43):
+
+**`ganglion:http/egress`** — a component declares URL patterns with an access
+level; `read_only` permits GET/HEAD, `read_write` any method. Policy gates the
+declaration like every other group (`gang policy allow ganglion:http/egress
+"https://api.example.com/**"`, `max_access` caps methods); every call is
+re-validated against the component's own declaration with query strings
+stripped, and the broker enforces mechanics: TLS host-side, 256 KiB response
+cap (over-limit is an error, never a truncation), 10 s deadline, redirects
+returned as data rather than followed, transport-owned headers refused.
+
+```bash
+gang sign tool.wasm --capabilities http \
+    --http-endpoint "https://api.example.com/v1/**" \
+    --http-endpoint "https://hooks.example.com/notify:rw"
+```
+
+**Named exports (`gang run <robot> <cap> --export <name>`)** — invoke a
+declared export instead of the default `run`; every export shares the standard
+`func(args: list<string>) -> result<list<u8>, string>` signature. Declare them
+for pre-flight visibility with `gang sign --exports health,observe,execute`.
+The wire message field is additive: old agents ignore it, old operators never
+send it.
+
+**Credential slots** — the manifest names slots (`gang sign
+--credential-slots api.token`); the robot binds them in
+`~/.gang/credentials.toml`:
+
+```toml
+[slots]
+"api.token" = "/etc/gang/secrets/api-token"
+```
+
+At every invoke the agent re-reads the secret file (rotation needs no
+redeploy) and injects `GANG_CREDENTIAL_API_TOKEN` into the sandbox's
+otherwise-empty WASI environment. Values never appear in manifests, policy,
+logs, or the event feed; declared-but-unbound slots are skipped with a
+warning. `gang policy check` lists a component's slots and exports.
+
 ## Configuration
 
 ### `gang config show`

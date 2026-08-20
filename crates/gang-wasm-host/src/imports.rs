@@ -40,6 +40,7 @@ pub fn register_capability_imports(linker: &mut Linker<CapabilityHost>) -> anyho
     register_process_spawn(linker)?;
     register_network_probe(linker)?;
     register_metrics_emit(linker)?;
+    register_http_egress(linker)?;
     Ok(())
 }
 
@@ -1111,6 +1112,121 @@ fn extract_metric_points_batch(val: &Val) -> Vec<gang_core::broker::MetricPoint>
             .collect(),
         _ => Vec::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// ganglion:capability/http-egress@0.5.0 (ADR-025)
+// ---------------------------------------------------------------------------
+
+/// Set the WIT `result<http-response, string>` from a broker response whose
+/// data is CBOR-encoded [`gang_core::broker::HttpResponseData`] (binary-safe,
+/// unlike the JSON path the other converters share).
+fn set_http_result(results: &mut [Val], resp: Result<CapabilityResponse, String>) {
+    let outcome = match resp {
+        Ok(r) if r.success => http_response_val(&r.data),
+        Ok(r) => Err(r.error.unwrap_or_else(|| "broker returned failure".into())),
+        Err(e) => Err(e),
+    };
+    match outcome {
+        Ok(val) => results[0] = Val::Result(Ok(Some(Box::new(val)))),
+        Err(msg) => results[0] = Val::Result(Err(Some(Box::new(Val::String(msg))))),
+    }
+}
+
+/// Convert an [`HttpResponseData`] (CBOR in `CapabilityResponse::data`) into
+/// the WIT `http-response` record shape.
+fn http_response_val(data: &[u8]) -> Result<Val, String> {
+    let resp: gang_core::broker::HttpResponseData =
+        ciborium::from_reader(data).map_err(|e| format!("malformed broker response: {e}"))?;
+    Ok(Val::Record(vec![
+        ("status".into(), Val::U16(resp.status)),
+        (
+            "headers".into(),
+            Val::List(
+                resp.headers
+                    .into_iter()
+                    .map(|(k, v)| Val::Tuple(vec![Val::String(k), Val::String(v)]))
+                    .collect(),
+            ),
+        ),
+        (
+            "body".into(),
+            Val::List(resp.body.into_iter().map(Val::U8).collect()),
+        ),
+    ]))
+}
+
+fn register_http_egress(linker: &mut Linker<CapabilityHost>) -> anyhow::Result<()> {
+    let iface = format!("ganglion:capability/http-egress@{WIT_VERSION}");
+    let mut inst = linker.instance(&iface).context("registering http-egress")?;
+    const GROUP: &str = "ganglion:http/egress";
+
+    // request: func(method, url, headers, body) -> result<http-response, string>
+    inst.func_new_async("request", |caller, params, results| {
+        let (declared, broker) = extract_broker_state(&caller, GROUP);
+        // ADR-025 layer 1: per-call validation of URL + method against the
+        // calling component's OWN declared endpoints, before the broker runs.
+        let endpoints = caller.data().declared_http_endpoints();
+        let method = match &params[0] {
+            Val::String(s) => s.to_ascii_uppercase(),
+            _ => return Box::new(async { bail!("expected string for method") }),
+        };
+        let url = match &params[1] {
+            Val::String(s) => s.clone(),
+            _ => return Box::new(async { bail!("expected string for url") }),
+        };
+        let headers: Vec<(String, String)> = match &params[2] {
+            Val::List(items) => items
+                .iter()
+                .filter_map(|v| match v {
+                    Val::Tuple(kv) => match (kv.first(), kv.get(1)) {
+                        (Some(Val::String(k)), Some(Val::String(v))) => {
+                            Some((k.clone(), v.clone()))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect(),
+            _ => return Box::new(async { bail!("expected list for headers") }),
+        };
+        let body: Vec<u8> = match &params[3] {
+            Val::List(items) => items
+                .iter()
+                .filter_map(|v| match v {
+                    Val::U8(b) => Some(*b),
+                    _ => None,
+                })
+                .collect(),
+            _ => return Box::new(async { bail!("expected list<u8> for body") }),
+        };
+        Box::new(async move {
+            let permitted =
+                gang_core::capability::http_request_permitted(&endpoints, &method, &url);
+            let resp = if !permitted {
+                Err(format!(
+                    "http egress denied: {method} {url} is not covered by the \
+                     component's declared endpoints"
+                ))
+            } else {
+                call_broker(
+                    GROUP,
+                    declared,
+                    broker,
+                    BrokerOperation::HttpRequest {
+                        method,
+                        url,
+                        headers,
+                        body,
+                    },
+                )
+                .await
+            };
+            set_http_result(results, resp);
+            Ok(())
+        })
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]

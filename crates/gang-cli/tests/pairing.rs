@@ -295,6 +295,7 @@ fn agent_config(dir: &Path) -> AgentConfig {
         audit_log_path: dir.join("audit.log"),
         audit_max_size_bytes: 10 * 1024 * 1024,
         policy_resync_interval_secs: 0,
+        credentials_path: None,
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", dir.display()),
             read: true,
@@ -424,6 +425,8 @@ async fn pairing_happy_path_records_wire_authenticated_id_and_enables_deploy() {
         description: String::new(),
         tags: vec![],
         min_ganglion_version: None,
+        credential_slots: vec![],
+        exports: vec![],
     };
     let manifest_cbor = SignedManifest::sign(&manifest, &op_key)
         .unwrap()

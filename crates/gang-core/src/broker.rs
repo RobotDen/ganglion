@@ -177,6 +177,34 @@ pub enum BrokerOperation {
         /// The metric points to emit.
         metrics: Vec<MetricPoint>,
     },
+
+    // --- HTTP egress (v0.5, ADR-025) ---
+    /// Perform an outbound HTTP request. The URL and method have already been
+    /// validated against the calling component's declared endpoints at the
+    /// imports layer; the broker enforces mechanics (scheme, size and time
+    /// bounds, no redirect following, header hygiene).
+    HttpRequest {
+        /// HTTP method (uppercase).
+        method: String,
+        /// Absolute URL.
+        url: String,
+        /// Request headers.
+        headers: Vec<(String, String)>,
+        /// Request body (empty for body-less methods).
+        body: Vec<u8>,
+    },
+}
+
+/// Response payload for [`BrokerOperation::HttpRequest`], CBOR-encoded into
+/// [`CapabilityResponse::data`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpResponseData {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers.
+    pub headers: Vec<(String, String)>,
+    /// Response body, bounded by the broker's size cap.
+    pub body: Vec<u8>,
 }
 
 /// A single metric data point for batch emission.

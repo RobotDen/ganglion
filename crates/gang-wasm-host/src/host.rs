@@ -56,13 +56,30 @@ impl CapabilityHost {
         brokers: HashMap<String, Arc<dyn CapabilityBroker>>,
         declared_capabilities: Vec<CapabilityGroup>,
     ) -> Self {
+        Self::new_with_env(brokers, declared_capabilities, &[])
+    }
+
+    /// [`Self::new`] with explicit environment variables visible INSIDE the
+    /// sandbox only — the credential-slot delivery path (#43). The WASI
+    /// context is otherwise deny-by-default; these are the sole env entries
+    /// a component ever sees, and their values must never be logged or
+    /// emitted on the event feed by callers.
+    pub fn new_with_env(
+        brokers: HashMap<String, Arc<dyn CapabilityBroker>>,
+        declared_capabilities: Vec<CapabilityGroup>,
+        env: &[(String, String)],
+    ) -> Self {
         let stdout_pipe = MemoryOutputPipe::new(STDIO_CAPTURE_BYTES);
         let stderr_pipe = MemoryOutputPipe::new(STDIO_CAPTURE_BYTES);
         let mut wasi_builder = WasiCtxBuilder::new();
         wasi_builder.stdout(stdout_pipe.clone());
         wasi_builder.stderr(stderr_pipe.clone());
+        for (k, v) in env {
+            wasi_builder.env(k, v);
+        }
         // Everything else stays at the deny-by-default builder settings:
-        // stdin closed, no env, no args, no preopens, sockets deny-all.
+        // stdin closed, no args, no preopens, sockets deny-all. env is empty
+        // unless credential slots were explicitly injected above.
         let wasi = wasi_builder.build();
         Self {
             brokers,
@@ -97,6 +114,21 @@ impl CapabilityHost {
         self.declared_capabilities
             .iter()
             .any(|g| g.name() == group_name)
+    }
+
+    /// The calling component's declared HTTP egress endpoints (ADR-025).
+    /// Empty when the group is undeclared — which the declaration check
+    /// rejects before this is consulted.
+    pub fn declared_http_endpoints(&self) -> Vec<gang_core::capability::AccessPattern> {
+        self.declared_capabilities
+            .iter()
+            .find_map(|g| match g {
+                gang_core::capability::CapabilityGroup::HttpEgress { endpoints, .. } => {
+                    Some(endpoints.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     /// Route a broker operation to the appropriate broker.

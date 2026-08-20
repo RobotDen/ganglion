@@ -160,6 +160,12 @@ impl Policy {
                     max_access: None,
                     timed_patterns: Vec::new(),
                 },
+                CapabilityRule {
+                    group: "ganglion:http/egress".into(),
+                    allowed_patterns: vec!["**".into()],
+                    max_access: Some("read_write".into()),
+                    timed_patterns: Vec::new(),
+                },
             ],
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
@@ -261,6 +267,25 @@ impl Policy {
                                 "{} (read_write exceeds max read_only)",
                                 pattern.pattern
                             ),
+                        });
+                    }
+                }
+            }
+            CapabilityGroup::HttpEgress { endpoints, .. } => {
+                for ep in endpoints {
+                    if !pattern_matches_any(&ep.pattern, &effective) {
+                        return Err(PolicyError::PatternExceedsPolicy {
+                            capability: group_name.into(),
+                            pattern: ep.pattern.clone(),
+                        });
+                    }
+                    if ep.access == RosAccess::ReadWrite
+                        && let Some(max) = &rule.max_access
+                        && max == "read_only"
+                    {
+                        return Err(PolicyError::PatternExceedsPolicy {
+                            capability: group_name.into(),
+                            pattern: format!("{} (read_write exceeds max read_only)", ep.pattern),
                         });
                     }
                 }
@@ -611,6 +636,16 @@ impl Policy {
                     (p.pattern.clone(), Some(access.to_string()))
                 })
                 .collect(),
+            CapabilityGroup::HttpEgress { endpoints, .. } => endpoints
+                .iter()
+                .map(|p| {
+                    let access = match p.access {
+                        RosAccess::ReadWrite => "read_write",
+                        RosAccess::ReadOnly => "read_only",
+                    };
+                    (p.pattern.clone(), Some(access.to_string()))
+                })
+                .collect(),
             CapabilityGroup::LogStream { patterns, .. } => {
                 patterns.iter().map(|p| (p.clone(), None)).collect()
             }
@@ -897,6 +932,58 @@ mod tests {
         assert!(
             per_op < std::time::Duration::from_micros(50),
             "evaluate_at regressed to {per_op:?}/op (ceiling 50µs)"
+        );
+    }
+
+    #[test]
+    fn http_egress_policy_gates_patterns_and_access() {
+        use crate::capability::AccessPattern;
+        let policy = open_peer_policy(vec![CapabilityRule {
+            group: "ganglion:http/egress".into(),
+            allowed_patterns: vec!["https://api.example.com/**".into()],
+            max_access: Some("read_only".into()),
+            timed_patterns: Vec::new(),
+        }]);
+        let peer = Keypair::generate().peer_id();
+        let declare = |pattern: &str, access: RosAccess| {
+            vec![CapabilityGroup::HttpEgress {
+                version: "1.0".into(),
+                endpoints: vec![AccessPattern {
+                    pattern: pattern.into(),
+                    access,
+                }],
+            }]
+        };
+        // Covered read-only endpoint: permitted.
+        assert!(
+            policy
+                .evaluate_at(
+                    &declare("https://api.example.com/v1/**", RosAccess::ReadOnly),
+                    &peer,
+                    T0
+                )
+                .is_ok()
+        );
+        // Uncovered host: denied, with the pattern named in the remedy.
+        let denied = declare("https://elsewhere.example.com/**", RosAccess::ReadOnly);
+        assert!(policy.evaluate_at(&denied, &peer, T0).is_err());
+        let report = policy.explain_at(&denied, &peer, T0).unwrap();
+        assert_eq!(
+            report.pattern.as_deref(),
+            Some("https://elsewhere.example.com/**")
+        );
+        // read_write exceeds the rule's read_only ceiling: denied.
+        let rw = declare("https://api.example.com/v1/**", RosAccess::ReadWrite);
+        assert!(policy.evaluate_at(&rw, &peer, T0).is_err());
+        // No rule for the group at all: default deny.
+        let bare = open_peer_policy(vec![]);
+        assert!(
+            bare.evaluate_at(
+                &declare("https://api.example.com/v1/**", RosAccess::ReadOnly),
+                &peer,
+                T0
+            )
+            .is_err()
         );
     }
 

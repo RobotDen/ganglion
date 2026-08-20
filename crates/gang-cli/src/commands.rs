@@ -1490,6 +1490,18 @@ pub async fn policy_check(
                 deployer,
                 path.display()
             );
+            if !manifest.credential_slots.is_empty() {
+                println!(
+                    "Credential slots (bind in credentials.toml on the robot): {}",
+                    manifest.credential_slots.join(", ")
+                );
+            }
+            if !manifest.exports.is_empty() {
+                println!(
+                    "Declared exports (invoke with gang run --export): run, {}",
+                    manifest.exports.join(", ")
+                );
+            }
             if !exists {
                 println!(
                     "\nNOTE: no policy file — the agent would run PERMISSIVE (dev mode) \
@@ -2330,22 +2342,33 @@ fn parse_capability_group(spec: &str) -> anyhow::Result<gang_core::capability::C
             allowed_commands: vec![],
         },
         "network" | "ganglion:network/probe" => CapabilityGroup::NetworkProbe { version },
+        // Bare "http" declares the group with NO endpoints — the component
+        // can call nothing until endpoints are declared (use `gang sign
+        // --http-endpoint`). Safe-by-default, never wide-open.
+        "http" | "ganglion:http/egress" => CapabilityGroup::HttpEgress {
+            version,
+            endpoints: vec![],
+        },
         "metrics" | "ganglion:metrics/emit" => CapabilityGroup::MetricsEmit { version },
         other => anyhow::bail!(
             "unknown capability group '{other}'. Valid: diagnostics, logs, ros, fs, \
-             artifacts, process, network, metrics"
+             artifacts, process, network, metrics, http"
         ),
     };
     Ok(group)
 }
 
 /// `gang sign`
+#[allow(clippy::too_many_arguments)] // mirrors the CLI flag surface 1:1
 pub async fn sign(
     wasm_path: &str,
     key_path: Option<&str>,
     name: Option<&str>,
     version: &str,
     capabilities: Option<&[String]>,
+    http_endpoints: &[String],
+    credential_slots: &[String],
+    exports: &[String],
 ) -> anyhow::Result<()> {
     use gang_core::capability::CapabilityGroup;
     use gang_core::manifest::{ComponentManifest, ResourceLimits, SignedManifest};
@@ -2405,6 +2428,41 @@ pub async fn sign(
         }
     };
 
+    // --http-endpoint PATTERN[:rw] entries: fold into an HttpEgress group,
+    // merging with (or creating) one declared via --capabilities http.
+    let mut declared_capabilities = declared_capabilities;
+    if !http_endpoints.is_empty() {
+        use gang_core::capability::{AccessPattern, RosAccess};
+        let endpoints: Vec<AccessPattern> = http_endpoints
+            .iter()
+            .map(|spec| {
+                let (pattern, access) = match spec.strip_suffix(":rw") {
+                    Some(p) => (p, RosAccess::ReadWrite),
+                    None => (spec.as_str(), RosAccess::ReadOnly),
+                };
+                anyhow::ensure!(
+                    pattern.starts_with("https://") || pattern.starts_with("http://"),
+                    "--http-endpoint must be an http(s) URL pattern (got \"{pattern}\")"
+                );
+                Ok(AccessPattern {
+                    pattern: pattern.to_string(),
+                    access,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let existing = declared_capabilities.iter_mut().find_map(|g| match g {
+            CapabilityGroup::HttpEgress { endpoints, .. } => Some(endpoints),
+            _ => None,
+        });
+        match existing {
+            Some(eps) => eps.extend(endpoints),
+            None => declared_capabilities.push(CapabilityGroup::HttpEgress {
+                version: "1.0".into(),
+                endpoints,
+            }),
+        }
+    }
+
     let manifest = ComponentManifest {
         schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
         name: name.clone(),
@@ -2417,6 +2475,8 @@ pub async fn sign(
         description: String::new(),
         tags: vec![],
         min_ganglion_version: None,
+        credential_slots: credential_slots.to_vec(),
+        exports: exports.to_vec(),
     };
 
     let signed = SignedManifest::sign(&manifest, &keypair)?;
@@ -2467,6 +2527,7 @@ pub async fn agent(
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
+        credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -2727,6 +2788,7 @@ pub async fn deploy(
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
+        credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -2771,6 +2833,7 @@ pub async fn run(
     explicit_peer: Option<&str>,
     explicit_relay: Option<&str>,
     timeout_secs: Option<u64>,
+    export: Option<&str>,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
     use gang_core::message::{ControlMessage, InvokeStatus};
@@ -2791,6 +2854,7 @@ pub async fn run(
             request_id: request_id.clone(),
             nonce: gang_core::message::fresh_nonce(),
             timestamp_ms: gang_core::message::unix_millis_now(),
+            export: export.map(str::to_string),
         };
 
         let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(CONTROL_TIMEOUT_SECS));
@@ -2835,6 +2899,7 @@ pub async fn run(
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
+        credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -2848,7 +2913,7 @@ pub async fn run(
         gang_core::identity::Keypair::load_or_generate(&gang_core::identity::default_key_path())?;
 
     let output = agent
-        .invoke_capability(cap_name, args, &operator_kp.peer_id())
+        .invoke_capability_export(cap_name, args, &operator_kp.peer_id(), export)
         .await?;
 
     match format {
@@ -2940,6 +3005,7 @@ pub async fn caps(
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
+        credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         fs_allowed_patterns: vec![],
         log_allowed_sources: vec![],
     };
@@ -3015,6 +3081,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
+        credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,
@@ -3052,6 +3119,8 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
         description: "System diagnostics".into(),
         tags: vec!["diagnostics".into()],
         min_ganglion_version: None,
+        credential_slots: vec![],
+        exports: vec![],
     };
 
     let signed = SignedManifest::sign(&manifest, &keypair)?;
@@ -3306,6 +3375,7 @@ pub async fn up(
         audit_log_path: robot_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
+        credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", robot_dir.display()),
             read: true,
@@ -3378,6 +3448,8 @@ pub async fn up(
         description: "System diagnostics (gang up sample)".into(),
         tags: vec!["diagnostics".into()],
         min_ganglion_version: None,
+        credential_slots: vec![],
+        exports: vec![],
     };
     let signed = SignedManifest::sign(&manifest, &operator)?;
     let sample_manifest = sample_wasm.with_extension("manifest.cbor");
@@ -3992,6 +4064,7 @@ pub async fn join(
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
         policy_resync_interval_secs: 60,
+        credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         fs_allowed_patterns: vec![FsRule {
             pattern: format!("{}/**", data_dir.display()),
             read: true,

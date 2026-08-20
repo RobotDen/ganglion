@@ -272,6 +272,37 @@ impl ComponentRuntime {
         limits: &ResourceLimits,
         args: Vec<String>,
     ) -> Result<ComponentResult, InvocationError> {
+        self.invoke_export(
+            component_bytes,
+            component_hash,
+            declared_capabilities,
+            limits,
+            args,
+            None,
+            &[],
+        )
+        .await
+    }
+
+    /// [`Self::invoke`] with an explicit export name (#42) and sandbox-only
+    /// environment entries for credential slots (#43).
+    ///
+    /// `export` selects which exported function to call — it must have the
+    /// standard `func(args: list<string>) -> result<list<u8>, string>`
+    /// signature; `None` calls the default `run` export. `credentials` are
+    /// injected as WASI environment variables visible only inside the
+    /// sandbox; values must never be logged by callers.
+    #[allow(clippy::too_many_arguments)] // mirrors the dispatch surface 1:1
+    pub async fn invoke_export(
+        &self,
+        component_bytes: &[u8],
+        component_hash: &str,
+        declared_capabilities: Vec<CapabilityGroup>,
+        limits: &ResourceLimits,
+        args: Vec<String>,
+        export: Option<&str>,
+        credentials: &[(String, String)],
+    ) -> Result<ComponentResult, InvocationError> {
         let start = Instant::now();
 
         // SEC-04: derive a linear-memory ceiling from the manifest, clamped to
@@ -282,8 +313,9 @@ impl ComponentRuntime {
             .memory_size(memory_bytes)
             .build();
 
-        let host = CapabilityHost::new(self.brokers.clone(), declared_capabilities)
-            .with_limits(store_limits);
+        let host =
+            CapabilityHost::new_with_env(self.brokers.clone(), declared_capabilities, credentials)
+                .with_limits(store_limits);
 
         // Create the Wasmtime Store with our host state
         let mut store = wasmtime::Store::new(self.engine.engine(), host);
@@ -321,11 +353,14 @@ impl ComponentRuntime {
                 }
             })?;
 
-        // Look for the `run` export
-        let run_func = instance.get_func(&mut store, "run").ok_or_else(|| {
-            InvocationError::InstantiationFailed(
-                "component does not export a 'run' function".into(),
-            )
+        // Resolve the requested export (default: `run`). Named exports share
+        // the standard signature; the lookup is by-name against whatever the
+        // component's world actually exports (#42).
+        let export_name = export.unwrap_or("run");
+        let run_func = instance.get_func(&mut store, export_name).ok_or_else(|| {
+            InvocationError::InstantiationFailed(format!(
+                "component does not export a '{export_name}' function"
+            ))
         })?;
 
         // Prepare arguments
@@ -518,6 +553,120 @@ mod tests {
       (realloc (func $i "cabi_realloc")))))"#
         );
         wat::parse_str(&wat).expect("component wat parses")
+    }
+
+    /// Like [`wasi_importing_component`] but exporting TWO entry points —
+    /// `run` returning `payload_run` and `observe` returning
+    /// `payload_observe` — to prove named-export dispatch (#42).
+    fn dual_export_component(payload_run: &[u8], payload_observe: &[u8]) -> Vec<u8> {
+        let data_run: String = payload_run.iter().map(|b| format!("\\{b:02x}")).collect();
+        let data_obs: String = payload_observe
+            .iter()
+            .map(|b| format!("\\{b:02x}"))
+            .collect();
+        let (len_run, len_obs) = (payload_run.len(), payload_observe.len());
+        let wat = format!(
+            r#"(component
+  (core module $m
+    (memory (export "mem") 1)
+    (func (export "cabi_realloc") (param i32 i32 i32 i32) (result i32)
+      (i32.const 4096))
+    (func (export "run") (param i32 i32) (result i32)
+      (i32.store (i32.const 512) (i32.const 0))
+      (i32.store (i32.const 516) (i32.const 1024))
+      (i32.store (i32.const 520) (i32.const {len_run}))
+      (i32.const 512))
+    (func (export "observe") (param i32 i32) (result i32)
+      (i32.store (i32.const 640) (i32.const 0))
+      (i32.store (i32.const 644) (i32.const 2048))
+      (i32.store (i32.const 648) (i32.const {len_obs}))
+      (i32.const 640))
+    (data (i32.const 1024) "{data_run}")
+    (data (i32.const 2048) "{data_obs}"))
+  (core instance $i (instantiate $m))
+  (func (export "run") (param "args" (list string))
+        (result (result (list u8) (error string)))
+    (canon lift (core func $i "run") (memory $i "mem")
+      (realloc (func $i "cabi_realloc"))))
+  (func (export "observe") (param "args" (list string))
+        (result (result (list u8) (error string)))
+    (canon lift (core func $i "observe") (memory $i "mem")
+      (realloc (func $i "cabi_realloc")))))"#
+        );
+        wat::parse_str(&wat).expect("component wat parses")
+    }
+
+    #[tokio::test]
+    async fn named_export_dispatch_roundtrips_per_export() {
+        let engine = GanglionEngine::new().unwrap();
+        let runtime = ComponentRuntime::new(engine, HashMap::new()).unwrap();
+        let bytes = dual_export_component(b"from-run", b"from-observe");
+        let hash = format!("test-{}", bytes.len());
+
+        // Default path calls `run`.
+        let out = runtime
+            .invoke(&bytes, &hash, vec![], &ResourceLimits::default(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(out.data, b"from-run");
+
+        // Named export calls `observe` (#42).
+        let out = runtime
+            .invoke_export(
+                &bytes,
+                &hash,
+                vec![],
+                &ResourceLimits::default(),
+                vec![],
+                Some("observe"),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.data, b"from-observe");
+
+        // Unknown export is a clear error, not a fallback to `run`.
+        let err = runtime
+            .invoke_export(
+                &bytes,
+                &hash,
+                vec![],
+                &ResourceLimits::default(),
+                vec![],
+                Some("nonexistent"),
+                &[],
+            )
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("nonexistent"), "unexpected error: {msg}");
+    }
+
+    #[tokio::test]
+    async fn credential_env_does_not_disturb_instantiation() {
+        // The env entries ride the WASI context (#43); a component that never
+        // reads them must behave identically. Value round-trip into the guest
+        // is covered by the e2e harness with a real toolchain-built component.
+        let engine = GanglionEngine::new().unwrap();
+        let runtime = ComponentRuntime::new(engine, HashMap::new()).unwrap();
+        let bytes = wasi_importing_component(b"ok");
+        let hash = format!("test-{}", bytes.len());
+        let out = runtime
+            .invoke_export(
+                &bytes,
+                &hash,
+                vec![],
+                &ResourceLimits::default(),
+                vec![],
+                None,
+                &[(
+                    "GANG_CREDENTIAL_API_TOKEN".to_string(),
+                    "s3cret".to_string(),
+                )],
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.data, b"ok");
     }
 
     /// Regression test for the e2e-dispatch failure: a component that CALLS a

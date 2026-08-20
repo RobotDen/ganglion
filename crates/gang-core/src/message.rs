@@ -130,6 +130,10 @@ pub enum ControlMessage {
         /// additive). Zero on legacy messages.
         #[serde(default)]
         timestamp_ms: u64,
+        /// Exported function to invoke (#42, additive). `None`/absent calls
+        /// the component's default `run` export.
+        #[serde(default)]
+        export: Option<String>,
     },
     /// Response to a capability invocation.
     InvokeResult {
@@ -509,6 +513,7 @@ mod tests {
             args: vec![],
             request_id: "r1".into(),
             nonce: "abc".into(),
+            export: None,
             timestamp_ms: 42,
         };
         assert_eq!(msg.request_meta(), Some(("abc", 42)));

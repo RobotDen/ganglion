@@ -138,6 +138,7 @@ async fn start_up_robot(
             audit_log_path: dir.join("audit.log"),
             audit_max_size_bytes: 10 * 1024 * 1024,
             policy_resync_interval_secs: 0,
+            credentials_path: None,
             fs_allowed_patterns: vec![FsRule {
                 pattern: format!("{}/**", dir.display()),
                 read: true,
@@ -229,6 +230,8 @@ fn manifest_cbor(
         description: String::new(),
         tags: vec![],
         min_ganglion_version: None,
+        credential_slots: vec![],
+        exports: vec![],
     };
     SignedManifest::sign(&manifest, author)
         .expect("sign")
@@ -298,6 +301,7 @@ async fn up_fleet_runs_sample_and_denies_undeclared_capability() {
         args: vec![],
         request_id: fresh_nonce(),
         nonce: fresh_nonce(),
+        export: None,
         timestamp_ms: unix_millis_now(),
     };
     match rpc(&op, &robot_id, &invoke).await {
