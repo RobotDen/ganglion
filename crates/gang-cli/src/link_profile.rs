@@ -455,9 +455,18 @@ mod tests {
 
     #[test]
     fn bench_synthesis_pipeline_stays_fast() {
-        // Perf tripwire: statistics + synthesis + render for a 40-sample
-        // measurement is pure CPU and must stay trivially cheap next to the
-        // ~3s of wire time the probes themselves take.
+        // Perf tripwire, not a microbenchmark: statistics + synthesis +
+        // render for a 40-sample measurement is pure CPU and must stay
+        // trivially cheap next to the ~3s of wire time the probes themselves
+        // take.
+        //
+        // Ceiling sizing: a debug build measures ~50-70µs/op on developer
+        // hardware, and the macOS CI runner is roughly 2x slower. The old
+        // 100µs ceiling therefore sat only ~1.4x over the measurement and
+        // failed intermittently on that runner (observed 113µs) with no
+        // regression present. 250µs clears the slow-runner noise while still
+        // catching the order-of-magnitude regressions this guards against: a
+        // 10x slowdown measures ~470-510µs here and ~1ms on CI, well over.
         let rtts: Vec<f64> = (0..40).map(|i| 30.0 + (i % 7) as f64).collect();
         let m = meas(&rtts, 1);
         const ITERS: u32 = 10_000;
@@ -469,8 +478,8 @@ mod tests {
         let per_op = start.elapsed() / ITERS;
         eprintln!("link_profile synth+render: {per_op:?}/op ({ITERS} iters)");
         assert!(
-            per_op < std::time::Duration::from_micros(100),
-            "synthesis pipeline regressed to {per_op:?}/op (ceiling 100µs)"
+            per_op < std::time::Duration::from_micros(250),
+            "synthesis pipeline regressed to {per_op:?}/op (ceiling 250µs)"
         );
     }
 
