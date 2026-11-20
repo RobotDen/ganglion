@@ -2,35 +2,52 @@ use std::time::Duration;
 
 use libp2p::{
     Multiaddr, PeerId as Libp2pPeerId, Swarm, SwarmBuilder, connection_limits,
-    core::transport::ListenerId,
-    dcutr, identify, kad, noise, ping, relay, request_response,
-    swarm::{NetworkBehaviour, behaviour::toggle::Toggle},
-    tcp, yamux,
+    core::transport::ListenerId, dcutr, identify, kad, noise, ping, relay, request_response,
+    swarm::behaviour::toggle::Toggle, tcp, yamux,
 };
 use tracing::{debug, info};
 
 use crate::config::Libp2pConfig;
 
-/// Combined network behaviour for a Ganglion node.
-#[derive(NetworkBehaviour)]
-pub struct GanglionBehaviour {
-    pub identify: identify::Behaviour,
-    pub ping: ping::Behaviour,
-    pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
-    pub relay_client: relay::client::Behaviour,
-    pub dcutr: dcutr::Behaviour,
-    /// Circuit-relay v2 server. Disabled (no-op) unless `config.relay_server`
-    /// is set, so client robots never relay traffic for arbitrary peers.
-    pub relay_server: Toggle<relay::Behaviour>,
-    /// Enforces `config.max_inbound_connections` on established inbound links.
-    pub connection_limits: connection_limits::Behaviour,
-    pub ganglion_rpc: request_response::Behaviour<GanglionCodec>,
-    /// Genuine server-push substreams (ADR-024). Carries the
-    /// `/ganglion/events/1.0` event feed as a persistent push stream rather
-    /// than a request-response poll. The swarm remains single-owner; callers
-    /// interact through a cloned [`libp2p_stream::Control`] handle obtained at
-    /// build time, which talks to this behaviour over its own channel.
-    pub stream: libp2p_stream::Behaviour,
+pub use behaviour::{GanglionBehaviour, GanglionBehaviourEvent};
+
+/// Holds the derived behaviour so the lint allowance below covers the code
+/// `#[derive(NetworkBehaviour)]` generates, and nothing else.
+mod behaviour {
+    // The derive matches on each sub-behaviour's `ToSwarm` event, and some of
+    // those are uninhabited (`Infallible`, e.g. connection_limits and
+    // libp2p_stream). Since Rust 1.100 that generated match trips
+    // `unreachable_code`, which CI denies. Nothing hand-written lives here.
+    #![allow(unreachable_code)]
+
+    use libp2p::{
+        connection_limits, dcutr, identify, kad, ping, relay, request_response,
+        swarm::{NetworkBehaviour, behaviour::toggle::Toggle},
+    };
+
+    use super::GanglionCodec;
+
+    /// Combined network behaviour for a Ganglion node.
+    #[derive(NetworkBehaviour)]
+    pub struct GanglionBehaviour {
+        pub identify: identify::Behaviour,
+        pub ping: ping::Behaviour,
+        pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
+        pub relay_client: relay::client::Behaviour,
+        pub dcutr: dcutr::Behaviour,
+        /// Circuit-relay v2 server. Disabled (no-op) unless `config.relay_server`
+        /// is set, so client robots never relay traffic for arbitrary peers.
+        pub relay_server: Toggle<relay::Behaviour>,
+        /// Enforces `config.max_inbound_connections` on established inbound links.
+        pub connection_limits: connection_limits::Behaviour,
+        pub ganglion_rpc: request_response::Behaviour<GanglionCodec>,
+        /// Genuine server-push substreams (ADR-024). Carries the
+        /// `/ganglion/events/1.0` event feed as a persistent push stream rather
+        /// than a request-response poll. The swarm remains single-owner; callers
+        /// interact through a cloned [`libp2p_stream::Control`] handle obtained at
+        /// build time, which talks to this behaviour over its own channel.
+        pub stream: libp2p_stream::Behaviour,
+    }
 }
 
 /// Maximum message size for Ganglion request/response (16 MiB).

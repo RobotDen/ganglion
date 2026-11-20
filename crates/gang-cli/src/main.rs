@@ -618,12 +618,6 @@ enum Commands {
         shell: clap_complete::Shell,
     },
 
-    /// Run a circuit relay v2 server for NAT traversal.
-    ///
-    /// Starts a Ganglion node in relay-server mode, enabling robot agents
-    /// behind NAT to accept inbound connections. This is the bootstrap relay
-    /// described in the design spec (relay.gang.tafy.dev).
-    #[command(display_order = 31)]
     /// Inspect or control anonymous usage telemetry (see TELEMETRY.md).
     ///
     /// Ganglion's telemetry is operator-side only, anonymous, opt-out, and
@@ -637,6 +631,12 @@ enum Commands {
         action: TelemetryAction,
     },
 
+    /// Run a circuit relay v2 server for NAT traversal.
+    ///
+    /// Starts a Ganglion node in relay-server mode, enabling robot agents
+    /// behind NAT to accept inbound connections. This is the bootstrap relay
+    /// described in the design spec (relay.gang.tafy.dev).
+    #[command(display_order = 31)]
     Relay {
         /// Multiaddr(s) to listen on. Can be specified multiple times.
         /// Default: /ip4/0.0.0.0/tcp/4001 and /ip4/0.0.0.0/udp/4001/quic-v1
