@@ -2573,6 +2573,24 @@ pub(crate) fn resolve_robot_policy(
     Ok(RobotPolicy::Permissive)
 }
 
+/// The trust store a robot agent loads. An explicit `--trust-store` must
+/// exist: a missing file would load as an empty store, which disables the
+/// signer and deployer checks the operator asked for. The default
+/// `<data_dir>/trusted_peers.json` may be absent (no signer restriction; the
+/// policy's peer rules still decide who may deploy).
+pub(crate) fn resolve_trust_store(
+    explicit: Option<&Path>,
+    data_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    match explicit {
+        Some(path) if !path.exists() => {
+            anyhow::bail!("trust store {} does not exist", path.display())
+        }
+        Some(path) => Ok(path.to_path_buf()),
+        None => Ok(data_dir.join("trusted_peers.json")),
+    }
+}
+
 impl RobotPolicy {
     fn path(&self) -> Option<PathBuf> {
         match self {
@@ -2627,9 +2645,7 @@ pub async fn agent(
         relay.is_some(),
         dev_permissive,
     )?;
-    let trust_store_path = trust_store
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("trusted_peers.json"));
+    let trust_store_path = resolve_trust_store(trust_store.map(Path::new), &data_dir)?;
 
     let config = AgentConfig {
         key_path: data_dir.join("identity.key"),
@@ -4304,14 +4320,14 @@ pub async fn join(
     if policy.is_none() && !dev_permissive && !local_policy.exists() {
         std::fs::write(&local_policy, default_deny_policy(&operator.gang_id, false))
             .with_context(|| format!("writing default-deny policy {}", local_policy.display()))?;
-        if !json_flag {
-            println!(
-                "Wrote default-deny policy {} (operator {} may deploy; enable capability \
-                 groups there).",
-                local_policy.display(),
-                operator.gang_id
-            );
-        }
+        // A diagnostic, not the command's result: stderr keeps `--json` and
+        // `--format json` output parseable.
+        eprintln!(
+            "Wrote default-deny policy {} (operator {} may deploy; enable capability \
+             groups there).",
+            local_policy.display(),
+            operator.gang_id
+        );
     }
     let robot_policy = resolve_robot_policy(
         policy.map(Path::new),
@@ -7153,6 +7169,22 @@ mod robot_policy_tests {
         let p = data.join("p.toml");
         std::fs::write(&p, "").unwrap();
         assert!(resolve_robot_policy(Some(&p), &data, &home, true, true).is_err());
+    }
+
+    #[test]
+    fn explicit_trust_store_must_exist() {
+        // A typo in --trust-store must not silently disable signer checks.
+        let (_t, data, _home) = dirs();
+        let missing = data.join("nope.json");
+        let err = resolve_trust_store(Some(&missing), &data).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+        let present = data.join("trust.json");
+        std::fs::write(&present, "{}").unwrap();
+        assert_eq!(resolve_trust_store(Some(&present), &data).unwrap(), present);
+        assert_eq!(
+            resolve_trust_store(None, &data).unwrap(),
+            data.join("trusted_peers.json")
+        );
     }
 
     #[test]

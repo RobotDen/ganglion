@@ -220,7 +220,9 @@ permissive dev policy unless you pass `--dev-permissive`. If
 `<GANG_HOME>/policy.toml` does not exist, `gang join` writes a **default-deny**
 policy there that authorizes exactly the pairing operator to deploy, with every
 capability group still denied. Enable the groups the robot should run (for
-example uncomment the `ganglion:diagnostics/collect` rule) before deploying.
+example `gang policy allow ganglion:diagnostics/collect '**' --wide-open`); the
+running agent reloads `policy.toml` within 60 seconds. The token is single-use:
+to resume a joined robot later, run `gang agent --data-dir ~/.gang -r <relay>`.
 If an existing policy does not authorize the pairing operator, `join` warns and
 prints the `gang policy allow-peer` line to fix it.
 
@@ -401,7 +403,7 @@ dialable id as `Peer ID (libp2p/dial): 12D3KooW…`, and prints the exact
 | `--data-dir <path>` | Directory for the agent's identity, capabilities and state. Default: `<GANG_HOME>/agent` (`~/.gang/agent`). |
 | `--relay <multiaddr>`, `-r` | Relay multiaddr to dial for remote connectivity. |
 | `--policy <file>` | Default-deny policy to enforce (see above). |
-| `--trust-store <file>` | Trusted operator keys for signature checks. Default: `<data-dir>/trusted_peers.json`. |
+| `--trust-store <file>` | Trusted operator keys for signature checks. Default: `<data-dir>/trusted_peers.json` (may be absent). An explicitly given file must exist. |
 | `--dev-permissive` | Permissive dev policy: every capability from any peer. Test robots only; conflicts with `--policy`. |
 
 `--config` is not supported and exits with an error; use `--policy` and `--trust-store`.

@@ -433,10 +433,14 @@ an identity whose key it holds. The token is single-use and expiring. See
 
 The joined robot enforces a **default-deny** policy. If `~/.gang/policy.toml`
 doesn't exist, `gang join` writes one that authorizes exactly the pairing
-operator to deploy and leaves every capability group denied; enable what the
-robot should run with `gang policy allow <group> <pattern>` on the robot (then
-restart `gang join`). `--policy <file>` uses a specific policy; `--dev-permissive`
-is for throwaway test robots only.
+operator to deploy and leaves every capability group denied. Enable what the
+robot should run with `gang policy allow <group> <pattern>` on the robot: the
+running agent reloads `policy.toml` within 60 seconds, so there is nothing to
+restart. Don't re-run `gang join` — the token is single-use. To bring the robot
+back after a reboot, run the agent over the same state:
+`gang agent --data-dir ~/.gang -r <relay-multiaddr>` (same identity, policy and
+trust store). To start with a policy you prepared, pass `--policy <file>` to
+`gang join`; `--dev-permissive` is for throwaway test robots only.
 
 ### Manual fallback: `gang peer add`
 
