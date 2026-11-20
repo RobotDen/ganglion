@@ -66,7 +66,6 @@ pub struct GanglionRequest {
     pub payload: Vec<u8>,
 }
 
-#[async_trait::async_trait]
 impl request_response::Codec for GanglionCodec {
     type Protocol = GanglionProtocol;
     type Request = GanglionRequest;

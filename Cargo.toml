@@ -96,7 +96,7 @@ chrono = { version = "0.4", features = ["serde"] }
 toml = "1.1"
 
 # libp2p
-libp2p = { version = "0.56", features = [
+libp2p = { version = "0.57", features = [
     "tokio",
     "tcp",
     "quic",
@@ -113,11 +113,12 @@ libp2p = { version = "0.56", features = [
     "request-response",
 ] }
 # True server-push substreams for the robot→operator event feed (ADR-024).
-# Pre-release: the libp2p 0.56 meta-crate exposes no `stream` feature, but
-# libp2p-stream 0.4.0-alpha resolves cleanly against the locked libp2p-swarm
-# 0.47.1. Pinned exactly to this pre-release so a future 0.4.0 final (or a new
-# alpha) cannot silently change the wire behaviour underneath us.
-libp2p-stream = "=0.4.0-alpha"
+# Pre-release: the libp2p 0.57 meta-crate exposes no `stream` feature, but
+# libp2p-stream 0.5.0-alpha resolves cleanly against the locked libp2p-swarm
+# 0.48. Pinned exactly to this pre-release so a future 0.5.0 final (or a new
+# alpha) cannot silently change the wire behaviour underneath us. Bump it in
+# lockstep with libp2p (each alpha targets exactly one libp2p-swarm minor).
+libp2p-stream = "=0.5.0-alpha"
 
 # WASM runtime
 wasmtime = { version = "36", features = ["component-model"] }
