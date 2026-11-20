@@ -25,13 +25,17 @@ SHARED_DIR="${SHARED_DIR:-/shared}"
 # Start the relay with its output teed to a log we can parse. GANG_KEY_PATH
 # points at the mounted deterministic test key, so the identity is stable.
 LOG=/tmp/relay-stdout.log
+# Create the log before backgrounding the relay: `tee` opens it asynchronously,
+# and under `set -euo pipefail` a poll that runs first (awk: file not found,
+# exit 2) would kill this script silently. run-test.sh does the same.
+: > "$LOG"
 gang relay --port "$RELAY_PORT" 2>&1 | tee "$LOG" &
 RELAY_PIPELINE=$!
 
 # Wait for the relay to print its dialable libp2p peer id.
 LIBP2P_ID=""
 for _ in $(seq 1 60); do
-    LIBP2P_ID="$(awk '/Peer ID \(libp2p\/dial\):/ {print $NF}' "$LOG" 2>/dev/null | head -1)"
+    LIBP2P_ID="$(awk '/Peer ID \(libp2p\/dial\):/ {print $NF}' "$LOG" 2>/dev/null | head -1 || true)"
     [ -n "$LIBP2P_ID" ] && break
     sleep 1
 done
