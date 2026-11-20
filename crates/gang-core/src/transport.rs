@@ -101,6 +101,10 @@ pub struct GanglionStream {
     pub remote_peer: PeerId,
     /// The underlying async byte stream.
     pub inner: Box<dyn AsyncReadWrite + Send + Unpin>,
+    /// For an inbound request, the transport's id for it; matches the
+    /// `request_id` of the [`TransportEvent::ResponseSent`] for its answer.
+    /// `None` for outbound streams and transports without request ids.
+    pub request_id: Option<u64>,
 }
 
 impl std::fmt::Debug for GanglionStream {
@@ -157,6 +161,16 @@ pub enum TransportEvent {
     DirectUpgrade {
         /// The peer whose connection was upgraded.
         peer_id: PeerId,
+    },
+    /// A response to an inbound RPC was handed to the connection for `peer_id`.
+    /// A caller that answers a final request (e.g. `gang pair` enrolling a
+    /// robot) waits for this before shutting the transport down, so the
+    /// response is not lost with the connection.
+    ResponseSent {
+        /// The peer the response went to.
+        peer_id: PeerId,
+        /// The inbound request it answered (see [`GanglionStream::request_id`]).
+        request_id: u64,
     },
 }
 
@@ -359,6 +373,7 @@ mod tests {
                     protocol: ProtocolId::control(),
                     remote_peer: peer.clone(),
                     inner: Box::new(read_half),
+                    request_id: None,
                 })
             } else {
                 Err(TransportError::DialFailed {

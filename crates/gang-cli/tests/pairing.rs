@@ -56,16 +56,24 @@ where
 }
 
 async fn start_adapter(config: Libp2pConfig) -> Arc<Libp2pTransportAdapter> {
+    start_adapter_with_loop(config).await.0
+}
+
+/// [`start_adapter`], also returning the event-loop task, so a test can tear
+/// down exactly as the CLI does: `shutdown()`, then abort the loop task.
+async fn start_adapter_with_loop(
+    config: Libp2pConfig,
+) -> (Arc<Libp2pTransportAdapter>, tokio::task::JoinHandle<()>) {
     let adapter = Arc::new(
         Libp2pTransportAdapter::new(config)
             .await
             .expect("adapter builds"),
     );
     let looped = Arc::clone(&adapter);
-    tokio::spawn(async move {
+    let event_loop = tokio::spawn(async move {
         let _ = looped.run_event_loop().await;
     });
-    adapter
+    (adapter, event_loop)
 }
 
 async fn start_relay(dir: &Path) -> (Arc<Libp2pTransportAdapter>, String) {
@@ -142,8 +150,10 @@ fn enroll_handler(
     operator_id: PeerId,
     registry_path: std::path::PathBuf,
     trust_path: std::path::PathBuf,
+    accepted_request: Arc<std::sync::Mutex<Option<u64>>>,
 ) -> StreamHandler {
     Box::new(move |mut stream| {
+        let accepted_request = Arc::clone(&accepted_request);
         let token = Arc::clone(&token);
         let consumed = Arc::clone(&consumed);
         let operator_id = operator_id.clone();
@@ -204,6 +214,7 @@ fn enroll_handler(
                                     public_key: id.ed25519_pubkey.to_vec(),
                                 });
                                 trust.save(&trust_path).unwrap();
+                                *accepted_request.lock().unwrap() = stream.request_id;
                                 ControlMessage::Enrolled {
                                     operator_id: operator_id.clone(),
                                     robot_id: wire_gang_id.clone(),
@@ -232,13 +243,17 @@ struct OperatorFixture {
     token: Arc<PairingToken>,
     consumed: Arc<AtomicBool>,
     registry_path: std::path::PathBuf,
+    /// The transport request id of the enrollment the handler accepted.
+    accepted_request: Arc<std::sync::Mutex<Option<u64>>>,
+    /// The operator's event-loop task (aborted after shutdown, as `gang pair` does).
+    operator_loop: tokio::task::JoinHandle<()>,
 }
 
 async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
     let (relay, relay_addr) = start_relay(dir).await;
 
     let op_key = dir.join("operator.key");
-    let operator = start_adapter(Libp2pConfig {
+    let (operator, operator_loop) = start_adapter_with_loop(Libp2pConfig {
         key_path: op_key.clone(),
         listen_addrs: vec![],
         relay_addrs: vec![relay_addr.clone()],
@@ -259,6 +274,7 @@ async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
     let consumed = Arc::new(AtomicBool::new(false));
     let registry_path = dir.join("peers.json");
     let trust_path = dir.join("trusted_peers.json");
+    let accepted_request = Arc::new(std::sync::Mutex::new(None));
 
     operator
         .listen(
@@ -269,6 +285,7 @@ async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
                 operator_id.clone(),
                 registry_path.clone(),
                 trust_path.clone(),
+                Arc::clone(&accepted_request),
             ),
         )
         .await
@@ -283,6 +300,8 @@ async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
         token,
         consumed,
         registry_path,
+        accepted_request,
+        operator_loop,
     }
 }
 
@@ -608,4 +627,101 @@ async fn pairing_rejects_expired_token() {
         }
         other => panic!("expected Error on expiry, got {other:?}"),
     }
+}
+
+/// `gang pair` shuts its transport down as soon as a robot enrolls. It used
+/// to do so before the `Enrolled` response had left, so the robot saw
+/// ConnectionClosed and `gang join` failed although it was recorded. The
+/// operator now waits for the `TransportEvent::ResponseSent` of the ACCEPTED
+/// request. Matching on the robot alone is not enough: an earlier rejected
+/// attempt from the same robot also produces a ResponseSent, which would let
+/// the operator shut down too early.
+#[tokio::test]
+async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
+    use futures::StreamExt;
+    use gang_core::transport::TransportEvent;
+
+    let dir = TempDir::new().unwrap();
+    let op = setup_operator(dir.path(), DEFAULT_TTL).await;
+    let mut op_events = TransportAdapter::events(op.operator.as_ref());
+    let operator_pubkey = Keypair::load(&dir.path().join("operator.key"))
+        .unwrap()
+        .public_key()
+        .to_bytes()
+        .to_vec();
+
+    let robot_dir = dir.path().join("robot");
+    std::fs::create_dir_all(&robot_dir).unwrap();
+    let (robot_agent, robot) = start_robot(
+        &robot_dir,
+        &op.relay_addr,
+        &op.operator_id,
+        &operator_pubkey,
+    )
+    .await;
+    let robot_gang = robot_agent.peer_id().clone();
+    let robot_libp2p = robot.libp2p_peer_id().to_string();
+    connect_via_circuit(&robot, &op.relay_addr, &op.operator_id, &op.operator_libp2p).await;
+
+    // A rejected attempt first (wrong secret): its reply is a ResponseSent
+    // from this robot too, and it must not count.
+    let rejected = enroll(
+        &robot,
+        &op.operator_id,
+        vec![0u8; 32],
+        "robot-a",
+        &robot_libp2p,
+    )
+    .await;
+    assert!(
+        matches!(rejected, ControlMessage::Error { .. }),
+        "{rejected:?}"
+    );
+
+    let secret = op.token.secret.to_vec();
+    let operator_id = op.operator_id.clone();
+    let robot_rpc = Arc::clone(&robot);
+    let enrolling = tokio::spawn(async move {
+        enroll(&robot_rpc, &operator_id, secret, "robot-a", &robot_libp2p).await
+    });
+
+    // Operator side, as `gang pair` does: wait for the response to the
+    // accepted request, then shut down immediately.
+    let mut earlier_replies = 0;
+    tokio::time::timeout(Duration::from_secs(WAIT_SECS), async {
+        while let Some(event) = op_events.next().await {
+            if let TransportEvent::ResponseSent {
+                peer_id,
+                request_id,
+            } = event
+                && peer_id == robot_gang
+            {
+                let accepted = *op.accepted_request.lock().unwrap();
+                if accepted == Some(request_id) {
+                    return;
+                }
+                earlier_replies += 1;
+            }
+        }
+        panic!("event stream ended before the accepted ResponseSent");
+    })
+    .await
+    .expect("ResponseSent for the accepted enrollment");
+    assert!(
+        earlier_replies >= 1,
+        "the rejected attempt's reply must have been seen and skipped"
+    );
+    // Exactly the shipping teardown in `gang pair`: shutdown, then abort the
+    // event-loop task. shutdown() must not return before the graceful close
+    // has flushed the reply, or the abort cancels it.
+    TransportAdapter::shutdown(op.operator.as_ref())
+        .await
+        .unwrap();
+    op.operator_loop.abort();
+
+    let reply = enrolling.await.unwrap();
+    assert!(
+        matches!(reply, ControlMessage::Enrolled { .. }),
+        "robot must receive Enrolled, got {reply:?}"
+    );
 }

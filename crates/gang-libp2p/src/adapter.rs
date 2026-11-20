@@ -40,6 +40,10 @@ pub type InboundEventStreams = Pin<Box<dyn Stream<Item = (PeerId, libp2p::Stream
 pub type TopicStream = Pin<Box<dyn Stream<Item = gang_core::topics::TopicStreamMessage> + Send>>;
 
 /// `active` encoding: the push substream is live.
+/// How long a shutdown waits for connections to close cleanly (flushing any
+/// response still in flight) before the swarm is dropped.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
 const ACTIVE_PUSH: u8 = 0;
 /// `active` encoding: the poll fallback is live.
 const ACTIVE_POLL: u8 = 1;
@@ -161,8 +165,10 @@ enum SwarmCommand {
         channel: ResponseChannel<Vec<u8>>,
         data: Vec<u8>,
     },
-    /// Stop the event loop.
-    Shutdown,
+    /// Close connections gracefully, then stop the event loop. `done` fires
+    /// once the connections are closed (or the grace period ran out), so a
+    /// caller can wait for that before tearing anything else down.
+    Shutdown { done: oneshot::Sender<()> },
 }
 
 /// Tracks a pending outbound request so we can deliver the response
@@ -979,8 +985,15 @@ impl SwarmWorker {
                 }
                 command = self.command_rx.recv() => {
                     match command {
-                        Some(SwarmCommand::Shutdown) | None => {
+                        Some(SwarmCommand::Shutdown { done }) => {
                             info!("Transport event loop shutting down");
+                            self.close_gracefully(SHUTDOWN_GRACE).await;
+                            let _ = done.send(());
+                            break;
+                        }
+                        None => {
+                            info!("Transport event loop shutting down (all handles dropped)");
+                            self.close_gracefully(SHUTDOWN_GRACE).await;
                             break;
                         }
                         Some(command) => self.handle_command(command).await,
@@ -1146,8 +1159,27 @@ impl SwarmWorker {
                     .ganglion_rpc
                     .send_response(channel, data);
             }
-            SwarmCommand::Shutdown => {
+            SwarmCommand::Shutdown { .. } => {
                 // Handled directly in `run`; nothing to do here.
+            }
+        }
+    }
+
+    /// Close every connection and keep driving the swarm until they are
+    /// gone (or `grace` elapses). Dropping the swarm outright discarded data
+    /// still buffered in the muxer, e.g. a response the application had just
+    /// sent: the peer then saw ConnectionClosed instead of its reply.
+    async fn close_gracefully(&mut self, grace: Duration) {
+        let peers: Vec<Libp2pPeerId> = self.swarm.connected_peers().copied().collect();
+        for peer in peers {
+            let _ = self.swarm.disconnect_peer_id(peer);
+        }
+        let deadline = tokio::time::Instant::now() + grace;
+        while self.swarm.network_info().num_peers() > 0 {
+            match tokio::time::timeout_at(deadline, futures::StreamExt::next(&mut self.swarm)).await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
             }
         }
     }
@@ -1301,6 +1333,21 @@ impl SwarmWorker {
                     }));
                 }
             }
+            GanglionBehaviourEvent::GanglionRpc(request_response::Event::ResponseSent {
+                peer,
+                request_id,
+                ..
+            }) => {
+                if let (Some(gang_peer_id), Some(request_id)) = (
+                    libp2p_to_gang_peer_id(&peer),
+                    inbound_request_id(request_id),
+                ) {
+                    self.events.publish(TransportEvent::ResponseSent {
+                        peer_id: gang_peer_id,
+                        request_id,
+                    });
+                }
+            }
             GanglionBehaviourEvent::GanglionRpc(request_response::Event::InboundFailure {
                 peer,
                 request_id,
@@ -1324,7 +1371,9 @@ impl SwarmWorker {
     ) {
         match message {
             request_response::Message::Request {
-                request, channel, ..
+                request,
+                channel,
+                request_id,
             } => {
                 // SEC-03: the downstream handler and policy engine key on this
                 // identity, so a peer whose Ed25519 key cannot be recovered is
@@ -1350,8 +1399,13 @@ impl SwarmWorker {
                 if let Some(handler) = handlers.get(&protocol) {
                     debug!(peer = %peer, protocol = %protocol, len = payload.len(), "Incoming RPC request");
 
-                    let response_rx =
-                        serve_request(handler, ProtocolId::new(protocol), gang_peer_id, payload);
+                    let response_rx = serve_request(
+                        handler,
+                        ProtocolId::new(protocol),
+                        gang_peer_id,
+                        payload,
+                        inbound_request_id(request_id),
+                    );
                     drop(handlers);
 
                     let command_tx = self.command_tx.clone();
@@ -1441,11 +1495,17 @@ async fn await_reply_within(
 
 /// Run a registered stream handler against an inbound request payload,
 /// returning a receiver that resolves to the handler's response bytes.
+/// libp2p exposes an inbound request id only through `Display` (its `u64`).
+fn inbound_request_id(id: request_response::InboundRequestId) -> Option<u64> {
+    id.to_string().parse().ok()
+}
+
 fn serve_request(
     handler: &StreamHandler,
     protocol: ProtocolId,
     remote_peer: PeerId,
     payload: Vec<u8>,
+    request_id: Option<u64>,
 ) -> oneshot::Receiver<Vec<u8>> {
     let (response_data_tx, response_data_rx) = oneshot::channel::<Vec<u8>>();
 
@@ -1475,6 +1535,7 @@ fn serve_request(
         protocol,
         remote_peer,
         inner: Box::new(merge_rw(request_reader, response_writer)),
+        request_id,
     };
 
     tokio::spawn(handler(stream));
@@ -1517,6 +1578,7 @@ impl TransportAdapter for Libp2pTransportAdapter {
             protocol,
             remote_peer: peer.clone(),
             inner: Box::new(read_half),
+            request_id: None,
         })
     }
 
@@ -1616,7 +1678,19 @@ impl TransportAdapter for Libp2pTransportAdapter {
     async fn shutdown(&self) -> Result<(), TransportError> {
         info!("Shutting down transport");
         // Best-effort: if the worker already stopped the channel is closed.
-        let _ = self.command_tx.send(SwarmCommand::Shutdown).await;
+        // Wait until the worker has closed its connections, so data already
+        // written (e.g. a response just sent) is flushed before the caller
+        // aborts the event loop or exits. Bounded: a worker that is already
+        // gone, or stuck, never blocks shutdown beyond the grace period.
+        let (done, closed) = oneshot::channel();
+        if self
+            .command_tx
+            .send(SwarmCommand::Shutdown { done })
+            .await
+            .is_ok()
+        {
+            let _ = tokio::time::timeout(SHUTDOWN_GRACE + Duration::from_secs(1), closed).await;
+        }
         Ok(())
     }
 }
@@ -1862,6 +1936,7 @@ mod tests {
             ProtocolId::new(negotiated),
             PeerId::new("12D3-000000000000000000000000000000aa"),
             b"request".to_vec(),
+            None,
         );
         let response = rx.await.unwrap();
         assert_eq!(
