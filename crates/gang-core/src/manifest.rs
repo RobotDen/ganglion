@@ -95,6 +95,25 @@ pub struct SignedManifest {
     pub author_public_key: Vec<u8>,
 }
 
+/// Validate a capability name before it is ever used as a path component on
+/// a robot (SEC-22): it starts with an ASCII letter or digit and continues
+/// with up to 127 of `[A-Za-z0-9._-]`. That rules out separators, `..`,
+/// absolute paths and dot-files such as the `.revoked` graveyard directory.
+pub fn validate_capability_name(name: &str) -> Result<(), ManifestError> {
+    let mut chars = name.chars();
+    let valid = matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
+        && name.len() <= 128
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if valid {
+        Ok(())
+    } else {
+        Err(ManifestError::DecodeFailed(format!(
+            "invalid capability name {name:?}: use 1-128 characters [A-Za-z0-9._-], \
+             starting with a letter or digit"
+        )))
+    }
+}
+
 impl SignedManifest {
     /// Sign a manifest with a keypair. The signature covers the CBOR-encoded
     /// manifest bytes concatenated with the component hash.
@@ -145,6 +164,8 @@ impl SignedManifest {
         if manifest.author_peer_id != expected_peer_id {
             return Err(ManifestError::InvalidSignature);
         }
+
+        validate_capability_name(&manifest.name)?;
 
         Ok(manifest)
     }
@@ -399,5 +420,26 @@ mod tests {
         let decoded = SignedManifest::from_cbor(&cbor).unwrap();
         let manifest2 = decoded.verify_and_decode().unwrap();
         assert_eq!(manifest2.name, "test-capability");
+    }
+
+    #[test]
+    fn capability_names_that_escape_the_capabilities_dir_are_rejected() {
+        // SEC-22: the name becomes a directory under capabilities/.
+        for bad in [
+            "../../etc/x",
+            "/abs",
+            "a/b",
+            ".revoked",
+            "..",
+            "",
+            "a\\b",
+            "sp ace",
+        ] {
+            assert!(validate_capability_name(bad).is_err(), "{bad:?} accepted");
+        }
+        for good in ["diagnostics", "my-tool", "teleop_tap", "diag.v2", "A1"] {
+            assert!(validate_capability_name(good).is_ok(), "{good:?} rejected");
+        }
+        assert!(validate_capability_name(&"a".repeat(129)).is_err());
     }
 }
