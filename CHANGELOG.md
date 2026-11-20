@@ -15,6 +15,15 @@ All notable changes to Ganglion will be documented in this file.
 
 ### Fixed
 
+- **`gang config set` no longer drops the telemetry opt-out.** It rewrote
+  `config.toml` from its typed struct, which silently removed settings the
+  struct doesn't model, including `[telemetry] enabled = false` from
+  `gang telemetry off`, so one `config set` turned telemetry back on. It now
+  edits the file in place and changes only the given key. A file that isn't
+  valid TOML or doesn't match the config schema is left untouched with an
+  error, instead of being replaced by defaults plus the one key. (Comments in
+  the file are still not preserved.)
+
 - **`ResourceLimits` docs matched to behavior (#49).** `cpu_fuel: 0` was
   documented "unlimited" but has always meant "host default (1e6),
   clamped to the 1e10 hard cap"; `wall_clock_secs: 0` likewise means the

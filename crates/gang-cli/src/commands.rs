@@ -1743,28 +1743,8 @@ pub async fn policy_lint(strict: bool, format: &OutputFormat) -> anyhow::Result<
 
 /// `gang config set`
 pub async fn config_set(key: &str, value: &str, format: &OutputFormat) -> anyhow::Result<()> {
-    let mut config = OperatorConfig::load();
-    match key {
-        "default_relay" => {
-            if value == "none" || value.is_empty() {
-                config.default_relay = None;
-            } else {
-                config.default_relay = Some(value.to_string());
-            }
-        }
-        "host_key_policy" => {
-            if !["strict", "tofu", "none"].contains(&value) {
-                anyhow::bail!(
-                    "Invalid host_key_policy '{value}'. Valid options: strict, tofu, none"
-                );
-            }
-            config.host_key_policy = value.to_string();
-        }
-        _ => {
-            anyhow::bail!("Unknown config key '{key}'. Valid keys: default_relay, host_key_policy")
-        }
-    }
-    config.save()?;
+    let path = gang_core::identity::default_config_dir().join("config.toml");
+    set_config_key(&path, key, value)?;
     match format {
         OutputFormat::Json => {
             println!(
@@ -1776,6 +1756,61 @@ pub async fn config_set(key: &str, value: &str, format: &OutputFormat) -> anyhow
             println!("Set {key} = {value}");
         }
     }
+    Ok(())
+}
+
+/// Set one operator-config key in `path`, editing the file in place.
+///
+/// The file is parsed as a TOML document and only `key` changes, so
+/// everything else survives: settings `OperatorConfig` doesn't model, such as
+/// `[telemetry] enabled = false` from `gang telemetry off`. (Rewriting the file
+/// from the typed struct dropped that opt-out.) A file that isn't valid TOML,
+/// or doesn't match the operator-config schema, is an error and is left
+/// untouched; it is never replaced with defaults. Comments are not preserved.
+fn set_config_key(path: &Path, key: &str, value: &str) -> anyhow::Result<()> {
+    let refuse = |why: String| {
+        anyhow::anyhow!(
+            "{} {why}; refusing to rewrite it. Fix the file, or run \
+             `gang config init --force` to start from defaults.",
+            path.display()
+        )
+    };
+    let mut table: toml::Table = match std::fs::read_to_string(path) {
+        Ok(text) => text
+            .parse()
+            .map_err(|e| refuse(format!("is not valid TOML ({e})")))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::default(),
+        Err(e) => return Err(refuse(format!("could not be read ({e})"))),
+    };
+    if let Err(e) = toml::Value::Table(table.clone()).try_into::<OperatorConfig>() {
+        return Err(refuse(format!("does not match the config schema ({e})")));
+    }
+
+    match key {
+        "default_relay" => {
+            if value == "none" || value.is_empty() {
+                table.remove("default_relay");
+            } else {
+                table.insert("default_relay".into(), value.into());
+            }
+        }
+        "host_key_policy" => {
+            if !["strict", "tofu", "none"].contains(&value) {
+                anyhow::bail!(
+                    "Invalid host_key_policy '{value}'. Valid options: strict, tofu, none"
+                );
+            }
+            table.insert("host_key_policy".into(), value.into());
+        }
+        _ => {
+            anyhow::bail!("Unknown config key '{key}'. Valid keys: default_relay, host_key_policy")
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, toml::to_string_pretty(&table)?)?;
     Ok(())
 }
 
@@ -7239,5 +7274,82 @@ mod robot_policy_tests {
             version: "1.0".into(),
         };
         assert!(policy.evaluate(&[diag], &op).is_err());
+    }
+}
+
+#[cfg(test)]
+mod config_set_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn read(path: &Path) -> toml::Table {
+        std::fs::read_to_string(path).unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn keeps_keys_the_struct_does_not_model() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "host_key_policy = \"tofu\"\nfuture_key = 7\n\n[telemetry]\nenabled = false\nfleet = true\n",
+        )
+        .unwrap();
+
+        set_config_key(&path, "default_relay", "/ip4/192.0.2.1/tcp/4001").unwrap();
+
+        let t = read(&path);
+        assert_eq!(t["default_relay"].as_str(), Some("/ip4/192.0.2.1/tcp/4001"));
+        assert_eq!(t["host_key_policy"].as_str(), Some("tofu"));
+        assert_eq!(t["future_key"].as_integer(), Some(7));
+        assert_eq!(t["telemetry"]["enabled"].as_bool(), Some(false));
+        assert_eq!(t["telemetry"]["fleet"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn none_removes_default_relay() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "default_relay = \"/ip4/192.0.2.1/tcp/4001\"\n").unwrap();
+
+        set_config_key(&path, "default_relay", "none").unwrap();
+
+        assert!(!read(&path).contains_key("default_relay"));
+        assert_eq!(OperatorConfig::load_from(&path).default_relay, None);
+    }
+
+    #[test]
+    fn creates_a_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("nested").join("config.toml");
+
+        set_config_key(&path, "host_key_policy", "strict").unwrap();
+
+        assert_eq!(read(&path)["host_key_policy"].as_str(), Some("strict"));
+    }
+
+    #[test]
+    fn refuses_a_file_that_does_not_match_the_schema() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let original = "host_key_policy = 5\n[telemetry]\nenabled = false\n";
+        std::fs::write(&path, original).unwrap();
+
+        let err = set_config_key(&path, "default_relay", "/ip4/192.0.2.1/tcp/4001").unwrap_err();
+
+        assert!(err.to_string().contains("refusing to rewrite"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn rejects_bad_values_without_touching_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let original = "[telemetry]\nenabled = false\n";
+        std::fs::write(&path, original).unwrap();
+
+        assert!(set_config_key(&path, "host_key_policy", "yolo").is_err());
+        assert!(set_config_key(&path, "no_such_key", "x").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 }
