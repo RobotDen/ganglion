@@ -29,7 +29,9 @@ LOG=/tmp/agent.log
 # Create the log before tail starts: tail -f racing the agent's first write
 # dies with "cannot open" and the agent output never reaches the container log.
 : > "$LOG"
-gang agent --data-dir /data -r "$RELAY_ADDR" >> "$LOG" 2>&1 &
+# Throwaway test robot: opt into the permissive dev policy explicitly. A
+# relay-reachable agent refuses to start without a policy otherwise (SEC-18).
+gang agent --data-dir /data -r "$RELAY_ADDR" --dev-permissive >> "$LOG" 2>&1 &
 AGENT_PID=$!
 
 # Stream agent output to the container log as well

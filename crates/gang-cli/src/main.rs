@@ -166,6 +166,15 @@ enum Commands {
         /// Emit the enrollment result as JSON.
         #[arg(long)]
         json: bool,
+        /// Policy file to enforce (default: <GANG_HOME>/policy.toml; if that
+        /// doesn't exist, a default-deny policy authorizing the pairing
+        /// operator is written there).
+        #[arg(long, value_name = "FILE")]
+        policy: Option<String>,
+        /// Run the PERMISSIVE dev policy: every capability from any peer.
+        /// For throwaway test robots only; never on a real fleet.
+        #[arg(long, conflicts_with = "policy")]
+        dev_permissive: bool,
     },
 
     /// Manage peer identity.
@@ -231,16 +240,30 @@ enum Commands {
     /// Starts a local Ganglion agent that listens for operator connections.
     #[command(display_order = 30)]
     Agent {
-        /// Path to the agent config file.
-        #[arg(long)]
+        /// Not supported; use --policy and --trust-store instead.
+        #[arg(long, hide = true)]
         config: Option<String>,
-        /// Directory for capabilities and state (default: /tmp/gang-agent).
-        #[arg(long, default_value = "/tmp/gang-agent")]
-        data_dir: String,
+        /// Directory for the agent's identity, capabilities and state
+        /// (default: <GANG_HOME>/agent, i.e. ~/.gang/agent).
+        #[arg(long, value_name = "DIR")]
+        data_dir: Option<String>,
         /// Relay multiaddr to dial for remote connectivity.
         /// Without this flag, the agent runs in local-only mode.
         #[arg(long, short = 'r')]
         relay: Option<String>,
+        /// Default-deny policy file to enforce. Without it the agent uses
+        /// <DATA_DIR>/policy.toml, then <GANG_HOME>/policy.toml (written by
+        /// `gang init`); with a relay and no policy it refuses to start.
+        #[arg(long, value_name = "FILE")]
+        policy: Option<String>,
+        /// Trust store of operators allowed to sign and deploy
+        /// (default: <DATA_DIR>/trusted_peers.json).
+        #[arg(long, value_name = "FILE")]
+        trust_store: Option<String>,
+        /// Run the PERMISSIVE dev policy: every capability from any peer.
+        /// For throwaway test robots only; never on a real fleet.
+        #[arg(long, conflicts_with = "policy")]
+        dev_permissive: bool,
     },
 
     /// Deploy a signed capability to a robot.
@@ -1031,7 +1054,21 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             once,
             timeout,
             json,
-        } => commands::join(&token, name.as_deref(), once, timeout, json, &cli.format).await?,
+            policy,
+            dev_permissive,
+        } => {
+            commands::join(
+                &token,
+                name.as_deref(),
+                once,
+                timeout,
+                json,
+                policy.as_deref(),
+                dev_permissive,
+                &cli.format,
+            )
+            .await?
+        }
         Commands::Identity { action } => {
             reject_json(&cli.format, "identity")?;
             match action {
@@ -1074,7 +1111,20 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             config,
             data_dir,
             relay,
-        } => commands::agent(config.as_deref(), &data_dir, relay.as_deref()).await?,
+            policy,
+            trust_store,
+            dev_permissive,
+        } => {
+            commands::agent(
+                config.as_deref(),
+                data_dir.as_deref(),
+                relay.as_deref(),
+                policy.as_deref(),
+                trust_store.as_deref(),
+                dev_permissive,
+            )
+            .await?
+        }
         Commands::Deploy {
             robot,
             wasm_path,
