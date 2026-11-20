@@ -1352,6 +1352,7 @@ pub async fn policy_allow_peer(
         policy.peer_rules.push(PeerRule {
             peer_id: peer_id.to_string(),
             can_deploy: true,
+            can_invoke: true,
             allowed_capabilities: Vec::new(),
         });
         let serialized = policy.to_toml_pretty()?;

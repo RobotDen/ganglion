@@ -547,6 +547,31 @@ impl RobotAgent {
     }
 
     /// List installed capabilities.
+    /// Authorize `peer` to list installed capabilities (`name: None`) or to
+    /// invoke `name`, which declares `declared` (SEC-17). Mirrors deploy:
+    /// with a non-empty trust store the peer must be trusted, and the active
+    /// policy must authorize it (see [`Policy::authorize_invoke_at`]).
+    pub fn authorize_peer(
+        &self,
+        peer: &PeerId,
+        name: Option<&str>,
+        declared: &[gang_core::capability::CapabilityGroup],
+    ) -> Result<(), anyhow::Error> {
+        if !self.trust_store.trusted_peers.is_empty() && !self.trust_store.is_trusted(peer) {
+            return Err(anyhow::anyhow!(
+                "peer {peer} is not in this robot's trust store"
+            ));
+        }
+        let policy = self.policy.read().expect("policy lock poisoned");
+        match name {
+            Some(n) => {
+                policy.authorize_invoke_at(peer, n, declared, chrono::Utc::now().timestamp())
+            }
+            None => policy.authorize_list(peer, None),
+        }
+        .map_err(anyhow::Error::from)
+    }
+
     pub async fn list_capabilities(&self) -> Vec<InstalledCapability> {
         self.capabilities.read().await.values().cloned().collect()
     }
@@ -625,6 +650,15 @@ impl RobotAgent {
         let cap = caps
             .get(name)
             .ok_or_else(|| CapabilityError::NotFound(name.into()))?;
+
+        // SEC-17: the caller must be authorized to run this capability, and its
+        // declared groups must still be permitted by the policy right now.
+        if let Err(e) =
+            self.authorize_peer(operator_peer_id, Some(name), &cap.declared_capabilities)
+        {
+            warn!(name = %name, peer = %operator_peer_id, "Invoke refused: {e}");
+            return Err(e);
+        }
 
         // ADR-027: the usage bundle records capability *groups* only — the
         // operator-authored capability name never enters it.
@@ -1254,21 +1288,35 @@ impl RobotAgent {
                         }
                     }
                     ControlMessage::ListCapabilities => {
-                        let caps = agent.list_capabilities().await;
-                        ControlMessage::CapabilityList {
-                            capabilities: caps
-                                .into_iter()
-                                .map(|c| CapabilityInfo {
-                                    name: c.name,
-                                    version: c.version,
-                                    author: c.author_peer_id,
-                                    declared_capabilities: c
-                                        .declared_capabilities
-                                        .iter()
-                                        .map(|g| g.qualified_name())
+                        // SEC-17: listing reveals what is installed; same
+                        // authorization as invoke, without a capability name.
+                        match agent.authorize_peer(&remote_peer, None, &[]) {
+                            Err(e) => {
+                                warn!(peer = %remote_peer, "List refused: {e}");
+                                ControlMessage::Error {
+                                    request_id: None,
+                                    code: "unauthorized".into(),
+                                    message: e.to_string(),
+                                }
+                            }
+                            Ok(()) => {
+                                let caps = agent.list_capabilities().await;
+                                ControlMessage::CapabilityList {
+                                    capabilities: caps
+                                        .into_iter()
+                                        .map(|c| CapabilityInfo {
+                                            name: c.name,
+                                            version: c.version,
+                                            author: c.author_peer_id,
+                                            declared_capabilities: c
+                                                .declared_capabilities
+                                                .iter()
+                                                .map(|g| g.qualified_name())
+                                                .collect(),
+                                        })
                                         .collect(),
-                                })
-                                .collect(),
+                                }
+                            }
                         }
                     }
                     ControlMessage::Presence { .. } => {
@@ -2159,6 +2207,117 @@ can_deploy = true
             .deploy_capability(&signed.to_cbor().unwrap(), bytes, &kp.peer_id())
             .await
             .unwrap()
+    }
+
+    /// Deploy a non-WASM diagnostics capability signed and pushed by `kp`.
+    async fn deploy_diag(agent: &RobotAgent, kp: &Keypair) {
+        let bytes: &[u8] = b"not-wasm diag";
+        let manifest = gang_core::manifest::ComponentManifest {
+            schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
+            name: "diag".into(),
+            version: "0.1.0".into(),
+            declared_capabilities: vec![CapabilityGroup::DiagnosticsCollect {
+                version: "1.0".into(),
+            }],
+            author_peer_id: kp.peer_id(),
+            component_hash: blake3::hash(bytes).to_hex().to_string(),
+            limits: Default::default(),
+            language: Default::default(),
+            description: String::new(),
+            tags: vec![],
+            min_ganglion_version: None,
+            credential_slots: vec![],
+            exports: vec![],
+        };
+        let signed = SignedManifest::sign(&manifest, kp).unwrap();
+        agent
+            .deploy_capability(&signed.to_cbor().unwrap(), bytes, &kp.peer_id())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invoke_and_list_refused_for_untrusted_peer() {
+        // SEC-17: with a trust store, only trusted peers may invoke or list.
+        let dir = TempDir::new().unwrap();
+        let trusted = Keypair::generate();
+        let agent = agent_with_trusted(dir.path(), &trusted);
+        deploy_diag(&agent, &trusted).await;
+
+        let stranger = Keypair::generate().peer_id();
+        let err = agent
+            .invoke_capability("diag", &[], &stranger)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("trust store"), "{err}");
+        assert!(agent.authorize_peer(&stranger, None, &[]).is_err());
+
+        assert!(agent.authorize_peer(&trusted.peer_id(), None, &[]).is_ok());
+        agent
+            .invoke_capability("diag", &[], &trusted.peer_id())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invoke_and_list_refused_for_peer_not_in_policy() {
+        // SEC-17: without a trust store the policy's peer rules still decide
+        // who may run installed capabilities.
+        let dir = TempDir::new().unwrap();
+        let op = Keypair::generate();
+        let policy_path = dir.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            format!(
+                "[[capability_rules]]\ngroup = \"ganglion:diagnostics/collect\"\n\
+                 allowed_patterns = [\"**\"]\n\n[[peer_rules]]\npeer_id = \"{}\"\n\
+                 can_deploy = true\n",
+                op.peer_id()
+            ),
+        )
+        .unwrap();
+        let mut config = test_config(dir.path());
+        config.policy_path = Some(policy_path);
+        let agent = RobotAgent::new(config).unwrap();
+        deploy_diag(&agent, &op).await;
+
+        let stranger = Keypair::generate().peer_id();
+        let err = agent
+            .invoke_capability("diag", &[], &stranger)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not authorized to invoke"),
+            "{err}"
+        );
+        assert!(agent.authorize_peer(&stranger, None, &[]).is_err());
+
+        agent
+            .invoke_capability("diag", &[], &op.peer_id())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn resync_after_restart_revokes_expired_grant() {
+        // SEC-21: capabilities loaded from disk carry no deployer; the sweep
+        // used to panic on its "(re-sync)" label and silently stop revoking.
+        let dir = TempDir::new().unwrap();
+        let (agent, policy_path) = resync_fixture(dir.path());
+        let kp = Keypair::generate();
+        deploy_cmd_vel(&agent, &kp).await;
+        drop(agent);
+
+        let mut config = test_config(dir.path());
+        config.policy_path = Some(policy_path);
+        let reborn = RobotAgent::new(config).unwrap();
+        assert_eq!(reborn.list_capabilities().await.len(), 1);
+        let later = chrono::Utc::now().timestamp() + 7200;
+        assert_eq!(
+            reborn.policy_resync_at(later).await,
+            vec!["teleop-tap".to_string()]
+        );
+        assert!(reborn.list_capabilities().await.is_empty());
     }
 
     #[tokio::test]
