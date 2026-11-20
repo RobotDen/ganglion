@@ -215,16 +215,29 @@ mod tests {
         None
     }
 
-    /// Broker that allows any absolute command under the standard bin dirs.
+    /// Broker that allows any absolute command under the standard bin dirs,
+    /// plus whatever directory the test binaries canonicalize into. The
+    /// allowlist matches canonical paths, and on some hosts `/usr/bin/echo`
+    /// is a symlink into a multicall coreutils directory (e.g. uutils under
+    /// `/usr/lib/cargo/bin/coreutils/`).
     fn test_broker() -> ProcessBroker {
-        ProcessBroker::new(
-            vec![
-                "/usr/bin/*".into(),
-                "/bin/*".into(),
-                "/usr/local/bin/*".into(),
-            ],
-            10,
-        )
+        let mut patterns: Vec<String> = vec![
+            "/usr/bin/*".into(),
+            "/bin/*".into(),
+            "/usr/local/bin/*".into(),
+        ];
+        for bin in ["echo", "env", "sleep", "rm"] {
+            if let Some(dir) = locate(bin)
+                .as_deref()
+                .and_then(|c| std::path::Path::new(c).parent())
+            {
+                let pattern = format!("{}/*", dir.display());
+                if !patterns.contains(&pattern) {
+                    patterns.push(pattern);
+                }
+            }
+        }
+        ProcessBroker::new(patterns, 10)
     }
 
     #[test]
