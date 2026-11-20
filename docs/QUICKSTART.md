@@ -344,17 +344,26 @@ with Docker.
 
 ## 6. Connect a robot agent
 
-On the robot, run the agent pointing at the relay. It dials out — no inbound
-port, no firewall change on the robot's network:
+On the robot, first give the agent a **default-deny policy** that authorizes
+your operator and enables what you will deploy. A robot reachable over a relay
+refuses to start without one:
 
 ```console
-$ gang agent --data-dir /var/lib/gang-agent \
-    -r /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
+$ gang init --yes                                         # writes ~/.gang/policy.toml (default-deny)
+$ gang policy allow-peer 12D3-c2ace1a32fd67c0c8c66976336bceead    # your operator's gang id (step 4)
+$ gang policy allow ganglion:diagnostics/collect '**' --wide-open # the group step 8 deploys
+```
+
+Then run the agent pointing at the relay. It dials out — no inbound port, no
+firewall change on the robot's network:
+
+```console
+$ gang agent -r /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 [log lines]
 Robot agent started:
   Peer ID:  12D3-6ca0419fa75b4ba889669086076df590
-  Data dir: /var/lib/gang-agent
-  Policy:   permissive (dev mode)
+  Data dir: /home/you/.gang/agent
+  Policy:   /home/you/.gang/policy.toml (default-deny)
   Relay:    /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
   Mode:     remote (listening on /ganglion/control/1.0)
 
@@ -373,10 +382,14 @@ Connected to relay. Waiting for operator connections...
 The circuit **reservation** the agent requests is what makes the robot
 reachable *through* the relay — merely being connected is not enough. If the
 relay is unreachable the agent doesn't exit — it logs a warning, retries every
-5 seconds, and re-establishes the reservation. Without a policy file the agent
-warns loudly that it is running a PERMISSIVE dev policy with trust checks
-disabled; production agents get a default-deny policy file and a populated
-trust store (see [SECURITY.md](SECURITY.md)).
+5 seconds, and re-establishes the reservation.
+
+The agent looks for its policy in `--policy <file>`, then
+`<data-dir>/policy.toml`, then `~/.gang/policy.toml`, and prints the one in
+force. With no policy it refuses to serve over the relay. For a throwaway test
+robot only, `--dev-permissive` runs the old allow-everything dev policy. See
+[SECURITY.md](SECURITY.md) for the trust store (`--trust-store`), which adds
+signer checks on top of the policy.
 
 ## 7. Enrol the robot in one line: `gang pair`
 
@@ -403,6 +416,7 @@ On the **robot**, paste that one line:
 
 ```console
 $ gang join gang1_pWd2ZXJzaW9uAWpyZWxheV9hZGRyeFEvaXA0…
+Wrote default-deny policy /home/you/.gang/policy.toml (operator 12D3-74aded42b4ed2b3e88d1a4cedd8ec501 may deploy; enable capability groups there).
 Joining fleet via /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i…
 
   ✔ joined: registered with operator 12D3-74aded42b4ed2b3e88d1a4cedd8ec501 as 'robot-a'
@@ -416,6 +430,17 @@ normal fleet member. The operator records the robot under the identity **libp2p
 authenticated on the wire** — never a self-report — so a robot can only enrol as
 an identity whose key it holds. The token is single-use and expiring. See
 [ADR-021](adr/ADR-021-pairing-token-enrollment.md) for the trust model.
+
+The joined robot enforces a **default-deny** policy. If `~/.gang/policy.toml`
+doesn't exist, `gang join` writes one that authorizes exactly the pairing
+operator to deploy and leaves every capability group denied. Enable what the
+robot should run with `gang policy allow <group> <pattern>` on the robot: the
+running agent reloads `policy.toml` within 60 seconds, so there is nothing to
+restart. Don't re-run `gang join` — the token is single-use. To bring the robot
+back after a reboot, run the agent over the same state:
+`gang agent --data-dir ~/.gang -r <relay-multiaddr>` (same identity, policy and
+trust store). To start with a policy you prepared, pass `--policy <file>` to
+`gang join`; `--dev-permissive` is for throwaway test robots only.
 
 ### Manual fallback: `gang peer add`
 

@@ -2516,32 +2516,141 @@ pub async fn sign(
     Ok(())
 }
 
+/// The policy a robot-side command (`gang agent`, `gang join`) runs under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RobotPolicy {
+    /// Load this policy file (fail closed if it is unreadable or malformed).
+    File(PathBuf),
+    /// Allow-everything development policy, chosen explicitly or for a
+    /// local-only agent that serves no network peers.
+    Permissive,
+}
+
+/// Decide which policy a robot agent runs under (SEC-18).
+///
+/// Order: an explicit `--policy` file; else `<data_dir>/policy.toml`; else
+/// `<GANG_HOME>/policy.toml` (the file `gang init` and `gang policy` manage).
+/// With none of those, the permissive dev policy is used only if the operator
+/// asked for it with `--dev-permissive`, or the agent serves no network peers
+/// at all. A robot reachable over a relay never falls back to permissive
+/// silently.
+pub(crate) fn resolve_robot_policy(
+    explicit: Option<&Path>,
+    data_dir: &Path,
+    gang_home: &Path,
+    serves_network: bool,
+    dev_permissive: bool,
+) -> anyhow::Result<RobotPolicy> {
+    if let Some(path) = explicit {
+        if dev_permissive {
+            anyhow::bail!("--policy and --dev-permissive are mutually exclusive");
+        }
+        if !path.exists() {
+            anyhow::bail!("policy file {} does not exist", path.display());
+        }
+        return Ok(RobotPolicy::File(path.to_path_buf()));
+    }
+    if dev_permissive {
+        return Ok(RobotPolicy::Permissive);
+    }
+    for candidate in [data_dir.join("policy.toml"), gang_home.join("policy.toml")] {
+        if candidate.exists() {
+            return Ok(RobotPolicy::File(candidate));
+        }
+    }
+    if serves_network {
+        anyhow::bail!(
+            "refusing to serve over the network without a policy.\n\
+             Looked for {} and {}.\n\
+             Write one with `gang init` and authorize your operator with \
+             `gang policy allow-peer <operator-id>`, or pass `--policy <file>`.\n\
+             For a throwaway test robot only, pass `--dev-permissive` (allows every \
+             capability from any peer).",
+            data_dir.join("policy.toml").display(),
+            gang_home.join("policy.toml").display()
+        );
+    }
+    Ok(RobotPolicy::Permissive)
+}
+
+/// The trust store a robot agent loads. An explicit `--trust-store` must
+/// exist: a missing file would load as an empty store, which disables the
+/// signer and deployer checks the operator asked for. The default
+/// `<data_dir>/trusted_peers.json` may be absent (no signer restriction; the
+/// policy's peer rules still decide who may deploy).
+pub(crate) fn resolve_trust_store(
+    explicit: Option<&Path>,
+    data_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    match explicit {
+        Some(path) if !path.exists() => {
+            anyhow::bail!("trust store {} does not exist", path.display())
+        }
+        Some(path) => Ok(path.to_path_buf()),
+        None => Ok(data_dir.join("trusted_peers.json")),
+    }
+}
+
+impl RobotPolicy {
+    fn path(&self) -> Option<PathBuf> {
+        match self {
+            RobotPolicy::File(p) => Some(p.clone()),
+            RobotPolicy::Permissive => None,
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            RobotPolicy::File(p) => format!("{} (default-deny)", p.display()),
+            RobotPolicy::Permissive => {
+                "PERMISSIVE (dev only: every capability from any peer)".to_string()
+            }
+        }
+    }
+}
+
 /// `gang agent` — run the robot agent.
 pub async fn agent(
     config_path: Option<&str>,
-    data_dir: &str,
+    data_dir: Option<&str>,
     relay: Option<&str>,
+    policy: Option<&str>,
+    trust_store: Option<&str>,
+    dev_permissive: bool,
 ) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
     use gang_ros::filesystem::FsRule;
     use std::sync::Arc;
 
-    // Loading an AgentConfig from a file is not yet supported here (gang-ros
-    // does not expose a deserializer). Be honest rather than silently ignoring.
+    // Loading an AgentConfig from a file is not supported (gang-ros exposes no
+    // deserializer). Refuse rather than run with settings the operator didn't
+    // ask for.
     if let Some(path) = config_path {
-        eprintln!(
-            "warning: --config {path} is not yet supported; agent config file loading is \
-             unavailable. Continuing with built-in dev defaults."
+        anyhow::bail!(
+            "--config {path} is not supported. Use --policy <file> and --trust-store <file> \
+             to configure the agent."
         );
     }
 
-    let data_dir = PathBuf::from(data_dir);
+    let gang_home = gang_core::identity::default_config_dir();
+    let data_dir = data_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| gang_home.join("agent"));
     std::fs::create_dir_all(&data_dir)?;
+
+    let robot_policy = resolve_robot_policy(
+        policy.map(Path::new),
+        &data_dir,
+        &gang_home,
+        relay.is_some(),
+        dev_permissive,
+    )?;
+    let trust_store_path = resolve_trust_store(trust_store.map(Path::new), &data_dir)?;
 
     let config = AgentConfig {
         key_path: data_dir.join("identity.key"),
-        policy_path: None, // permissive for dev
-        trust_store_path: data_dir.join("trusted_peers.json"),
+        policy_path: robot_policy.path(),
+        trust_store_path,
         capabilities_dir: data_dir.join("capabilities"),
         audit_log_path: data_dir.join("audit.log"),
         audit_max_size_bytes: 50 * 1024 * 1024,
@@ -2562,7 +2671,7 @@ pub async fn agent(
     println!("Robot agent started:");
     println!("  Peer ID:  {peer_id}");
     println!("  Data dir: {}", data_dir.display());
-    println!("  Policy:   permissive (dev mode)");
+    println!("  Policy:   {}", robot_policy.describe());
 
     if let Some(relay_addr) = relay {
         println!("  Relay:    {relay_addr}");
@@ -4154,12 +4263,15 @@ fn record_paired_robot(
 /// `gang join` — the ONE line run on the robot. Decodes the token, dials out,
 /// reserves a circuit, enrolls with the operator, then (unless `--once`) stays
 /// online serving the control protocol so the operator can deploy.
+#[allow(clippy::too_many_arguments)] // CLI surface: each arg mirrors one flag
 pub async fn join(
     token_str: &str,
     name: Option<&str>,
     once: bool,
     timeout: Option<u64>,
     json_flag: bool,
+    policy: Option<&str>,
+    dev_permissive: bool,
     format: &OutputFormat,
 ) -> anyhow::Result<()> {
     use gang_core::manifest::{TrustStore, TrustedPeer};
@@ -4200,12 +4312,48 @@ pub async fn join(
     });
     trust.save(&trust_path)?;
 
-    // 4. Agent + transport that reserves a circuit on the relay. The agent runs
-    //    with a permissive dev policy (policy_path: None), matching `gang agent`;
-    //    a production robot would ship a default-deny policy.toml.
+    // 4. Policy (SEC-18). A joined robot is reachable over the relay, so it
+    //    never runs the permissive dev policy unless asked to. With no policy
+    //    on disk, write a default-deny one that authorizes exactly the pairing
+    //    operator to deploy; capability groups stay denied until enabled.
+    let local_policy = data_dir.join("policy.toml");
+    if policy.is_none() && !dev_permissive && !local_policy.exists() {
+        std::fs::write(&local_policy, default_deny_policy(&operator.gang_id, false))
+            .with_context(|| format!("writing default-deny policy {}", local_policy.display()))?;
+        // A diagnostic, not the command's result: stderr keeps `--json` and
+        // `--format json` output parseable.
+        eprintln!(
+            "Wrote default-deny policy {} (operator {} may deploy; enable capability \
+             groups there).",
+            local_policy.display(),
+            operator.gang_id
+        );
+    }
+    let robot_policy = resolve_robot_policy(
+        policy.map(Path::new),
+        &data_dir,
+        &data_dir,
+        true,
+        dev_permissive,
+    )?;
+    if let RobotPolicy::File(path) = &robot_policy {
+        let loaded = gang_core::policy::Policy::load(path)
+            .with_context(|| format!("loading policy {}", path.display()))?;
+        if loaded.evaluate(&[], &operator.gang_id).is_err() {
+            eprintln!(
+                "warning: policy {} does not authorize operator {} to deploy. Add it with \
+                 `gang policy allow-peer {}`.",
+                path.display(),
+                operator.gang_id,
+                operator.gang_id
+            );
+        }
+    }
+
+    // 5. Agent + transport that reserves a circuit on the relay.
     let agent = Arc::new(RobotAgent::new(AgentConfig {
         key_path: key_path.clone(),
-        policy_path: None,
+        policy_path: robot_policy.path(),
         trust_store_path: trust_path.clone(),
         capabilities_dir: data_dir.join("capabilities"),
         audit_log_path: data_dir.join("audit.log"),
@@ -4244,7 +4392,7 @@ pub async fn join(
         println!("Joining fleet via {}…", token.relay_addr);
     }
 
-    // 5. Dial the relay, reserve our own circuit, then dial the operator.
+    // 6. Dial the relay, reserve our own circuit, then dial the operator.
     let enroll = async {
         transport
             .dial_multiaddr(&token.relay_addr)
@@ -4389,7 +4537,7 @@ pub async fn join(
         return Ok(());
     }
 
-    // 6. Stay online as the agent so the operator can deploy immediately.
+    // 7. Stay online as the agent so the operator can deploy immediately.
     if !json_output {
         println!();
         println!("Serving on the relay circuit. Press Ctrl-C to stop.");
@@ -6944,5 +7092,114 @@ mod policy_cli_tests {
         assert!(line.contains("\"expires\""));
         let back: PolicyChange = serde_json::from_str(&line).unwrap();
         assert_eq!(back.pattern.as_deref(), Some("/cmd_vel"));
+    }
+}
+
+#[cfg(test)]
+mod robot_policy_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn dirs() -> (TempDir, PathBuf, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let data = tmp.path().join("agent");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        (tmp, data, home)
+    }
+
+    #[test]
+    fn network_agent_without_policy_refuses() {
+        // SEC-18: a relay-reachable robot must never fall back to permissive.
+        let (_t, data, home) = dirs();
+        let err = resolve_robot_policy(None, &data, &home, true, false).unwrap_err();
+        assert!(err.to_string().contains("refusing to serve"), "{err}");
+    }
+
+    #[test]
+    fn dev_permissive_is_explicit_opt_in() {
+        let (_t, data, home) = dirs();
+        assert_eq!(
+            resolve_robot_policy(None, &data, &home, true, true).unwrap(),
+            RobotPolicy::Permissive
+        );
+    }
+
+    #[test]
+    fn local_only_agent_may_run_permissive() {
+        let (_t, data, home) = dirs();
+        assert_eq!(
+            resolve_robot_policy(None, &data, &home, false, false).unwrap(),
+            RobotPolicy::Permissive
+        );
+    }
+
+    #[test]
+    fn data_dir_policy_wins_over_gang_home() {
+        let (_t, data, home) = dirs();
+        std::fs::write(data.join("policy.toml"), "").unwrap();
+        std::fs::write(home.join("policy.toml"), "").unwrap();
+        assert_eq!(
+            resolve_robot_policy(None, &data, &home, true, false).unwrap(),
+            RobotPolicy::File(data.join("policy.toml"))
+        );
+    }
+
+    #[test]
+    fn gang_home_policy_is_found() {
+        let (_t, data, home) = dirs();
+        std::fs::write(home.join("policy.toml"), "").unwrap();
+        assert_eq!(
+            resolve_robot_policy(None, &data, &home, true, false).unwrap(),
+            RobotPolicy::File(home.join("policy.toml"))
+        );
+    }
+
+    #[test]
+    fn explicit_policy_must_exist() {
+        let (_t, data, home) = dirs();
+        let missing = data.join("nope.toml");
+        assert!(resolve_robot_policy(Some(&missing), &data, &home, true, false).is_err());
+    }
+
+    #[test]
+    fn explicit_policy_conflicts_with_dev_permissive() {
+        let (_t, data, home) = dirs();
+        let p = data.join("p.toml");
+        std::fs::write(&p, "").unwrap();
+        assert!(resolve_robot_policy(Some(&p), &data, &home, true, true).is_err());
+    }
+
+    #[test]
+    fn explicit_trust_store_must_exist() {
+        // A typo in --trust-store must not silently disable signer checks.
+        let (_t, data, _home) = dirs();
+        let missing = data.join("nope.json");
+        let err = resolve_trust_store(Some(&missing), &data).unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+        let present = data.join("trust.json");
+        std::fs::write(&present, "{}").unwrap();
+        assert_eq!(resolve_trust_store(Some(&present), &data).unwrap(), present);
+        assert_eq!(
+            resolve_trust_store(None, &data).unwrap(),
+            data.join("trusted_peers.json")
+        );
+    }
+
+    #[test]
+    fn join_default_policy_authorizes_only_the_operator() {
+        // The policy `gang join` writes when none exists: the pairing operator
+        // may deploy, any other peer may not, and no capability group is open.
+        let op = gang_core::identity::Keypair::generate().peer_id();
+        let other = gang_core::identity::Keypair::generate().peer_id();
+        let policy =
+            gang_core::policy::Policy::from_toml(&default_deny_policy(&op, false)).unwrap();
+        assert!(policy.evaluate(&[], &op).is_ok());
+        assert!(policy.evaluate(&[], &other).is_err());
+        let diag = gang_core::capability::CapabilityGroup::DiagnosticsCollect {
+            version: "1.0".into(),
+        };
+        assert!(policy.evaluate(&[diag], &op).is_err());
     }
 }

@@ -37,4 +37,6 @@ fi
 
 RELAY_ADDR="$(cat "$ADDR_FILE")"
 echo "agent-entrypoint: dialing relay $RELAY_ADDR"
-exec gang agent --data-dir "$AGENT_DATA_DIR" -r "$RELAY_ADDR"
+# Throwaway test robot: opt into the permissive dev policy explicitly. A
+# relay-reachable agent refuses to start without a policy otherwise (SEC-18).
+exec gang agent --data-dir "$AGENT_DATA_DIR" -r "$RELAY_ADDR" --dev-permissive

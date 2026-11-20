@@ -212,6 +212,19 @@ deploy immediately — exactly like `gang agent`.
 | `--once` | Enroll and exit instead of staying online as the agent. |
 | `--timeout <secs>` | Overall budget for the enrollment exchange (default: `60`). |
 | `--json` | Emit the enrollment result as JSON. |
+| `--policy <file>` | Policy to enforce. Default: `<GANG_HOME>/policy.toml`. |
+| `--dev-permissive` | Run the permissive dev policy (every capability from any peer). Test robots only. |
+
+**Policy.** A joined robot is reachable over the relay, so it never runs the
+permissive dev policy unless you pass `--dev-permissive`. If
+`<GANG_HOME>/policy.toml` does not exist, `gang join` writes a **default-deny**
+policy there that authorizes exactly the pairing operator to deploy, with every
+capability group still denied. Enable the groups the robot should run (for
+example `gang policy allow ganglion:diagnostics/collect '**' --wide-open`); the
+running agent reloads `policy.toml` within 60 seconds. The token is single-use:
+to resume a joined robot later, run `gang agent --data-dir ~/.gang -r <relay>`.
+If an existing policy does not authorize the pairing operator, `join` warns and
+prints the `gang policy allow-peer` line to fix it.
 
 ```console
 $ gang join gang1_pWd2ZXJzaW9uAWpyZWxheV9hZGRy… --name field-01
@@ -223,7 +236,8 @@ Joining fleet via /ip4/127.0.0.1/tcp/45633/p2p/12D3KooWM3tJywVGi7MjE4g6RWEGhxK6C
 Serving on the relay circuit. Press Ctrl-C to stop.
 ```
 
-Back on the operator, the robot is now a normal fleet member:
+Back on the operator, the robot is now a normal fleet member (the deploy below
+assumes the robot's policy enables `ganglion:diagnostics/collect`):
 
 ```console
 $ gang peer list
@@ -357,12 +371,21 @@ Start a robot agent. Without `--relay`, runs in local-only mode for development.
 
 ```bash
 # Local mode (development)
-$ gang agent --data-dir /tmp/gang-agent
+$ gang agent
 
-# Remote mode (connects to relay, accepts operator connections)
-$ gang agent --data-dir /tmp/gang-agent \
-    -r /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
+# Remote mode (connects to relay, accepts operator connections). Needs a policy:
+$ gang init --yes                                  # writes ~/.gang/policy.toml (default-deny)
+$ gang policy allow-peer <operator-gang-id>        # authorize your operator to deploy
+$ gang agent -r /ip4/203.0.113.10/tcp/4001/p2p/12D3KooWMc1i6BT7WVRKoC2hpuqThpWdxTfFZ833MCMBdm2L3xuk
 ```
+
+**Policy.** The agent enforces, in order: `--policy <file>`;
+`<data-dir>/policy.toml`; `<GANG_HOME>/policy.toml` (the file `gang init` writes and
+`gang policy` edits). A malformed policy is a startup error, never a fallback.
+With `--relay` and no policy found, the agent **refuses to start**; pass
+`--dev-permissive` only for a throwaway test robot (it allows every capability
+from any peer). A local-only agent (no `--relay`) serves no network peers and
+may run without a policy. The startup banner prints the policy in force.
 
 The `/p2p/` component of the relay multiaddr must be the relay's
 **libp2p-format** peer ID (base58, `12D3KooW...`) — the Ganglion-native
@@ -377,9 +400,13 @@ dialable id as `Peer ID (libp2p/dial): 12D3KooW…`, and prints the exact
 
 | Flag | Description |
 |------|-------------|
-| `--config <path>` | Path to agent config file. (Loading is not yet supported — the flag prints a warning and the agent continues with built-in dev defaults.) |
-| `--data-dir <path>` | Directory for capabilities and state. Default: `/tmp/gang-agent`. |
+| `--data-dir <path>` | Directory for the agent's identity, capabilities and state. Default: `<GANG_HOME>/agent` (`~/.gang/agent`). |
 | `--relay <multiaddr>`, `-r` | Relay multiaddr to dial for remote connectivity. |
+| `--policy <file>` | Default-deny policy to enforce (see above). |
+| `--trust-store <file>` | Trusted operator keys for signature checks. Default: `<data-dir>/trusted_peers.json` (may be absent). An explicitly given file must exist. |
+| `--dev-permissive` | Permissive dev policy: every capability from any peer. Test robots only; conflicts with `--policy`. |
+
+`--config` is not supported and exits with an error; use `--policy` and `--trust-store`.
 
 If the relay is unreachable, the agent does **not** hang or exit: it logs a
 warning, keeps serving on its listen addresses, and retries the relay dial
