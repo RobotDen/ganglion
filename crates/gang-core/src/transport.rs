@@ -101,6 +101,10 @@ pub struct GanglionStream {
     pub remote_peer: PeerId,
     /// The underlying async byte stream.
     pub inner: Box<dyn AsyncReadWrite + Send + Unpin>,
+    /// For an inbound request, the transport's id for it; matches the
+    /// `request_id` of the [`TransportEvent::ResponseSent`] for its answer.
+    /// `None` for outbound streams and transports without request ids.
+    pub request_id: Option<u64>,
 }
 
 impl std::fmt::Debug for GanglionStream {
@@ -165,6 +169,8 @@ pub enum TransportEvent {
     ResponseSent {
         /// The peer the response went to.
         peer_id: PeerId,
+        /// The inbound request it answered (see [`GanglionStream::request_id`]).
+        request_id: u64,
     },
 }
 
@@ -367,6 +373,7 @@ mod tests {
                     protocol: ProtocolId::control(),
                     remote_peer: peer.clone(),
                     inner: Box::new(read_half),
+                    request_id: None,
                 })
             } else {
                 Err(TransportError::DialFailed {

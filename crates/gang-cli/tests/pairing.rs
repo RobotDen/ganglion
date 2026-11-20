@@ -142,8 +142,10 @@ fn enroll_handler(
     operator_id: PeerId,
     registry_path: std::path::PathBuf,
     trust_path: std::path::PathBuf,
+    accepted_request: Arc<std::sync::Mutex<Option<u64>>>,
 ) -> StreamHandler {
     Box::new(move |mut stream| {
+        let accepted_request = Arc::clone(&accepted_request);
         let token = Arc::clone(&token);
         let consumed = Arc::clone(&consumed);
         let operator_id = operator_id.clone();
@@ -204,6 +206,7 @@ fn enroll_handler(
                                     public_key: id.ed25519_pubkey.to_vec(),
                                 });
                                 trust.save(&trust_path).unwrap();
+                                *accepted_request.lock().unwrap() = stream.request_id;
                                 ControlMessage::Enrolled {
                                     operator_id: operator_id.clone(),
                                     robot_id: wire_gang_id.clone(),
@@ -232,6 +235,8 @@ struct OperatorFixture {
     token: Arc<PairingToken>,
     consumed: Arc<AtomicBool>,
     registry_path: std::path::PathBuf,
+    /// The transport request id of the enrollment the handler accepted.
+    accepted_request: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
@@ -259,6 +264,7 @@ async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
     let consumed = Arc::new(AtomicBool::new(false));
     let registry_path = dir.join("peers.json");
     let trust_path = dir.join("trusted_peers.json");
+    let accepted_request = Arc::new(std::sync::Mutex::new(None));
 
     operator
         .listen(
@@ -269,6 +275,7 @@ async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
                 operator_id.clone(),
                 registry_path.clone(),
                 trust_path.clone(),
+                Arc::clone(&accepted_request),
             ),
         )
         .await
@@ -283,6 +290,7 @@ async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
         token,
         consumed,
         registry_path,
+        accepted_request,
     }
 }
 
@@ -613,11 +621,12 @@ async fn pairing_rejects_expired_token() {
 /// `gang pair` shuts its transport down as soon as a robot enrolls. It used
 /// to do so before the `Enrolled` response had left, so the robot saw
 /// ConnectionClosed and `gang join` failed although it was recorded. The
-/// operator now waits for `TransportEvent::ResponseSent` from that robot
-/// first; this proves the event marks a point where shutting down no longer
-/// loses the response.
+/// operator now waits for the `TransportEvent::ResponseSent` of the ACCEPTED
+/// request. Matching on the robot alone is not enough: an earlier rejected
+/// attempt from the same robot also produces a ResponseSent, which would let
+/// the operator shut down too early.
 #[tokio::test]
-async fn enroll_response_survives_shutdown_after_response_sent() {
+async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
     use futures::StreamExt;
     use gang_core::transport::TransportEvent;
 
@@ -643,6 +652,21 @@ async fn enroll_response_survives_shutdown_after_response_sent() {
     let robot_libp2p = robot.libp2p_peer_id().to_string();
     connect_via_circuit(&robot, &op.relay_addr, &op.operator_id, &op.operator_libp2p).await;
 
+    // A rejected attempt first (wrong secret): its reply is a ResponseSent
+    // from this robot too, and it must not count.
+    let rejected = enroll(
+        &robot,
+        &op.operator_id,
+        vec![0u8; 32],
+        "robot-a",
+        &robot_libp2p,
+    )
+    .await;
+    assert!(
+        matches!(rejected, ControlMessage::Error { .. }),
+        "{rejected:?}"
+    );
+
     let secret = op.token.secret.to_vec();
     let operator_id = op.operator_id.clone();
     let robot_rpc = Arc::clone(&robot);
@@ -650,20 +674,32 @@ async fn enroll_response_survives_shutdown_after_response_sent() {
         enroll(&robot_rpc, &operator_id, secret, "robot-a", &robot_libp2p).await
     });
 
-    // Operator side: wait for the response to be handed to the robot's
-    // connection, then shut down immediately, as `gang pair` does.
+    // Operator side, as `gang pair` does: wait for the response to the
+    // accepted request, then shut down immediately.
+    let mut earlier_replies = 0;
     tokio::time::timeout(Duration::from_secs(WAIT_SECS), async {
         while let Some(event) = op_events.next().await {
-            if let TransportEvent::ResponseSent { peer_id } = event
+            if let TransportEvent::ResponseSent {
+                peer_id,
+                request_id,
+            } = event
                 && peer_id == robot_gang
             {
-                return;
+                let accepted = *op.accepted_request.lock().unwrap();
+                if accepted == Some(request_id) {
+                    return;
+                }
+                earlier_replies += 1;
             }
         }
-        panic!("event stream ended before ResponseSent");
+        panic!("event stream ended before the accepted ResponseSent");
     })
     .await
-    .expect("ResponseSent for the robot");
+    .expect("ResponseSent for the accepted enrollment");
+    assert!(
+        earlier_replies >= 1,
+        "the rejected attempt's reply must have been seen and skipped"
+    );
     TransportAdapter::shutdown(op.operator.as_ref())
         .await
         .unwrap();

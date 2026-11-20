@@ -1303,11 +1303,16 @@ impl SwarmWorker {
             }
             GanglionBehaviourEvent::GanglionRpc(request_response::Event::ResponseSent {
                 peer,
+                request_id,
                 ..
             }) => {
-                if let Some(gang_peer_id) = libp2p_to_gang_peer_id(&peer) {
+                if let (Some(gang_peer_id), Some(request_id)) = (
+                    libp2p_to_gang_peer_id(&peer),
+                    inbound_request_id(request_id),
+                ) {
                     self.events.publish(TransportEvent::ResponseSent {
                         peer_id: gang_peer_id,
+                        request_id,
                     });
                 }
             }
@@ -1334,7 +1339,9 @@ impl SwarmWorker {
     ) {
         match message {
             request_response::Message::Request {
-                request, channel, ..
+                request,
+                channel,
+                request_id,
             } => {
                 // SEC-03: the downstream handler and policy engine key on this
                 // identity, so a peer whose Ed25519 key cannot be recovered is
@@ -1360,8 +1367,13 @@ impl SwarmWorker {
                 if let Some(handler) = handlers.get(&protocol) {
                     debug!(peer = %peer, protocol = %protocol, len = payload.len(), "Incoming RPC request");
 
-                    let response_rx =
-                        serve_request(handler, ProtocolId::new(protocol), gang_peer_id, payload);
+                    let response_rx = serve_request(
+                        handler,
+                        ProtocolId::new(protocol),
+                        gang_peer_id,
+                        payload,
+                        inbound_request_id(request_id),
+                    );
                     drop(handlers);
 
                     let command_tx = self.command_tx.clone();
@@ -1451,11 +1463,17 @@ async fn await_reply_within(
 
 /// Run a registered stream handler against an inbound request payload,
 /// returning a receiver that resolves to the handler's response bytes.
+/// libp2p exposes an inbound request id only through `Display` (its `u64`).
+fn inbound_request_id(id: request_response::InboundRequestId) -> Option<u64> {
+    id.to_string().parse().ok()
+}
+
 fn serve_request(
     handler: &StreamHandler,
     protocol: ProtocolId,
     remote_peer: PeerId,
     payload: Vec<u8>,
+    request_id: Option<u64>,
 ) -> oneshot::Receiver<Vec<u8>> {
     let (response_data_tx, response_data_rx) = oneshot::channel::<Vec<u8>>();
 
@@ -1485,6 +1503,7 @@ fn serve_request(
         protocol,
         remote_peer,
         inner: Box::new(merge_rw(request_reader, response_writer)),
+        request_id,
     };
 
     tokio::spawn(handler(stream));
@@ -1527,6 +1546,7 @@ impl TransportAdapter for Libp2pTransportAdapter {
             protocol,
             remote_peer: peer.clone(),
             inner: Box::new(read_half),
+            request_id: None,
         })
     }
 
@@ -1872,6 +1892,7 @@ mod tests {
             ProtocolId::new(negotiated),
             PeerId::new("12D3-000000000000000000000000000000aa"),
             b"request".to_vec(),
+            None,
         );
         let response = rx.await.unwrap();
         assert_eq!(
