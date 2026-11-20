@@ -100,6 +100,15 @@ pub enum PolicyError {
         peer: String,
     },
 
+    /// The peer may not invoke this installed capability (SEC-17).
+    #[error("peer {peer} not authorized to invoke capability {capability}")]
+    InvokeNotAuthorized {
+        /// The unauthorized peer.
+        peer: String,
+        /// The capability it tried to invoke.
+        capability: String,
+    },
+
     /// The policy file could not be found.
     #[error("policy file not found: {0}")]
     PolicyNotFound(String),
