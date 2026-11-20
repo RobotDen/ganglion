@@ -109,6 +109,11 @@ impl CapabilityHost {
         self
     }
 
+    /// The capability groups (with their patterns) this component declared.
+    pub fn declared_capabilities(&self) -> &[CapabilityGroup] {
+        &self.declared_capabilities
+    }
+
     /// Check whether a capability group is declared by this component.
     pub fn is_declared(&self, group_name: &str) -> bool {
         self.declared_capabilities
