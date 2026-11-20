@@ -193,6 +193,12 @@ Capability patterns use glob matching (via the `glob_match` crate):
 
 When a component is loaded, the runtime wires only the declared capabilities to the host. A component that declares `ganglion:diagnostics/collect` cannot call `ganglion:fs/bounded` functions — those imports are simply not linked.
 
+Within a declared group, every broker call is also confined to the **patterns the component declared** (and deploy-time policy approved): fs paths with their read/write flags, ROS names with their access level, log sources, HTTP endpoints. A component that declared read access to `/data/maps/**` cannot write there and cannot read anything else, even where the agent-wide broker rules would allow it; a group declared without patterns permits nothing. Paths must be absolute and free of `..`.
+
+The agent-wide filesystem jail for agents started by the CLI (`gang agent`, `gang join`, `gang up`, local runs) is a dedicated `<data-dir>/sandbox/` directory. The agent's identity key, trust store, policy and credentials bindings live outside it, so no capability can read or rewrite them.
+
+Capability names are validated when a manifest is verified (1–128 characters of `[A-Za-z0-9._-]`, starting with a letter or digit), because the name becomes a directory on the robot.
+
 ### No ambient authority
 
 WASM components have:

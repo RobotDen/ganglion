@@ -213,6 +213,17 @@ enum Commands {
         /// `--http-endpoint "https://api.example.com/v1/**:rw"`. (ADR-025)
         #[arg(long = "http-endpoint", value_name = "PATTERN[:rw]")]
         http_endpoints: Vec<String>,
+        /// Declare a filesystem path pattern the component may read
+        /// (repeatable; implies the fs group). Absolute glob, read-only unless
+        /// suffixed `:rw`, e.g. `--fs-path "/var/log/robot/**"`. The robot
+        /// confines every fs call to these patterns (and its sandbox).
+        #[arg(long = "fs-path", value_name = "PATTERN[:rw]")]
+        fs_paths: Vec<String>,
+        /// Declare a ROS topic/service/parameter pattern (repeatable; implies
+        /// the ros group). Read-only (subscribe/get) unless suffixed `:rw`
+        /// (publish/call/set), e.g. `--ros-pattern "/diagnostics/**"`.
+        #[arg(long = "ros-pattern", value_name = "PATTERN[:rw]")]
+        ros_patterns: Vec<String>,
         /// Credential slot names this component consumes, comma-separated
         /// (#43). Bound to secret files robot-side in credentials.toml.
         #[arg(long = "credential-slots", value_delimiter = ',')]
@@ -1083,6 +1094,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             version,
             capabilities,
             http_endpoints,
+            fs_paths,
+            ros_patterns,
             credential_slots,
             exports,
             cpu_fuel,
@@ -1097,6 +1110,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 &version,
                 capabilities.as_deref(),
                 &http_endpoints,
+                &fs_paths,
+                &ros_patterns,
                 &credential_slots,
                 &exports,
                 gang_core::manifest::ResourceLimits {
