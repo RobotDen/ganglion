@@ -549,8 +549,8 @@ mod tests {
     (with "wasi" (instance (export "exit" (func $exit_lowered))))))
   (func (export "run") (param "args" (list string))
         (result (result (list u8) (error string)))
-    (canon lift (core func $i "run") (memory $i "mem")
-      (realloc (func $i "cabi_realloc")))))"#
+    (canon lift (core func $i "run") (memory (core memory $i "mem"))
+      (realloc (core func $i "cabi_realloc")))))"#
         );
         wat::parse_str(&wat).expect("component wat parses")
     }
@@ -586,12 +586,12 @@ mod tests {
   (core instance $i (instantiate $m))
   (func (export "run") (param "args" (list string))
         (result (result (list u8) (error string)))
-    (canon lift (core func $i "run") (memory $i "mem")
-      (realloc (func $i "cabi_realloc"))))
+    (canon lift (core func $i "run") (memory (core memory $i "mem"))
+      (realloc (core func $i "cabi_realloc"))))
   (func (export "observe") (param "args" (list string))
         (result (result (list u8) (error string)))
-    (canon lift (core func $i "observe") (memory $i "mem")
-      (realloc (func $i "cabi_realloc")))))"#
+    (canon lift (core func $i "observe") (memory (core memory $i "mem"))
+      (realloc (core func $i "cabi_realloc")))))"#
         );
         wat::parse_str(&wat).expect("component wat parses")
     }
