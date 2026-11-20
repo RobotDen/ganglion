@@ -56,16 +56,24 @@ where
 }
 
 async fn start_adapter(config: Libp2pConfig) -> Arc<Libp2pTransportAdapter> {
+    start_adapter_with_loop(config).await.0
+}
+
+/// [`start_adapter`], also returning the event-loop task, so a test can tear
+/// down exactly as the CLI does: `shutdown()`, then abort the loop task.
+async fn start_adapter_with_loop(
+    config: Libp2pConfig,
+) -> (Arc<Libp2pTransportAdapter>, tokio::task::JoinHandle<()>) {
     let adapter = Arc::new(
         Libp2pTransportAdapter::new(config)
             .await
             .expect("adapter builds"),
     );
     let looped = Arc::clone(&adapter);
-    tokio::spawn(async move {
+    let event_loop = tokio::spawn(async move {
         let _ = looped.run_event_loop().await;
     });
-    adapter
+    (adapter, event_loop)
 }
 
 async fn start_relay(dir: &Path) -> (Arc<Libp2pTransportAdapter>, String) {
@@ -237,13 +245,15 @@ struct OperatorFixture {
     registry_path: std::path::PathBuf,
     /// The transport request id of the enrollment the handler accepted.
     accepted_request: Arc<std::sync::Mutex<Option<u64>>>,
+    /// The operator's event-loop task (aborted after shutdown, as `gang pair` does).
+    operator_loop: tokio::task::JoinHandle<()>,
 }
 
 async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
     let (relay, relay_addr) = start_relay(dir).await;
 
     let op_key = dir.join("operator.key");
-    let operator = start_adapter(Libp2pConfig {
+    let (operator, operator_loop) = start_adapter_with_loop(Libp2pConfig {
         key_path: op_key.clone(),
         listen_addrs: vec![],
         relay_addrs: vec![relay_addr.clone()],
@@ -291,6 +301,7 @@ async fn setup_operator(dir: &Path, ttl_from_now: Duration) -> OperatorFixture {
         consumed,
         registry_path,
         accepted_request,
+        operator_loop,
     }
 }
 
@@ -700,9 +711,13 @@ async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
         earlier_replies >= 1,
         "the rejected attempt's reply must have been seen and skipped"
     );
+    // Exactly the shipping teardown in `gang pair`: shutdown, then abort the
+    // event-loop task. shutdown() must not return before the graceful close
+    // has flushed the reply, or the abort cancels it.
     TransportAdapter::shutdown(op.operator.as_ref())
         .await
         .unwrap();
+    op.operator_loop.abort();
 
     let reply = enrolling.await.unwrap();
     assert!(

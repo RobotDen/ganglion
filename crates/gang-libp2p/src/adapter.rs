@@ -165,8 +165,10 @@ enum SwarmCommand {
         channel: ResponseChannel<Vec<u8>>,
         data: Vec<u8>,
     },
-    /// Stop the event loop.
-    Shutdown,
+    /// Close connections gracefully, then stop the event loop. `done` fires
+    /// once the connections are closed (or the grace period ran out), so a
+    /// caller can wait for that before tearing anything else down.
+    Shutdown { done: oneshot::Sender<()> },
 }
 
 /// Tracks a pending outbound request so we can deliver the response
@@ -983,8 +985,14 @@ impl SwarmWorker {
                 }
                 command = self.command_rx.recv() => {
                     match command {
-                        Some(SwarmCommand::Shutdown) | None => {
+                        Some(SwarmCommand::Shutdown { done }) => {
                             info!("Transport event loop shutting down");
+                            self.close_gracefully(SHUTDOWN_GRACE).await;
+                            let _ = done.send(());
+                            break;
+                        }
+                        None => {
+                            info!("Transport event loop shutting down (all handles dropped)");
                             self.close_gracefully(SHUTDOWN_GRACE).await;
                             break;
                         }
@@ -1151,7 +1159,7 @@ impl SwarmWorker {
                     .ganglion_rpc
                     .send_response(channel, data);
             }
-            SwarmCommand::Shutdown => {
+            SwarmCommand::Shutdown { .. } => {
                 // Handled directly in `run`; nothing to do here.
             }
         }
@@ -1670,7 +1678,19 @@ impl TransportAdapter for Libp2pTransportAdapter {
     async fn shutdown(&self) -> Result<(), TransportError> {
         info!("Shutting down transport");
         // Best-effort: if the worker already stopped the channel is closed.
-        let _ = self.command_tx.send(SwarmCommand::Shutdown).await;
+        // Wait until the worker has closed its connections, so data already
+        // written (e.g. a response just sent) is flushed before the caller
+        // aborts the event loop or exits. Bounded: a worker that is already
+        // gone, or stuck, never blocks shutdown beyond the grace period.
+        let (done, closed) = oneshot::channel();
+        if self
+            .command_tx
+            .send(SwarmCommand::Shutdown { done })
+            .await
+            .is_ok()
+        {
+            let _ = tokio::time::timeout(SHUTDOWN_GRACE + Duration::from_secs(1), closed).await;
+        }
         Ok(())
     }
 }
