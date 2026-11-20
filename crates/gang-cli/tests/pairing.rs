@@ -609,3 +609,68 @@ async fn pairing_rejects_expired_token() {
         other => panic!("expected Error on expiry, got {other:?}"),
     }
 }
+
+/// `gang pair` shuts its transport down as soon as a robot enrolls. It used
+/// to do so before the `Enrolled` response had left, so the robot saw
+/// ConnectionClosed and `gang join` failed although it was recorded. The
+/// operator now waits for `TransportEvent::ResponseSent` from that robot
+/// first; this proves the event marks a point where shutting down no longer
+/// loses the response.
+#[tokio::test]
+async fn enroll_response_survives_shutdown_after_response_sent() {
+    use futures::StreamExt;
+    use gang_core::transport::TransportEvent;
+
+    let dir = TempDir::new().unwrap();
+    let op = setup_operator(dir.path(), DEFAULT_TTL).await;
+    let mut op_events = TransportAdapter::events(op.operator.as_ref());
+    let operator_pubkey = Keypair::load(&dir.path().join("operator.key"))
+        .unwrap()
+        .public_key()
+        .to_bytes()
+        .to_vec();
+
+    let robot_dir = dir.path().join("robot");
+    std::fs::create_dir_all(&robot_dir).unwrap();
+    let (robot_agent, robot) = start_robot(
+        &robot_dir,
+        &op.relay_addr,
+        &op.operator_id,
+        &operator_pubkey,
+    )
+    .await;
+    let robot_gang = robot_agent.peer_id().clone();
+    let robot_libp2p = robot.libp2p_peer_id().to_string();
+    connect_via_circuit(&robot, &op.relay_addr, &op.operator_id, &op.operator_libp2p).await;
+
+    let secret = op.token.secret.to_vec();
+    let operator_id = op.operator_id.clone();
+    let robot_rpc = Arc::clone(&robot);
+    let enrolling = tokio::spawn(async move {
+        enroll(&robot_rpc, &operator_id, secret, "robot-a", &robot_libp2p).await
+    });
+
+    // Operator side: wait for the response to be handed to the robot's
+    // connection, then shut down immediately, as `gang pair` does.
+    tokio::time::timeout(Duration::from_secs(WAIT_SECS), async {
+        while let Some(event) = op_events.next().await {
+            if let TransportEvent::ResponseSent { peer_id } = event
+                && peer_id == robot_gang
+            {
+                return;
+            }
+        }
+        panic!("event stream ended before ResponseSent");
+    })
+    .await
+    .expect("ResponseSent for the robot");
+    TransportAdapter::shutdown(op.operator.as_ref())
+        .await
+        .unwrap();
+
+    let reply = enrolling.await.unwrap();
+    assert!(
+        matches!(reply, ControlMessage::Enrolled { .. }),
+        "robot must receive Enrolled, got {reply:?}"
+    );
+}

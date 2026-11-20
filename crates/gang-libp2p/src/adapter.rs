@@ -1301,6 +1301,16 @@ impl SwarmWorker {
                     }));
                 }
             }
+            GanglionBehaviourEvent::GanglionRpc(request_response::Event::ResponseSent {
+                peer,
+                ..
+            }) => {
+                if let Some(gang_peer_id) = libp2p_to_gang_peer_id(&peer) {
+                    self.events.publish(TransportEvent::ResponseSent {
+                        peer_id: gang_peer_id,
+                    });
+                }
+            }
             GanglionBehaviourEvent::GanglionRpc(request_response::Event::InboundFailure {
                 peer,
                 request_id,

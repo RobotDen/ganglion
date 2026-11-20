@@ -3969,6 +3969,9 @@ pub async fn pair(
     let consumed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (done_tx, mut done_rx) =
         tokio::sync::mpsc::channel::<(String, gang_core::identity::PeerId, String)>(1);
+    // Subscribe before serving so the enrollment response's ResponseSent
+    // event can't be missed (see step 7).
+    let mut transport_events = TransportAdapter::events(transport.as_ref());
 
     // 4. Register the enrollment handler on the control protocol. It reads the
     //    wire-authenticated gang id off the stream — never trusting a claim —
@@ -4182,6 +4185,32 @@ pub async fn pair(
             anyhow::bail!("pairing cancelled before a robot enrolled");
         }
     };
+
+    // The handler reports enrollment before its `Enrolled` response has been
+    // written to the robot. Shutting down right away dropped that response,
+    // so the robot saw ConnectionClosed and `gang join` failed even though
+    // the robot was recorded. Wait (bounded) until the response is sent.
+    if let Some((_, robot_id, _)) = &outcome {
+        use futures::StreamExt;
+        let sent = async {
+            while let Some(event) = transport_events.next().await {
+                if let gang_core::transport::TransportEvent::ResponseSent { peer_id } = event
+                    && &peer_id == robot_id
+                {
+                    return;
+                }
+            }
+        };
+        if tokio::time::timeout(std::time::Duration::from_secs(10), sent)
+            .await
+            .is_err()
+        {
+            eprintln!(
+                "warning: no confirmation that the enrollment reply reached the robot; \
+                 if `gang join` reported an error there, it is still enrolled here."
+            );
+        }
+    }
 
     let _ = TransportAdapter::shutdown(transport.as_ref()).await;
     event_loop.abort();

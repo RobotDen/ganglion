@@ -158,6 +158,14 @@ pub enum TransportEvent {
         /// The peer whose connection was upgraded.
         peer_id: PeerId,
     },
+    /// A response to an inbound RPC was handed to the connection for `peer_id`.
+    /// A caller that answers a final request (e.g. `gang pair` enrolling a
+    /// robot) waits for this before shutting the transport down, so the
+    /// response is not lost with the connection.
+    ResponseSent {
+        /// The peer the response went to.
+        peer_id: PeerId,
+    },
 }
 
 /// The core transport adapter trait. Protocol-agnostic core, opinionated defaults.
