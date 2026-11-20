@@ -24,6 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: shellcheck scripts/*.sh .githooks/pre-commit .githooks/pre-push
+  vendored-wit:
+    name: Vendored WIT in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: ./scripts/check-vendored-wit.sh
   fmt:
     name: Format
     runs-on: ubuntu-latest
