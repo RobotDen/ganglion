@@ -84,6 +84,10 @@ jobs:
       # MSRV job checks buildability only; lint differences between compiler
       # versions should not fail it.
       RUSTFLAGS: ""
+      # rust-toolchain.toml says `channel = "stable"`, which overrides the
+      # toolchain the action installs. Pin it here so this job really builds
+      # on the MSRV (it silently ran on stable before).
+      RUSTUP_TOOLCHAIN: "1.88"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
