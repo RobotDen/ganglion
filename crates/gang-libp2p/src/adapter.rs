@@ -40,6 +40,10 @@ pub type InboundEventStreams = Pin<Box<dyn Stream<Item = (PeerId, libp2p::Stream
 pub type TopicStream = Pin<Box<dyn Stream<Item = gang_core::topics::TopicStreamMessage> + Send>>;
 
 /// `active` encoding: the push substream is live.
+/// How long a shutdown waits for connections to close cleanly (flushing any
+/// response still in flight) before the swarm is dropped.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+
 const ACTIVE_PUSH: u8 = 0;
 /// `active` encoding: the poll fallback is live.
 const ACTIVE_POLL: u8 = 1;
@@ -981,6 +985,7 @@ impl SwarmWorker {
                     match command {
                         Some(SwarmCommand::Shutdown) | None => {
                             info!("Transport event loop shutting down");
+                            self.close_gracefully(SHUTDOWN_GRACE).await;
                             break;
                         }
                         Some(command) => self.handle_command(command).await,
@@ -1148,6 +1153,25 @@ impl SwarmWorker {
             }
             SwarmCommand::Shutdown => {
                 // Handled directly in `run`; nothing to do here.
+            }
+        }
+    }
+
+    /// Close every connection and keep driving the swarm until they are
+    /// gone (or `grace` elapses). Dropping the swarm outright discarded data
+    /// still buffered in the muxer, e.g. a response the application had just
+    /// sent: the peer then saw ConnectionClosed instead of its reply.
+    async fn close_gracefully(&mut self, grace: Duration) {
+        let peers: Vec<Libp2pPeerId> = self.swarm.connected_peers().copied().collect();
+        for peer in peers {
+            let _ = self.swarm.disconnect_peer_id(peer);
+        }
+        let deadline = tokio::time::Instant::now() + grace;
+        while self.swarm.network_info().num_peers() > 0 {
+            match tokio::time::timeout_at(deadline, futures::StreamExt::next(&mut self.swarm)).await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => break,
             }
         }
     }
