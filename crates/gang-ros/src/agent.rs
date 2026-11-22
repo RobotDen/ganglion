@@ -1091,8 +1091,10 @@ impl RobotAgent {
                 ganglion_version: env!("CARGO_PKG_VERSION").to_string(),
                 uptime_secs: self.uptime_secs(),
                 archetype: None,
+                // Same view as ListCapabilities: a peer whose rule limits it
+                // with allowed_capabilities only sees those names.
                 installed_capabilities: self
-                    .list_capabilities()
+                    .list_capabilities_for(subscriber)
                     .await
                     .into_iter()
                     .map(|c| c.name)
@@ -2392,6 +2394,33 @@ can_deploy = true
             .await
             .unwrap_err();
         assert_eq!(installed.to_string(), missing.to_string());
+    }
+
+    #[tokio::test]
+    async fn presence_snapshot_honours_allowed_capabilities() {
+        // The event feed's snapshot must not name capabilities the peer's
+        // rule excludes; it shows what ListCapabilities shows.
+        let dir = TempDir::new().unwrap();
+        let op = Keypair::generate();
+        let agent = op_only_agent(dir.path(), &op, "allowed_capabilities = [\"other\"]\n");
+        deploy_diag(&agent, &op).await;
+
+        let events = agent
+            .build_event_subscription(&op.peer_id(), &EventSubscribeRequest::fresh())
+            .await
+            .unwrap();
+        let names: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::PresenceSnapshot {
+                    installed_capabilities,
+                    ..
+                } => Some(installed_capabilities.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(!names.contains(&"diag".to_string()), "{names:?}");
     }
 
     #[tokio::test]
