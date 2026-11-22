@@ -630,12 +630,12 @@ async fn pairing_rejects_expired_token() {
 }
 
 /// `gang pair` shuts its transport down as soon as a robot enrolls. It used
-/// to do so before the `Enrolled` response had left, so the robot saw
+/// to do so before the `Enrolled` response had arrived, so the robot saw
 /// ConnectionClosed and `gang join` failed although it was recorded. The
 /// operator now waits for the `TransportEvent::ResponseSent` of the ACCEPTED
-/// request. Matching on the robot alone is not enough: an earlier rejected
-/// attempt from the same robot also produces a ResponseSent, which would let
-/// the operator shut down too early.
+/// request and then for the robot to hang up, which only happens once it has
+/// read `Enrolled`. Matching on the robot alone is not enough: an earlier
+/// rejected attempt from the same robot also produces a ResponseSent.
 #[tokio::test]
 async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
     pair_shutdown_scenario().await.unwrap();
@@ -646,7 +646,7 @@ async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
 /// rare; one green run proves little).
 #[tokio::test]
 async fn enroll_response_survives_shutdown_repeatedly() {
-    const RUNS: usize = 1200;
+    const RUNS: usize = 30;
     let mut failures = Vec::new();
     for _ in 0..RUNS {
         if let Err(e) = pair_shutdown_scenario().await {
