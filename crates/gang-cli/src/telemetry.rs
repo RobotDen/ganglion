@@ -229,22 +229,9 @@ mod imp {
         let _ = std::fs::create_dir_all(&dir);
         accumulate(&dir, category, ok);
 
-        // Notice before first send (ADR-026): show it once; send nothing
-        // on the day it is shown.
-        if !dir.join("notice-shown").exists() {
-            show_notice();
-            let _ = std::fs::write(dir.join("notice-shown"), b"1");
+        if !send_due_now(&dir, &today_utc()) {
             return;
         }
-
-        let today = today_utc();
-        let last = std::fs::read_to_string(dir.join("last-check")).unwrap_or_default();
-        if last.trim() == today {
-            return;
-        }
-        // Mark the day attempted BEFORE sending: a failed send must not turn
-        // into more attempts (no retries, ever).
-        let _ = std::fs::write(dir.join("last-check"), &today);
 
         let payload = drain_payload(&dir);
         let latest = send(&payload);
@@ -263,6 +250,29 @@ mod imp {
         {
             maybe_print_update_notice(&dir, &latest);
         }
+    }
+
+    /// Decide whether this command should flush the daily checkpoint.
+    ///
+    /// Notice before first send (ADR-026): the first time, show the notice
+    /// and send nothing for the rest of that UTC day, as the notice itself
+    /// promises ("Nothing was sent today; sending starts tomorrow"). The day
+    /// is recorded as already checked, so later commands that day don't
+    /// send either. After that, at most one attempt per UTC day; the day is
+    /// marked BEFORE sending, so a failed send never turns into retries.
+    fn send_due_now(dir: &Path, today: &str) -> bool {
+        if !dir.join("notice-shown").exists() {
+            show_notice();
+            let _ = std::fs::write(dir.join("notice-shown"), b"1");
+            let _ = std::fs::write(dir.join("last-check"), today);
+            return false;
+        }
+        let last = std::fs::read_to_string(dir.join("last-check")).unwrap_or_default();
+        if last.trim() == today {
+            return false;
+        }
+        let _ = std::fs::write(dir.join("last-check"), today);
+        true
     }
 
     /// Add one outcome to the pending counter file.
@@ -789,6 +799,27 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn nothing_is_sent_on_the_day_the_notice_is_shown() {
+            // The notice says "Nothing was sent today; sending starts
+            // tomorrow": no command that day may send, not just the first.
+            let dir = tempfile::TempDir::new().unwrap();
+            let d = dir.path();
+            assert!(
+                !send_due_now(d, "2026-11-22"),
+                "notice command must not send"
+            );
+            assert!(
+                !send_due_now(d, "2026-11-22"),
+                "later same-day command must not send"
+            );
+            assert!(
+                send_due_now(d, "2026-11-23"),
+                "first command next day sends"
+            );
+            assert!(!send_due_now(d, "2026-11-23"), "at most one send per day");
+        }
 
         #[test]
         fn allowlist_excludes_robot_and_field_commands() {

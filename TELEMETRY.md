@@ -55,10 +55,10 @@ prints yours byte-for-byte before anything is sent:
 {
   "schema": 1,
   "id": "8b1e…",                    // random UUID — see "Anonymity" below
-  "version": "2.5.0",
+  "version": "2.6.0",
   "os": "linux",
   "arch": "aarch64",
-  "dist": "brew",
+  "dist": "release",                // "release": prebuilt binary (install script, Homebrew, binstall); "source": built from source
   "counts": { "deploy": {"ok": 3, "err": 1}, "policy": {"ok": 5, "err": 0} }
 }
 ```
