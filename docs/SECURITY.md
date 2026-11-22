@@ -150,6 +150,12 @@ allowed_patterns = ["echo", "cat"]
 [[peer_rules]]
 peer_id = "*"
 can_deploy = true
+# can_invoke defaults to true: peers a rule names may also list and run
+# installed capabilities; allowed_capabilities = ["name", ...] limits which
+# ones (and the listing) for that rule. Rules are OR'd, as for can_deploy: a
+# peer may act if ANY matching rule allows it, so this "*" rule grants every
+# peer, and can_invoke = false on a peer's own rule only blocks it when no
+# other matching rule (such as "*") allows invoking.
 ```
 
 ### Fail-closed loading
@@ -164,7 +170,7 @@ is a separate, explicit code path.)
 Policy is evaluated at two points:
 
 1. **Deploy time** — before the component is stored on disk. If policy rejects the declared capabilities, the deployment fails and nothing is written.
-2. **Invoke time** — before the component is loaded into the WASM runtime. This catches policy changes between deploy and invoke.
+2. **Invoke time** — before the component runs, and before the robot answers a capability listing. The calling peer must be in the trust store (when the store is non-empty) and match a `[[peer_rules]]` entry with `can_invoke` (default true), honouring its `allowed_capabilities`. The capability's declared groups are re-checked against the policy as it stands *now*, so a timed grant (`gang policy allow --until`) that has expired, or a rule narrowed on disk, stops the capability running immediately, before the re-sync sweep revokes it.
 
 ### Pattern matching
 

@@ -224,7 +224,7 @@ The policy engine is default-deny. Policy files are TOML and define:
 - **Peer rules**: which operators can deploy capabilities, optionally restricted to specific capability names
 - **Access levels**: for ROS interface, maximum access level (read_only vs read_write)
 
-Policy is evaluated at deploy time (before the component is stored) and at invoke time (before the component is loaded into the runtime).
+Policy is evaluated at deploy time (before the component is stored) and at invoke time (before the component runs: the caller must be authorized by the trust store and a `peer_rules` entry with `can_invoke`, and the declared groups must still be permitted). Capability listing requires the same caller authorization.
 
 ## Audit Logging
 

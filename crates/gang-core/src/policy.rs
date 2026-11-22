@@ -87,9 +87,21 @@ pub struct PeerRule {
     pub peer_id: String,
     /// Whether this peer can deploy capabilities.
     pub can_deploy: bool,
+    /// Whether this peer can invoke and list installed capabilities (SEC-17).
+    /// Defaults to true, so every peer a rule names may run what is installed.
+    /// Rules are OR'd, as for `can_deploy`: a peer may invoke if ANY rule
+    /// matching it allows it, so a `"*"` rule with `can_invoke = true` grants
+    /// every peer, and `can_invoke = false` on a peer's own rule only takes
+    /// effect when no other matching rule allows invoking.
+    #[serde(default = "default_true")]
+    pub can_invoke: bool,
     /// Optional: restrict to specific capability names.
     #[serde(default)]
     pub allowed_capabilities: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Policy {
@@ -170,6 +182,7 @@ impl Policy {
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         }
@@ -201,6 +214,52 @@ impl Policy {
         }
 
         Ok(())
+    }
+
+    /// Authorize `peer` to invoke the installed capability `name`, which
+    /// declares `declared` (SEC-17). The peer must match a rule with
+    /// `can_invoke` (a `"*"` rule matches anyone); a rule's non-empty
+    /// `allowed_capabilities` restricts it to those names. The declared groups
+    /// are re-checked against the policy *now*, so a timed grant that has
+    /// expired, or a rule narrowed on disk, stops the capability running even
+    /// before the re-sync sweep revokes it (SEC-21).
+    pub fn authorize_invoke_at(
+        &self,
+        peer: &PeerId,
+        name: &str,
+        declared: &[CapabilityGroup],
+        now_unix: i64,
+    ) -> Result<(), PolicyError> {
+        self.authorize_list(peer, Some(name))?;
+        for cap in declared {
+            self.check_capability_permitted(cap, now_unix)?;
+        }
+        Ok(())
+    }
+
+    /// Authorize `peer` to list installed capabilities, or (with `name`) to
+    /// invoke that one: a matching rule with `can_invoke`, honouring its
+    /// `allowed_capabilities`.
+    pub fn authorize_list(&self, peer: &PeerId, name: Option<&str>) -> Result<(), PolicyError> {
+        let allowed = self.peer_rules.iter().any(|rule| {
+            (rule.peer_id == "*" || rule.peer_id == peer.as_str())
+                && rule.can_invoke
+                && match name {
+                    Some(n) => {
+                        rule.allowed_capabilities.is_empty()
+                            || rule.allowed_capabilities.iter().any(|c| c == n)
+                    }
+                    None => true,
+                }
+        });
+        if allowed {
+            Ok(())
+        } else {
+            Err(PolicyError::InvokeNotAuthorized {
+                peer: peer.to_string(),
+                capability: name.unwrap_or("*").to_string(),
+            })
+        }
     }
 
     fn check_peer_authorized(&self, peer: &PeerId) -> Result<(), PolicyError> {
@@ -575,7 +634,7 @@ impl Policy {
             });
         }
         for cap in declared {
-            if let Some(report) = self.explain_capability(cap, deployer, now_unix) {
+            if let Some(report) = self.explain_capability(cap, deployer.as_str(), now_unix) {
                 return Some(report);
             }
         }
@@ -596,9 +655,11 @@ impl Policy {
         deployer_label: &str,
         now_unix: i64,
     ) -> Option<DenialReport> {
-        let label = PeerId::new(deployer_label);
+        // The label is rendering-only (e.g. "(re-sync)" for capabilities
+        // loaded from disk), never parsed as a peer id: parsing it used to
+        // panic the sweep task and silently stop revocation (SEC-21).
         for cap in declared {
-            if let Some(report) = self.explain_capability(cap, &label, now_unix) {
+            if let Some(report) = self.explain_capability(cap, deployer_label, now_unix) {
                 return Some(report);
             }
         }
@@ -608,7 +669,7 @@ impl Policy {
     fn explain_capability(
         &self,
         cap: &CapabilityGroup,
-        deployer: &PeerId,
+        deployer: &str,
         now_unix: i64,
     ) -> Option<DenialReport> {
         let group_name = cap.name().to_string();
@@ -885,6 +946,7 @@ mod tests {
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         }
@@ -1265,6 +1327,7 @@ mod tests {
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         };
@@ -1316,6 +1379,7 @@ mod tests {
             peer_rules: vec![PeerRule {
                 peer_id: allowed.peer_id().as_str().to_string(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         };
@@ -1341,6 +1405,7 @@ mod tests {
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         };
@@ -1377,6 +1442,7 @@ mod tests {
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         };
@@ -1403,6 +1469,7 @@ mod tests {
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         };
@@ -1455,6 +1522,7 @@ mod tests {
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         };
@@ -1493,6 +1561,7 @@ mod tests {
             peer_rules: vec![PeerRule {
                 peer_id: "*".into(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         };
@@ -1557,6 +1626,7 @@ mod tests {
             peer_rules: vec![PeerRule {
                 peer_id: "12D3-abc".into(),
                 can_deploy: true,
+                can_invoke: true,
                 allowed_capabilities: Vec::new(),
             }],
         };
@@ -1569,5 +1639,111 @@ mod tests {
         let toml_str = toml::to_string_pretty(&policy).unwrap();
         let loaded = Policy::from_toml(&toml_str).unwrap();
         assert_eq!(loaded.capability_rules.len(), policy.capability_rules.len());
+    }
+
+    // --- SEC-17: invoke / list authorization ---
+
+    fn diag() -> CapabilityGroup {
+        CapabilityGroup::DiagnosticsCollect {
+            version: "1.0".into(),
+        }
+    }
+
+    fn invoke_policy(peer_rules: &str) -> Policy {
+        Policy::from_toml(&format!(
+            "[[capability_rules]]\ngroup = \"ganglion:diagnostics/collect\"\n\
+             allowed_patterns = [\"**\"]\n\n{peer_rules}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn invoke_requires_a_matching_peer_rule() {
+        let op = Keypair::generate().peer_id();
+        let stranger = Keypair::generate().peer_id();
+        let policy = invoke_policy(&format!(
+            "[[peer_rules]]\npeer_id = \"{op}\"\ncan_deploy = true\n"
+        ));
+        assert!(policy.authorize_invoke_at(&op, "d", &[diag()], T0).is_ok());
+        assert!(policy.authorize_list(&op, None).is_ok());
+        let err = policy
+            .authorize_invoke_at(&stranger, "d", &[diag()], T0)
+            .unwrap_err();
+        assert!(matches!(err, PolicyError::InvokeNotAuthorized { .. }));
+        assert!(policy.authorize_list(&stranger, None).is_err());
+    }
+
+    #[test]
+    fn can_invoke_defaults_true_and_false_blocks() {
+        let op = Keypair::generate().peer_id();
+        let policy = invoke_policy(&format!(
+            "[[peer_rules]]\npeer_id = \"{op}\"\ncan_deploy = true\ncan_invoke = false\n"
+        ));
+        assert!(policy.authorize_invoke_at(&op, "d", &[diag()], T0).is_err());
+        assert!(policy.authorize_list(&op, None).is_err());
+        // A rule written before can_invoke existed still allows invoke.
+        let legacy = invoke_policy("[[peer_rules]]\npeer_id = \"*\"\ncan_deploy = true\n");
+        assert!(legacy.peer_rules[0].can_invoke);
+        assert!(legacy.authorize_invoke_at(&op, "d", &[diag()], T0).is_ok());
+    }
+
+    #[test]
+    fn allowed_capabilities_restricts_invoke_by_name() {
+        let op = Keypair::generate().peer_id();
+        let policy = invoke_policy(&format!(
+            "[[peer_rules]]\npeer_id = \"{op}\"\ncan_deploy = true\n\
+             allowed_capabilities = [\"diag\"]\n"
+        ));
+        assert!(
+            policy
+                .authorize_invoke_at(&op, "diag", &[diag()], T0)
+                .is_ok()
+        );
+        assert!(
+            policy
+                .authorize_invoke_at(&op, "other", &[diag()], T0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn invoke_rechecks_groups_so_expired_grants_stop_running() {
+        // SEC-21: an expired timed grant must stop invokes even before the
+        // re-sync sweep revokes the capability.
+        let op = Keypair::generate().peer_id();
+        let mut policy = open_peer_policy(vec![CapabilityRule {
+            group: "ganglion:ros/interface".into(),
+            allowed_patterns: vec![],
+            max_access: None,
+            timed_patterns: Vec::new(),
+        }]);
+        policy.allow_until(
+            "ganglion:ros/interface",
+            "/cmd_vel",
+            None,
+            Some("2023-11-14T23:00:00Z"),
+            T0,
+        );
+        let cap = ros_read_cap("/cmd_vel");
+        assert!(
+            policy
+                .authorize_invoke_at(&op, "t", std::slice::from_ref(&cap), T0)
+                .is_ok()
+        );
+        let after_expiry = T0 + 10 * 24 * 3600;
+        assert!(
+            policy
+                .authorize_invoke_at(&op, "t", &[cap], after_expiry)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn explain_capabilities_with_non_peer_label_does_not_panic() {
+        // SEC-21: the re-sync sweep passes "(re-sync)" for capabilities
+        // loaded from disk; that used to panic in PeerId::new.
+        let policy = open_peer_policy(vec![]);
+        let report = policy.explain_capabilities_at(&[diag()], "(re-sync)", T0);
+        assert_eq!(report.unwrap().deployer, "(re-sync)");
     }
 }
