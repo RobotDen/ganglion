@@ -262,6 +262,17 @@ impl Policy {
         }
     }
 
+    /// Whether `peer` may see every installed capability: some rule matching
+    /// it allows invoking with no `allowed_capabilities` restriction. A peer
+    /// that only matches restricted rules sees just its allowed names.
+    pub fn has_unrestricted_view(&self, peer: &PeerId) -> bool {
+        self.peer_rules.iter().any(|rule| {
+            (rule.peer_id == "*" || rule.peer_id == peer.as_str())
+                && rule.can_invoke
+                && rule.allowed_capabilities.is_empty()
+        })
+    }
+
     fn check_peer_authorized(&self, peer: &PeerId) -> Result<(), PolicyError> {
         if self.peer_rules.is_empty() {
             return Err(PolicyError::PeerNotAuthorized {
@@ -1745,5 +1756,21 @@ mod tests {
         let policy = open_peer_policy(vec![]);
         let report = policy.explain_capabilities_at(&[diag()], "(re-sync)", T0);
         assert_eq!(report.unwrap().deployer, "(re-sync)");
+    }
+
+    #[test]
+    fn unrestricted_view_needs_a_rule_without_allowed_capabilities() {
+        let op = Keypair::generate().peer_id();
+        let viewer = Keypair::generate().peer_id();
+        let policy = invoke_policy(&format!(
+            "[[peer_rules]]\npeer_id = \"{op}\"\ncan_deploy = true\n\n\
+             [[peer_rules]]\npeer_id = \"{viewer}\"\ncan_deploy = false\n\
+             allowed_capabilities = [\"other\"]\n"
+        ));
+        assert!(policy.has_unrestricted_view(&op));
+        assert!(!policy.has_unrestricted_view(&viewer));
+        // A "*" rule with no restriction gives everyone the full view.
+        let open = invoke_policy("[[peer_rules]]\npeer_id = \"*\"\ncan_deploy = true\n");
+        assert!(open.has_unrestricted_view(&viewer));
     }
 }
