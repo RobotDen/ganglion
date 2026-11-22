@@ -376,13 +376,9 @@ impl Libp2pTransportAdapter {
             .map_err(|e| crate::TransportError::Relay(e.to_string()))
     }
 
-    /// Dial a peer by their libp2p multiaddr.
-    ///
-    /// The wait for the swarm worker's reply is bounded by the same 30-second
-    /// request timeout `send_rpc` uses, so a caller can never hang forever —
-    /// e.g. when the event loop has not been started yet.
     /// Close every connection to the peer with this dialable (base58) libp2p
-    /// id. Best-effort: a peer that isn't connected is not an error.
+    /// id. Best-effort: a peer that isn't connected is not an error. Handing
+    /// the command to the swarm worker is bounded by the request timeout.
     pub async fn disconnect_libp2p(&self, libp2p_id: &str) -> Result<(), TransportError> {
         let peer: Libp2pPeerId = libp2p_id
             .parse()
@@ -392,12 +388,25 @@ impl Libp2pTransportAdapter {
                     reason: e.to_string(),
                 },
             )?;
-        self.command_tx
-            .send(SwarmCommand::Disconnect { peer })
-            .await
-            .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))
+        match tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.command_tx.send(SwarmCommand::Disconnect { peer }),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(TransportError::ConnectionClosed(
+                "swarm task is not running".into(),
+            )),
+            Err(_) => Err(TransportError::Timeout(REQUEST_TIMEOUT)),
+        }
     }
 
+    /// Dial a peer by their libp2p multiaddr.
+    ///
+    /// The wait for the swarm worker's reply is bounded by the same 30-second
+    /// request timeout `send_rpc` uses, so a caller can never hang forever —
+    /// e.g. when the event loop has not been started yet.
     pub async fn dial_multiaddr(&self, addr: &str) -> Result<(), TransportError> {
         let addr_str = addr.to_string();
         let addr: Multiaddr =
@@ -1024,9 +1033,14 @@ impl SwarmWorker {
                         Some(SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. }) => {
                             self.on_connection_established(peer_id, endpoint).await;
                         }
-                        Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                        Some(SwarmEvent::ConnectionClosed { peer_id, num_established, .. }) => {
                             info!(peer = %peer_id, "Connection closed");
-                            if let Some(gang_peer_id) = libp2p_to_gang_peer_id(&peer_id) {
+                            // The peer is gone only when its last connection
+                            // closes (e.g. a relayed one can close while a
+                            // DCUtR direct one stays up).
+                            if let (0, Some(gang_peer_id)) =
+                                (num_established, libp2p_to_gang_peer_id(&peer_id))
+                            {
                                 self.connected_peers.write().await.remove(gang_peer_id.as_str());
                                 self.events.publish(TransportEvent::PeerDisconnected {
                                     peer_id: gang_peer_id,
