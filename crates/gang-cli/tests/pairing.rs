@@ -646,7 +646,7 @@ async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
 /// rare; one green run proves little).
 #[tokio::test]
 async fn enroll_response_survives_shutdown_repeatedly() {
-    const RUNS: usize = 30;
+    const RUNS: usize = 300;
     let mut failures = Vec::new();
     for _ in 0..RUNS {
         if let Err(e) = pair_shutdown_scenario().await {
