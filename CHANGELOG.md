@@ -4,6 +4,75 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-11-22
+
+### Upgrade notes (read first)
+
+- **Telemetry is ON by default (opt-out).** Operator-side `gang` commands
+  send at most one anonymous request per day (random id, version, OS/arch,
+  install channel, per-command ok/err counts; the full list is in
+  TELEMETRY.md). It never runs from `gang agent`, `gang join` or
+  `gang relay`. A notice is printed before the first send, and nothing is
+  sent on the day you upgrade. To opt out, run `gang telemetry off`, or set
+  `DO_NOT_TRACK=1` or `GANG_TELEMETRY=off`. If you run Ganglion in
+  production, on robots or in customer environments, turn it off on every
+  operator workstation.
+- **Breaking: robots reachable over a relay need a policy.** `gang agent -r`
+  and `gang join` no longer run the permissive dev policy by default.
+  `gang agent` uses `--policy <file>`, then `<data-dir>/policy.toml`, then
+  `~/.gang/policy.toml` (written by `gang init`), and refuses to start with
+  a relay and no policy. `gang join` writes a default-deny policy that
+  authorizes only the pairing operator when none exists. New flags:
+  `--policy`, `--trust-store` (an explicit trust store must exist) and
+  `--dev-permissive` (throwaway test robots only). `gang agent`'s default
+  data dir moved from `/tmp/gang-agent` to `~/.gang/agent`, and the
+  unsupported `--config` is now an error. (#81)
+- **Re-sign components that use `fs` or `ros`.** Broker calls are now
+  confined to the patterns a component declared. Declare them with the new
+  `gang sign --fs-path PATTERN[:rw]` and `--ros-pattern PATTERN[:rw]`. A
+  group declared with no patterns permits nothing. The fs jail for
+  CLI-started agents is now `<data-dir>/sandbox/`, so components that read
+  or wrote host paths outside it are refused. (#84)
+- **CLI exit can take up to about 4 s longer.** Shutting down a transport
+  now closes its connections cleanly so replies already sent are not lost.
+  (#83)
+
+### Security
+
+These fix the robot-side trust gaps found in the November 2026 audit.
+
+- **Invoke and listing are authorized (SEC-17).** Any peer that could reach
+  a robot could list and run its installed capabilities. Invoke, listing,
+  the event feed, live topic streams and the usage bundle now require the
+  caller to be in the trust store (when one is configured) and to match a
+  policy `[[peer_rules]]` entry with `can_invoke` (new, default true).
+  `allowed_capabilities` is enforced, listings and the feed's presence
+  snapshot show only allowed capabilities, and an unauthorized caller can't
+  tell installed names from missing ones. (#82, #86)
+- **Network-reachable robots no longer run permissive by default
+  (SEC-18).** See the upgrade note above. (#81)
+- **Broker calls confined to the declared scope (SEC-19).** Every guest
+  call (fs paths with read/write, ROS names with access level, log
+  sources, process commands) is checked against the component's own
+  signed declaration, not only the agent-wide rules. The fs jail is a
+  dedicated `sandbox/` that excludes the identity key, trust store, policy
+  and credentials bindings, and a symlinked `sandbox` is refused. (#84)
+- **Expired grants are revoked after a restart (SEC-21).** The policy
+  re-sync sweep panicked for capabilities loaded from disk, so expired
+  `--until` grants and rules narrowed on disk were never revoked after an
+  agent restart. The sweep is fixed, and invoke re-checks the declared
+  groups against the current policy, so an expired grant stops working
+  immediately. (#82)
+- **Capability names are validated (SEC-22).** A manifest name is used as
+  a path on the robot. Names are now 1-128 characters of `[A-Za-z0-9._-]`
+  starting with a letter or digit, checked when a manifest is verified and
+  in `gang sign`. (#84)
+- **Dependencies updated to clear RustSec advisories.** That covers
+  wasmtime (including Cranelift aarch64 miscompile and limit-bypass fixes),
+  quinn-proto, rustls, zstd, tokio and hickory (via libp2p 0.56 to 0.57),
+  plus a yanked crate. `cargo audit` reports no known vulnerabilities.
+  (#68)
+
 ### Added
 
 - **`gang sign` resource-limit flags (#48).** `--cpu-fuel`,
@@ -13,23 +82,10 @@ All notable changes to Ganglion will be documented in this file.
   applies host defaults for zeros and clamps every request to its hard
   caps — a signer can request but never exceed host policy.
 
-### Fixed
-
-- **`gang config set` no longer drops the telemetry opt-out.** It rewrote
-  `config.toml` from its typed struct, which silently removed settings the
-  struct doesn't model, including `[telemetry] enabled = false` from
-  `gang telemetry off`, so one `config set` turned telemetry back on. It now
-  edits the file in place and changes only the given key. A file that isn't
-  valid TOML or doesn't match the config schema is left untouched with an
-  error, instead of being replaced by defaults plus the one key. (Comments in
-  the file are still not preserved.)
-
-- **`ResourceLimits` docs matched to behavior (#49).** `cpu_fuel: 0` was
-  documented "unlimited" but has always meant "host default (1e6),
-  clamped to the 1e10 hard cap"; `wall_clock_secs: 0` likewise means the
-  300 s default, never "no deadline". Docs now state the real semantics
-  (there is no unlimited setting, by design) and a regression test locks
-  them to the implementation.
+- **`gang sign --fs-path` and `--ros-pattern`.** Declare the exact paths and
+  ROS names a component may use (`PATTERN[:rw]`). Any pattern flag counts
+  as an explicit declaration and no longer gets the permissive
+  diagnostics + logs fallback. (#84)
 
 - **Fleet usage bundles (ADR-027).** Robots accumulate a local-only
   anonymous usage file — capability-*group* ok/err counts and a bare
@@ -59,6 +115,51 @@ All notable changes to Ganglion will be documented in this file.
   explicit production-disable guidance; the complete server side (a
   Cloudflare Worker that discards IPs and stores only aggregates) is
   published in-repo under `telemetry/worker/` for auditability.
+
+### Fixed
+
+- **`gang join` no longer fails with ConnectionClosed after enrolling.**
+  `gang pair` shut down before its reply reached the robot, so the robot
+  exited with an error although the operator had recorded it. (#83)
+- **`gang config set` no longer drops the telemetry opt-out.** It rewrote
+  `config.toml` from its typed struct, which silently removed settings the
+  struct doesn't model, including `[telemetry] enabled = false` from
+  `gang telemetry off`, so one `config set` turned telemetry back on. It now
+  edits the file in place and changes only the given key. A file that isn't
+  valid TOML or doesn't match the config schema is left untouched with an
+  error, instead of being replaced by defaults plus the one key. (Comments in
+  the file are still not preserved.)
+
+- **`ResourceLimits` docs matched to behavior (#49).** `cpu_fuel: 0` was
+  documented "unlimited" but has always meant "host default (1e6),
+  clamped to the 1e10 hard cap"; `wall_clock_secs: 0` likewise means the
+  300 s default, never "no deadline". Docs now state the real semantics
+  (there is no unlimited setting, by design) and a regression test locks
+  them to the implementation.
+
+- **`gang relay --help` text restored.** The relay's help text sat on the
+  `telemetry` command, so `gang relay` had none and `gang telemetry --help`
+  described the relay. (#68)
+
+### Build and CI
+
+- The workspace uses the MSRV-aware resolver, so dependency updates respect
+  `rust-version` 1.88, and the "MSRV (1.88)" CI job now really builds on
+  1.88. (#80)
+- Builds with Rust 1.100. (#68)
+- CI checks the vendored capability WIT copies. (#67)
+- Fixed a startup race in the Docker test harness's relay entrypoint that
+  failed nightly chaos runs, and chaos failures are now reported on one
+  issue. (#69)
+- Release binaries report the `release` install channel to telemetry, and
+  builds from source report `source`.
+
+### Known limitation
+
+- For a peer whose policy rule limits it with `allowed_capabilities`, the
+  event feed's policy-decision and audit events may still name capabilities
+  outside that scope. The presence snapshot and listings are already
+  filtered. This will be fixed in the next release.
 
 ## [2.5.0] - 2026-08-20
 

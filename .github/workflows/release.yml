@@ -151,6 +151,10 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build gang binary
+        # Telemetry's install channel (TELEMETRY.md): prebuilt binaries report
+        # "release"; anything built from source keeps the "source" default.
+        env:
+          GANG_DIST: release
         run: cargo build --release --locked -p gang --target ${{ matrix.target }}
       - name: Package tarball
         run: |
