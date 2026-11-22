@@ -638,6 +638,33 @@ async fn pairing_rejects_expired_token() {
 /// the operator shut down too early.
 #[tokio::test]
 async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
+    pair_shutdown_scenario().await.unwrap();
+}
+
+/// Run the shutdown scenario 30 times and fail with the failure count, so CI
+/// logs show the rate on each platform (the reply loss was macOS-only and
+/// rare; one green run proves little).
+#[tokio::test]
+async fn enroll_response_survives_shutdown_repeatedly() {
+    const RUNS: usize = 30;
+    let mut failures = Vec::new();
+    for _ in 0..RUNS {
+        if let Err(e) = pair_shutdown_scenario().await {
+            failures.push(e);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "FLAKE_PROBE failures={}/{RUNS}: {:?}",
+        failures.len(),
+        failures.first()
+    );
+}
+
+/// The `gang pair` teardown race: a rejected attempt, then the accepted
+/// enrollment from the same robot over a relay circuit; the operator tears
+/// down exactly as `gang pair` does. Returns the robot's outcome.
+async fn pair_shutdown_scenario() -> Result<(), String> {
     use futures::StreamExt;
     use gang_core::transport::TransportEvent;
 
@@ -719,9 +746,9 @@ async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
         .unwrap();
     op.operator_loop.abort();
 
-    let reply = enrolling.await.unwrap();
-    assert!(
-        matches!(reply, ControlMessage::Enrolled { .. }),
-        "robot must receive Enrolled, got {reply:?}"
-    );
+    match enrolling.await {
+        Ok(ControlMessage::Enrolled { .. }) => Ok(()),
+        Ok(other) => Err(format!("robot got {other:?} instead of Enrolled")),
+        Err(e) => Err(format!("robot's enroll RPC failed: {e}")),
+    }
 }
