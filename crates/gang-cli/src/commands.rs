@@ -2403,6 +2403,8 @@ pub async fn sign(
     version: &str,
     capabilities: Option<&[String]>,
     http_endpoints: &[String],
+    fs_paths: &[String],
+    ros_patterns: &[String],
     credential_slots: &[String],
     exports: &[String],
     limits: gang_core::manifest::ResourceLimits,
@@ -2437,6 +2439,9 @@ pub async fn sign(
             .unwrap_or("unknown")
             .to_string()
     });
+    // SEC-22: the robot rejects names it can't safely use as a path; say so
+    // here rather than at deploy time.
+    gang_core::manifest::validate_capability_name(&name)?;
 
     // Declared capabilities: from --capabilities when provided, otherwise a
     // permissive default set with a loud warning (real WIT-import extraction is
@@ -2446,6 +2451,11 @@ pub async fn sign(
             .iter()
             .map(|s| parse_capability_group(s))
             .collect::<anyhow::Result<Vec<_>>>()?,
+        // A pattern flag is an explicit declaration too: never pad it with
+        // the permissive fallback (CLI-29).
+        _ if !(http_endpoints.is_empty() && fs_paths.is_empty() && ros_patterns.is_empty()) => {
+            Vec::new()
+        }
         _ => {
             eprintln!(
                 "WARNING: no --capabilities provided. Falling back to a permissive default \
@@ -2500,6 +2510,70 @@ pub async fn sign(
         }
     }
 
+    // --fs-path / --ros-pattern PATTERN[:rw]: the exact paths and ROS names
+    // the component may touch. The robot confines every broker call to these
+    // (SEC-19), so a group declared without patterns can touch nothing.
+    let split_rw = |spec: &str| match spec.strip_suffix(":rw") {
+        Some(p) => (p.to_string(), true),
+        None => (spec.to_string(), false),
+    };
+    if !fs_paths.is_empty() {
+        use gang_core::capability::FsAccessPattern;
+        let paths = fs_paths
+            .iter()
+            .map(|spec| {
+                let (pattern, write) = split_rw(spec);
+                anyhow::ensure!(
+                    pattern.starts_with('/') && !pattern.split('/').any(|c| c == ".."),
+                    "--fs-path must be an absolute path pattern without '..' (got \"{pattern}\")"
+                );
+                Ok(FsAccessPattern {
+                    pattern,
+                    read: true,
+                    write,
+                    execute: false,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        match declared_capabilities.iter_mut().find_map(|g| match g {
+            CapabilityGroup::FsBounded { paths, .. } => Some(paths),
+            _ => None,
+        }) {
+            Some(existing) => existing.extend(paths),
+            None => declared_capabilities.push(CapabilityGroup::FsBounded {
+                version: "1.0".into(),
+                paths,
+            }),
+        }
+    }
+    if !ros_patterns.is_empty() {
+        use gang_core::capability::{AccessPattern, RosAccess};
+        let patterns: Vec<AccessPattern> = ros_patterns
+            .iter()
+            .map(|spec| {
+                let (pattern, write) = split_rw(spec);
+                AccessPattern {
+                    pattern,
+                    access: if write {
+                        RosAccess::ReadWrite
+                    } else {
+                        RosAccess::ReadOnly
+                    },
+                }
+            })
+            .collect();
+        match declared_capabilities.iter_mut().find_map(|g| match g {
+            CapabilityGroup::RosInterface { patterns, .. } => Some(patterns),
+            _ => None,
+        }) {
+            Some(existing) => existing.extend(patterns),
+            None => declared_capabilities.push(CapabilityGroup::RosInterface {
+                version: "1.0".into(),
+                patterns,
+            }),
+        }
+    }
+
     // Resource limits (#48): written into the signed manifest verbatim; the
     // robot's runtime applies host defaults for zeros and clamps every value
     // to its hard cap, so a signer can request but never exceed host policy.
@@ -2550,6 +2624,29 @@ pub async fn sign(
         }
     }
     Ok(())
+}
+
+/// The filesystem jail for capabilities run by a CLI-started agent: a
+/// dedicated `<dir>/sandbox/` (created if absent), never the agent's own
+/// data directory, which holds its identity key, trust store, policy and
+/// credentials bindings (SEC-19).
+pub(crate) fn sandbox_fs_rule(dir: &Path) -> anyhow::Result<gang_ros::filesystem::FsRule> {
+    let sandbox = dir.join("sandbox");
+    // A planted `sandbox -> <data-dir>` symlink would re-widen the jail to
+    // the agent's own state: refuse it rather than follow it.
+    if std::fs::symlink_metadata(&sandbox).is_ok_and(|m| m.file_type().is_symlink()) {
+        anyhow::bail!(
+            "capability sandbox {} is a symlink; refusing to use it as the fs jail",
+            sandbox.display()
+        );
+    }
+    std::fs::create_dir_all(&sandbox)
+        .with_context(|| format!("creating capability sandbox {}", sandbox.display()))?;
+    Ok(gang_ros::filesystem::FsRule {
+        pattern: format!("{}/**", sandbox.display()),
+        read: true,
+        write: true,
+    })
 }
 
 /// The policy a robot-side command (`gang agent`, `gang join`) runs under.
@@ -2655,7 +2752,6 @@ pub async fn agent(
     dev_permissive: bool,
 ) -> anyhow::Result<()> {
     use gang_ros::agent::{AgentConfig, RobotAgent};
-    use gang_ros::filesystem::FsRule;
     use std::sync::Arc;
 
     // Loading an AgentConfig from a file is not supported (gang-ros exposes no
@@ -2693,11 +2789,7 @@ pub async fn agent(
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
-        fs_allowed_patterns: vec![FsRule {
-            pattern: format!("{}/**", data_dir.display()),
-            read: true,
-            write: true,
-        }],
+        fs_allowed_patterns: vec![sandbox_fs_rule(&data_dir)?],
         log_allowed_sources: vec!["**".into()],
     };
 
@@ -2861,7 +2953,6 @@ pub async fn deploy(
 ) -> anyhow::Result<()> {
     use gang_core::message::{ControlMessage, InvokeStatus};
     use gang_ros::agent::{AgentConfig, RobotAgent};
-    use gang_ros::filesystem::FsRule;
 
     let wasm_path = Path::new(wasm_path);
     if !wasm_path.exists() {
@@ -2955,11 +3046,7 @@ pub async fn deploy(
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
-        fs_allowed_patterns: vec![FsRule {
-            pattern: format!("{}/**", data_dir.display()),
-            read: true,
-            write: true,
-        }],
+        fs_allowed_patterns: vec![sandbox_fs_rule(&data_dir)?],
         log_allowed_sources: vec!["**".into()],
     };
 
@@ -3004,7 +3091,6 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     use gang_core::message::{ControlMessage, InvokeStatus};
     use gang_ros::agent::{AgentConfig, RobotAgent};
-    use gang_ros::filesystem::FsRule;
 
     let target = resolve_target(robot, explicit_peer, explicit_relay)?;
 
@@ -3067,11 +3153,7 @@ pub async fn run(
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
-        fs_allowed_patterns: vec![FsRule {
-            pattern: format!("{}/**", data_dir.display()),
-            read: true,
-            write: true,
-        }],
+        fs_allowed_patterns: vec![sandbox_fs_rule(&data_dir)?],
         log_allowed_sources: vec!["**".into()],
     };
 
@@ -3346,7 +3428,6 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
     use gang_core::capability::CapabilityGroup;
     use gang_core::manifest::{ComponentManifest, ResourceLimits, SignedManifest};
     use gang_ros::agent::{AgentConfig, RobotAgent};
-    use gang_ros::filesystem::FsRule;
 
     println!("=== Ganglion v{} Demo ===", env!("CARGO_PKG_VERSION"));
     println!();
@@ -3373,11 +3454,7 @@ pub async fn demo(format: &OutputFormat) -> anyhow::Result<()> {
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
-        fs_allowed_patterns: vec![FsRule {
-            pattern: format!("{}/**", data_dir.display()),
-            read: true,
-            write: true,
-        }],
+        fs_allowed_patterns: vec![sandbox_fs_rule(&data_dir)?],
         log_allowed_sources: vec!["**".into()],
     };
 
@@ -3553,7 +3630,6 @@ pub async fn up(
     };
     use gang_libp2p::{Libp2pConfig, Libp2pTransportAdapter};
     use gang_ros::agent::{AgentConfig, RobotAgent};
-    use gang_ros::filesystem::FsRule;
     use std::sync::Arc;
 
     let json_output = json_flag || matches!(format, OutputFormat::Json);
@@ -3668,11 +3744,7 @@ pub async fn up(
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         usage_bundle_path: Some(robot_dir.join("usage-bundle.json")),
-        fs_allowed_patterns: vec![FsRule {
-            pattern: format!("{}/**", robot_dir.display()),
-            read: true,
-            write: true,
-        }],
+        fs_allowed_patterns: vec![sandbox_fs_rule(&robot_dir)?],
         log_allowed_sources: vec!["**".into()],
     })?);
     let robot_id = agent.peer_id().clone();
@@ -4353,7 +4425,6 @@ pub async fn join(
     use gang_core::pairing::PairingToken;
     use gang_core::transport::TransportAdapter;
     use gang_ros::agent::{AgentConfig, RobotAgent};
-    use gang_ros::filesystem::FsRule;
     use std::sync::Arc;
 
     let json_output = json_flag || matches!(format, OutputFormat::Json);
@@ -4435,11 +4506,7 @@ pub async fn join(
         policy_resync_interval_secs: 60,
         credentials_path: Some(gang_core::identity::default_config_dir().join("credentials.toml")),
         usage_bundle_path: Some(data_dir.join("usage-bundle.json")),
-        fs_allowed_patterns: vec![FsRule {
-            pattern: format!("{}/**", data_dir.display()),
-            read: true,
-            write: true,
-        }],
+        fs_allowed_patterns: vec![sandbox_fs_rule(&data_dir)?],
         log_allowed_sources: vec!["**".into()],
     })?);
 
@@ -7243,6 +7310,35 @@ mod robot_policy_tests {
         let p = data.join("p.toml");
         std::fs::write(&p, "").unwrap();
         assert!(resolve_robot_policy(Some(&p), &data, &home, true, true).is_err());
+    }
+
+    #[test]
+    fn capability_sandbox_excludes_agent_state() {
+        // SEC-19: the fs jail must not cover the key, trust store, policy or
+        // credentials bindings that live in the agent's data dir.
+        let (_t, data, _home) = dirs();
+        let rule = sandbox_fs_rule(&data).unwrap();
+        assert!(data.join("sandbox").is_dir());
+        let jail = format!("{}/", data.join("sandbox").display());
+        assert_eq!(rule.pattern, format!("{jail}**"));
+        for secret in [
+            "identity.key",
+            "trusted_peers.json",
+            "policy.toml",
+            "credentials.toml",
+        ] {
+            let p = data.join(secret).display().to_string();
+            assert!(!p.starts_with(&jail), "{p} is inside the jail");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_sandbox_is_refused() {
+        let (_t, data, _home) = dirs();
+        std::os::unix::fs::symlink(&data, data.join("sandbox")).unwrap();
+        let err = sandbox_fs_rule(&data).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
     }
 
     #[test]

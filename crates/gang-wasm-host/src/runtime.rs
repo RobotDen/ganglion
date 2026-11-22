@@ -909,4 +909,115 @@ mod tests {
         let classified = classify_invocation_error(&err, Duration::from_secs(1), None, 1000);
         assert!(matches!(classified, InvocationError::Trapped(_)));
     }
+
+    /// A component whose `run` calls the real `fs-bounded.read-file` WIT
+    /// import with `path` and returns that call's result, so a test drives
+    /// the exact guest path (imports.rs), not CapabilityHost::broker_call.
+    fn fs_reading_component(path: &str) -> Vec<u8> {
+        let len = path.len();
+        let wat = format!(
+            r#"(component
+  (import "ganglion:capability/fs-bounded@0.5.0" (instance $fs
+    (export "read-file" (func (param "path" string)
+      (result (result (list u8) (error string)))))))
+  (core module $Mem
+    (memory (export "mem") 1)
+    (global $bump (mut i32) (i32.const 8192))
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32)
+      (local $r i32)
+      (local.set $r (global.get $bump))
+      (global.set $bump (i32.add (global.get $bump) (local.get 3)))
+      (local.get $r)))
+  (core instance $mi (instantiate $Mem))
+  (alias core export $mi "mem" (core memory $mem))
+  (alias core export $mi "realloc" (core func $realloc))
+  (core func $read (canon lower (func $fs "read-file")
+    (memory $mem) (realloc $realloc)))
+  (core module $M
+    (import "env" "mem" (memory 1))
+    (import "env" "read" (func $read (param i32 i32 i32)))
+    (data (memory 0) (i32.const 1024) "{path}")
+    (func (export "run") (param i32 i32) (result i32)
+      (call $read (i32.const 1024) (i32.const {len}) (i32.const 512))
+      (i32.const 512)))
+  (core instance $i (instantiate $M
+    (with "env" (instance (export "mem" (memory $mem)) (export "read" (func $read))))))
+  (func (export "run") (param "args" (list string))
+        (result (result (list u8) (error string)))
+    (canon lift (core func $i "run") (memory $mem) (realloc $realloc))))"#
+        );
+        wat::parse_str(&wat).expect("fs component wat parses")
+    }
+
+    /// Counts calls so a test can prove the broker was never reached.
+    struct CountingFsBroker(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl gang_core::broker::CapabilityBroker for CountingFsBroker {
+        async fn handle_request(
+            &self,
+            _req: gang_core::broker::CapabilityRequest,
+        ) -> Result<gang_core::broker::CapabilityResponse, gang_core::error::BrokerError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(gang_core::broker::CapabilityResponse {
+                success: true,
+                data: b"file-bytes".to_vec(),
+                error: None,
+                bytes_in: 0,
+                bytes_out: 0,
+            })
+        }
+        fn capability_group(&self) -> &str {
+            "ganglion:fs/bounded"
+        }
+    }
+
+    #[tokio::test]
+    async fn guest_fs_import_is_confined_to_declared_paths() {
+        // SEC-19 through the real WIT import path: a component declared for
+        // /data/maps/** cannot read the agent's key, even though the broker
+        // (agent-wide rules) would have served it.
+        let broker = Arc::new(CountingFsBroker(Default::default()));
+        let mut brokers: HashMap<String, Arc<dyn gang_core::broker::CapabilityBroker>> =
+            HashMap::new();
+        brokers.insert("ganglion:fs/bounded".into(), broker.clone());
+        let runtime = ComponentRuntime::new(GanglionEngine::new().unwrap(), brokers).unwrap();
+        let declared = vec![CapabilityGroup::FsBounded {
+            version: "1.0".into(),
+            paths: vec![gang_core::capability::FsAccessPattern {
+                pattern: "/data/maps/**".into(),
+                read: true,
+                write: false,
+                execute: false,
+            }],
+        }];
+
+        let outside = fs_reading_component("/home/robot/.gang/identity.key");
+        let res = runtime
+            .invoke(
+                &outside,
+                "fs-out",
+                declared.clone(),
+                &ResourceLimits::default(),
+                vec![],
+            )
+            .await;
+        let err = format!("{:?}", res.expect_err("out-of-scope read must fail"));
+        assert!(err.contains("outside the paths"), "{err}");
+        assert_eq!(broker.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let inside = fs_reading_component("/data/maps/a.yaml");
+        let out = runtime
+            .invoke(
+                &inside,
+                "fs-in",
+                declared,
+                &ResourceLimits::default(),
+                vec![],
+            )
+            .await
+            .expect("in-scope read succeeds");
+        assert_eq!(out.data, b"file-bytes");
+        assert_eq!(broker.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }

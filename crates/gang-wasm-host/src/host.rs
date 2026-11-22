@@ -109,6 +109,11 @@ impl CapabilityHost {
         self
     }
 
+    /// The capability groups (with their patterns) this component declared.
+    pub fn declared_capabilities(&self) -> &[CapabilityGroup] {
+        &self.declared_capabilities
+    }
+
     /// Check whether a capability group is declared by this component.
     pub fn is_declared(&self, group_name: &str) -> bool {
         self.declared_capabilities
@@ -144,6 +149,14 @@ impl CapabilityHost {
                 "capability group '{capability_group}' not declared in manifest — access denied"
             ));
         }
+
+        // SEC-19: the agent's brokers apply agent-wide rules; narrow every
+        // call to the patterns this component declared (and policy approved).
+        gang_core::capability::operation_in_declared_scope(
+            &self.declared_capabilities,
+            capability_group,
+            &operation,
+        )?;
 
         let broker = self.brokers.get(capability_group).ok_or_else(|| {
             format!("no broker registered for capability group '{capability_group}'")
@@ -216,5 +229,82 @@ mod tests {
                 .registered_groups()
                 .is_empty()
         );
+    }
+
+    /// Counts calls so a test can prove the broker was never reached.
+    struct CountingBroker(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl CapabilityBroker for CountingBroker {
+        async fn handle_request(
+            &self,
+            _req: gang_core::broker::CapabilityRequest,
+        ) -> Result<gang_core::broker::CapabilityResponse, gang_core::error::BrokerError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(gang_core::broker::CapabilityResponse {
+                success: true,
+                data: vec![],
+                error: None,
+                bytes_in: 0,
+                bytes_out: 0,
+            })
+        }
+        fn capability_group(&self) -> &str {
+            "ganglion:fs/bounded"
+        }
+    }
+
+    #[tokio::test]
+    async fn out_of_scope_call_never_reaches_the_broker() {
+        // SEC-19: the agent's broker would allow anything in its jail; the
+        // host must confine the call to what the component declared first.
+        let broker = Arc::new(CountingBroker(Default::default()));
+        let mut brokers: HashMap<String, Arc<dyn CapabilityBroker>> = HashMap::new();
+        brokers.insert("ganglion:fs/bounded".into(), broker.clone());
+        let declared = vec![CapabilityGroup::FsBounded {
+            version: "1.0".into(),
+            paths: vec![gang_core::capability::FsAccessPattern {
+                pattern: "/data/maps/**".into(),
+                read: true,
+                write: false,
+                execute: false,
+            }],
+        }];
+        let host = CapabilityHost::new(brokers, declared);
+
+        let denied = host
+            .broker_call(
+                "ganglion:fs/bounded",
+                BrokerOperation::FsRead {
+                    path: "/home/robot/.gang/identity.key".into(),
+                },
+            )
+            .await;
+        assert!(denied.is_err());
+        let write = host
+            .broker_call(
+                "ganglion:fs/bounded",
+                BrokerOperation::FsWrite {
+                    path: "/data/maps/a".into(),
+                    data: vec![],
+                },
+            )
+            .await;
+        assert!(
+            write.is_err(),
+            "read-only declaration must not allow writes"
+        );
+        assert_eq!(broker.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let ok = host
+            .broker_call(
+                "ganglion:fs/bounded",
+                BrokerOperation::FsRead {
+                    path: "/data/maps/a".into(),
+                },
+            )
+            .await;
+        assert!(ok.is_ok());
+        assert_eq!(broker.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

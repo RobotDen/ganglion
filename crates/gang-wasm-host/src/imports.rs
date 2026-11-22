@@ -53,15 +53,19 @@ pub fn register_capability_imports(linker: &mut Linker<CapabilityHost>) -> anyho
 /// the borrow on StoreContextMut is released before the await point.
 async fn call_broker(
     group: &str,
-    declared: bool,
+    declared: Option<Vec<gang_core::capability::CapabilityGroup>>,
     broker: Option<Arc<dyn CapabilityBroker>>,
     operation: BrokerOperation,
 ) -> Result<CapabilityResponse, String> {
-    if !declared {
+    let Some(declared) = declared else {
         return Err(format!(
             "capability group '{group}' not declared in manifest — access denied"
         ));
-    }
+    };
+    // SEC-19: every guest call is confined to the patterns this component
+    // declared, the same check as CapabilityHost::broker_call. This is the
+    // path real WIT imports take.
+    gang_core::capability::operation_in_declared_scope(&declared, group, &operation)?;
     let broker =
         broker.ok_or_else(|| format!("no broker registered for capability group '{group}'"))?;
     let req = CapabilityRequest {
@@ -381,13 +385,20 @@ fn traceroute_hops_val(v: &serde_json::Value) -> Result<Val, String> {
 // ---------------------------------------------------------------------------
 
 /// Extract broker state from the store for a given capability group.
-/// Returns (is_declared, Option<Arc<dyn CapabilityBroker>>).
+/// Returns (the component's declared groups if `group` is among them,
+/// Option<Arc<dyn CapabilityBroker>>). The declarations travel with the call
+/// so `call_broker` can confine it to the declared scope.
 fn extract_broker_state(
     caller: &StoreContextMut<'_, CapabilityHost>,
     group: &str,
-) -> (bool, Option<Arc<dyn CapabilityBroker>>) {
+) -> (
+    Option<Vec<gang_core::capability::CapabilityGroup>>,
+    Option<Arc<dyn CapabilityBroker>>,
+) {
     let host = caller.data();
-    let declared = host.is_declared(group);
+    let declared = host
+        .is_declared(group)
+        .then(|| host.declared_capabilities().to_vec());
     let broker = host.get_broker(group).cloned();
     (declared, broker)
 }
@@ -1248,7 +1259,7 @@ mod tests {
         // for a capability group that was not declared in its manifest.
         let resp = call_broker(
             "ganglion:diagnostics/collect",
-            false, // not declared
+            None, // not declared
             None,
             BrokerOperation::SystemInfo,
         )
@@ -1268,7 +1279,11 @@ mod tests {
         // a clear error rather than panicking.
         let resp = call_broker(
             "ganglion:diagnostics/collect",
-            true, // declared
+            Some(vec![
+                gang_core::capability::CapabilityGroup::DiagnosticsCollect {
+                    version: "1.0".into(),
+                },
+            ]), // declared
             None, // but no broker
             BrokerOperation::SystemInfo,
         )
@@ -1314,7 +1329,11 @@ mod tests {
 
         let resp = call_broker(
             "ganglion:diagnostics/collect",
-            true,
+            Some(vec![
+                gang_core::capability::CapabilityGroup::DiagnosticsCollect {
+                    version: "1.0".into(),
+                },
+            ]),
             Some(broker),
             BrokerOperation::SystemInfo,
         )

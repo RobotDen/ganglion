@@ -345,6 +345,8 @@ Signed component: my-diagnostics.wasm
 | `--name <name>` | Component name. Default: derived from filename. |
 | `--component-version <ver>` (alias `--version`) | Component semantic version. Default: `0.1.0`. Distinct from the CLI's own `-V`/`--version`. |
 | `--capabilities <c1,c2,...>` | Declared capability groups (e.g. `diagnostics,logs,ros,fs,artifacts,process,network,metrics`). |
+| `--fs-path <PATTERN[:rw]>` | Filesystem path pattern the component may read (repeatable; implies `fs`). Absolute glob, read-only unless suffixed `:rw`. The robot confines every fs call to these patterns, so `fs` declared without any `--fs-path` can touch nothing. |
+| `--ros-pattern <PATTERN[:rw]>` | ROS topic/service/parameter pattern (repeatable; implies `ros`). Subscribe/get only unless suffixed `:rw` (publish/call/set). |
 | `--cpu-fuel <units>` | CPU fuel budget written into the manifest (#48). 0/omitted = host default (1e6); clamped host-side to 1e10. componentize-py/CPython components typically need `5000000000`. |
 | `--wall-clock-secs <secs>` | Wall-clock deadline (#48). 0/omitted = host default (300 s); clamped host-side to 3600. |
 | `--max-memory-bytes <bytes>` | Linear-memory ceiling (#48). 0/omitted = host default (256 MiB); clamped host-side to 1 GiB. |
