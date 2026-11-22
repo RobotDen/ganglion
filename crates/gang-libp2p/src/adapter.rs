@@ -139,6 +139,9 @@ const PENDING_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 /// commands) awaiting a `oneshot` response. This keeps the swarm owned by
 /// exactly one task, so it is never held across `.await` by multiple callers.
 enum SwarmCommand {
+    /// Close every connection to a peer (e.g. a robot hanging up on the
+    /// operator once enrollment is confirmed).
+    Disconnect { peer: Libp2pPeerId },
     /// Dial a raw multiaddr.
     Dial {
         addr: Multiaddr,
@@ -378,6 +381,23 @@ impl Libp2pTransportAdapter {
     /// The wait for the swarm worker's reply is bounded by the same 30-second
     /// request timeout `send_rpc` uses, so a caller can never hang forever —
     /// e.g. when the event loop has not been started yet.
+    /// Close every connection to the peer with this dialable (base58) libp2p
+    /// id. Best-effort: a peer that isn't connected is not an error.
+    pub async fn disconnect_libp2p(&self, libp2p_id: &str) -> Result<(), TransportError> {
+        let peer: Libp2pPeerId = libp2p_id
+            .parse()
+            .map_err(
+                |e: libp2p::identity::ParseError| TransportError::DialFailed {
+                    peer: libp2p_id.to_string(),
+                    reason: e.to_string(),
+                },
+            )?;
+        self.command_tx
+            .send(SwarmCommand::Disconnect { peer })
+            .await
+            .map_err(|_| TransportError::ConnectionClosed("swarm task is not running".into()))
+    }
+
     pub async fn dial_multiaddr(&self, addr: &str) -> Result<(), TransportError> {
         let addr_str = addr.to_string();
         let addr: Multiaddr =
@@ -1097,6 +1117,9 @@ impl SwarmWorker {
 
     async fn handle_command(&mut self, command: SwarmCommand) {
         match command {
+            SwarmCommand::Disconnect { peer } => {
+                let _ = self.swarm.disconnect_peer_id(peer);
+            }
             SwarmCommand::Dial { addr, reply } => {
                 let result = self
                     .swarm

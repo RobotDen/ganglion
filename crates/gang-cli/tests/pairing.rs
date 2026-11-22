@@ -707,33 +707,46 @@ async fn pair_shutdown_scenario() -> Result<(), String> {
 
     let secret = op.token.secret.to_vec();
     let operator_id = op.operator_id.clone();
+    let operator_libp2p = op.operator_libp2p.clone();
     let robot_rpc = Arc::clone(&robot);
     let enrolling = tokio::spawn(async move {
-        enroll(&robot_rpc, &operator_id, secret, "robot-a", &robot_libp2p).await
+        let reply = enroll(&robot_rpc, &operator_id, secret, "robot-a", &robot_libp2p).await;
+        // As `gang join` does: hang up on the operator once Enrolled is read.
+        if matches!(reply, ControlMessage::Enrolled { .. }) {
+            let _ = robot_rpc.disconnect_libp2p(&operator_libp2p).await;
+        }
+        reply
     });
 
     // Operator side, as `gang pair` does: wait for the response to the
-    // accepted request, then shut down immediately.
+    // accepted request, then for the robot to hang up (its confirmation that
+    // the reply arrived), then shut down immediately.
     let mut earlier_replies = 0;
     tokio::time::timeout(Duration::from_secs(WAIT_SECS), async {
+        let mut sent = false;
         while let Some(event) = op_events.next().await {
-            if let TransportEvent::ResponseSent {
-                peer_id,
-                request_id,
-            } = event
-                && peer_id == robot_gang
-            {
-                let accepted = *op.accepted_request.lock().unwrap();
-                if accepted == Some(request_id) {
+            match event {
+                TransportEvent::ResponseSent {
+                    peer_id,
+                    request_id,
+                } if peer_id == robot_gang => {
+                    let accepted = *op.accepted_request.lock().unwrap();
+                    if accepted == Some(request_id) {
+                        sent = true;
+                    } else {
+                        earlier_replies += 1;
+                    }
+                }
+                TransportEvent::PeerDisconnected { peer_id } if sent && peer_id == robot_gang => {
                     return;
                 }
-                earlier_replies += 1;
+                _ => {}
             }
         }
-        panic!("event stream ended before the accepted ResponseSent");
+        panic!("event stream ended before the robot confirmed");
     })
     .await
-    .expect("ResponseSent for the accepted enrollment");
+    .expect("robot confirmed the accepted enrollment");
     assert!(
         earlier_replies >= 1,
         "the rejected attempt's reply must have been seen and skipped"
