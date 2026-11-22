@@ -2632,6 +2632,14 @@ pub async fn sign(
 /// credentials bindings (SEC-19).
 pub(crate) fn sandbox_fs_rule(dir: &Path) -> anyhow::Result<gang_ros::filesystem::FsRule> {
     let sandbox = dir.join("sandbox");
+    // A planted `sandbox -> <data-dir>` symlink would re-widen the jail to
+    // the agent's own state: refuse it rather than follow it.
+    if std::fs::symlink_metadata(&sandbox).is_ok_and(|m| m.file_type().is_symlink()) {
+        anyhow::bail!(
+            "capability sandbox {} is a symlink; refusing to use it as the fs jail",
+            sandbox.display()
+        );
+    }
     std::fs::create_dir_all(&sandbox)
         .with_context(|| format!("creating capability sandbox {}", sandbox.display()))?;
     Ok(gang_ros::filesystem::FsRule {
@@ -7322,6 +7330,15 @@ mod robot_policy_tests {
             let p = data.join(secret).display().to_string();
             assert!(!p.starts_with(&jail), "{p} is inside the jail");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_sandbox_is_refused() {
+        let (_t, data, _home) = dirs();
+        std::os::unix::fs::symlink(&data, data.join("sandbox")).unwrap();
+        let err = sandbox_fs_rule(&data).unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err}");
     }
 
     #[test]

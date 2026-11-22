@@ -304,6 +304,23 @@ pub fn operation_in_declared_scope(
                 ))
             }
         }
+        ("ganglion:process/spawn", Op::ProcessSpawn { command, .. }) => {
+            let ok = declared.iter().any(|g| match g {
+                CapabilityGroup::ProcessSpawn {
+                    allowed_commands, ..
+                } => allowed_commands
+                    .iter()
+                    .any(|pat| glob_match::glob_match(pat, command)),
+                _ => false,
+            });
+            if ok {
+                Ok(())
+            } else {
+                Err(format!(
+                    "command '{command}' is outside the commands this capability declared"
+                ))
+            }
+        }
         _ => Ok(()),
     }
 }
@@ -502,5 +519,23 @@ mod tests {
             pattern: String::new(),
         };
         assert!(operation_in_declared_scope(&d, g, &bad).is_err());
+    }
+
+    #[test]
+    fn process_spawn_must_match_declared_commands() {
+        let d = vec![CapabilityGroup::ProcessSpawn {
+            version: "1.0".into(),
+            allowed_commands: vec!["/usr/bin/uptime".into()],
+        }];
+        let g = "ganglion:process/spawn";
+        let spawn = |c: &str| Op::ProcessSpawn {
+            command: c.into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+            timeout_secs: 5,
+        };
+        assert!(operation_in_declared_scope(&d, g, &spawn("/usr/bin/uptime")).is_ok());
+        assert!(operation_in_declared_scope(&d, g, &spawn("/bin/sh")).is_err());
     }
 }
