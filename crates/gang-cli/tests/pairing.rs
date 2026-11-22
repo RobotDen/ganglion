@@ -630,14 +630,41 @@ async fn pairing_rejects_expired_token() {
 }
 
 /// `gang pair` shuts its transport down as soon as a robot enrolls. It used
-/// to do so before the `Enrolled` response had left, so the robot saw
+/// to do so before the `Enrolled` response had arrived, so the robot saw
 /// ConnectionClosed and `gang join` failed although it was recorded. The
 /// operator now waits for the `TransportEvent::ResponseSent` of the ACCEPTED
-/// request. Matching on the robot alone is not enough: an earlier rejected
-/// attempt from the same robot also produces a ResponseSent, which would let
-/// the operator shut down too early.
+/// request and then for the robot to hang up, which only happens once it has
+/// read `Enrolled`. Matching on the robot alone is not enough: an earlier
+/// rejected attempt from the same robot also produces a ResponseSent.
 #[tokio::test]
 async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
+    pair_shutdown_scenario().await.unwrap();
+}
+
+/// Run the shutdown scenario 30 times and fail with the failure count, so CI
+/// logs show the rate on each platform (the reply loss was macOS-only and
+/// rare; one green run proves little).
+#[tokio::test]
+async fn enroll_response_survives_shutdown_repeatedly() {
+    const RUNS: usize = 30;
+    let mut failures = Vec::new();
+    for _ in 0..RUNS {
+        if let Err(e) = pair_shutdown_scenario().await {
+            failures.push(e);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "FLAKE_PROBE failures={}/{RUNS}: {:?}",
+        failures.len(),
+        failures.first()
+    );
+}
+
+/// The `gang pair` teardown race: a rejected attempt, then the accepted
+/// enrollment from the same robot over a relay circuit; the operator tears
+/// down exactly as `gang pair` does. Returns the robot's outcome.
+async fn pair_shutdown_scenario() -> Result<(), String> {
     use futures::StreamExt;
     use gang_core::transport::TransportEvent;
 
@@ -680,33 +707,46 @@ async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
 
     let secret = op.token.secret.to_vec();
     let operator_id = op.operator_id.clone();
+    let operator_libp2p = op.operator_libp2p.clone();
     let robot_rpc = Arc::clone(&robot);
     let enrolling = tokio::spawn(async move {
-        enroll(&robot_rpc, &operator_id, secret, "robot-a", &robot_libp2p).await
+        let reply = enroll(&robot_rpc, &operator_id, secret, "robot-a", &robot_libp2p).await;
+        // As `gang join` does: hang up on the operator once Enrolled is read.
+        if matches!(reply, ControlMessage::Enrolled { .. }) {
+            let _ = robot_rpc.disconnect_libp2p(&operator_libp2p).await;
+        }
+        reply
     });
 
     // Operator side, as `gang pair` does: wait for the response to the
-    // accepted request, then shut down immediately.
+    // accepted request, then for the robot to hang up (its confirmation that
+    // the reply arrived), then shut down immediately.
     let mut earlier_replies = 0;
     tokio::time::timeout(Duration::from_secs(WAIT_SECS), async {
+        let mut sent = false;
         while let Some(event) = op_events.next().await {
-            if let TransportEvent::ResponseSent {
-                peer_id,
-                request_id,
-            } = event
-                && peer_id == robot_gang
-            {
-                let accepted = *op.accepted_request.lock().unwrap();
-                if accepted == Some(request_id) {
+            match event {
+                TransportEvent::ResponseSent {
+                    peer_id,
+                    request_id,
+                } if peer_id == robot_gang => {
+                    let accepted = *op.accepted_request.lock().unwrap();
+                    if accepted == Some(request_id) {
+                        sent = true;
+                    } else {
+                        earlier_replies += 1;
+                    }
+                }
+                TransportEvent::PeerDisconnected { peer_id } if sent && peer_id == robot_gang => {
                     return;
                 }
-                earlier_replies += 1;
+                _ => {}
             }
         }
-        panic!("event stream ended before the accepted ResponseSent");
+        panic!("event stream ended before the robot confirmed");
     })
     .await
-    .expect("ResponseSent for the accepted enrollment");
+    .expect("robot confirmed the accepted enrollment");
     assert!(
         earlier_replies >= 1,
         "the rejected attempt's reply must have been seen and skipped"
@@ -719,9 +759,9 @@ async fn enroll_response_survives_shutdown_after_its_response_is_sent() {
         .unwrap();
     op.operator_loop.abort();
 
-    let reply = enrolling.await.unwrap();
-    assert!(
-        matches!(reply, ControlMessage::Enrolled { .. }),
-        "robot must receive Enrolled, got {reply:?}"
-    );
+    match enrolling.await {
+        Ok(ControlMessage::Enrolled { .. }) => Ok(()),
+        Ok(other) => Err(format!("robot got {other:?} instead of Enrolled")),
+        Err(e) => Err(format!("robot's enroll RPC failed: {e}")),
+    }
 }

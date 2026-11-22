@@ -4305,20 +4305,35 @@ pub async fn pair(
     // the robot was recorded. Wait (bounded) until the response is sent.
     if let Some((_, robot_id, _, accepted_request)) = &outcome {
         use futures::StreamExt;
-        let sent = async {
+        // First the reply to the ACCEPTED request must leave this process
+        // (ResponseSent for that request id: an earlier rejected attempt from
+        // the same robot also gets a reply). Then only the robot can confirm
+        // it ARRIVED: `gang join` hangs up once it has read Enrolled, so wait
+        // for that disconnect before tearing down. An abrupt teardown lost
+        // the reply in transit over the relay on macOS. Older robots don't
+        // hang up; they just cost the bounded wait.
+        let confirmed = async {
+            let mut sent = false;
             while let Some(event) = transport_events.next().await {
-                if let gang_core::transport::TransportEvent::ResponseSent {
-                    peer_id,
-                    request_id,
-                } = event
-                    && &peer_id == robot_id
-                    && accepted_request.is_none_or(|id| id == request_id)
-                {
-                    return;
+                match event {
+                    gang_core::transport::TransportEvent::ResponseSent {
+                        peer_id,
+                        request_id,
+                    } if &peer_id == robot_id
+                        && accepted_request.is_none_or(|id| id == request_id) =>
+                    {
+                        sent = true;
+                    }
+                    gang_core::transport::TransportEvent::PeerDisconnected { peer_id }
+                        if sent && &peer_id == robot_id =>
+                    {
+                        return;
+                    }
+                    _ => {}
                 }
             }
         };
-        if tokio::time::timeout(std::time::Duration::from_secs(10), sent)
+        if tokio::time::timeout(std::time::Duration::from_secs(10), confirmed)
             .await
             .is_err()
         {
@@ -4649,6 +4664,10 @@ pub async fn join(
             return Err(e);
         }
     };
+    // Hang up on the operator: `gang pair` waits for this disconnect as proof
+    // that the Enrolled reply arrived before it shuts down (it dials back for
+    // deploys later). Best-effort; the operator times out on its own.
+    let _ = transport.disconnect_libp2p(&token.operator_libp2p_id).await;
 
     if json_output {
         println!(

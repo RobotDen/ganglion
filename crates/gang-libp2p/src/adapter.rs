@@ -139,6 +139,9 @@ const PENDING_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 /// commands) awaiting a `oneshot` response. This keeps the swarm owned by
 /// exactly one task, so it is never held across `.await` by multiple callers.
 enum SwarmCommand {
+    /// Close every connection to a peer (e.g. a robot hanging up on the
+    /// operator once enrollment is confirmed).
+    Disconnect { peer: Libp2pPeerId },
     /// Dial a raw multiaddr.
     Dial {
         addr: Multiaddr,
@@ -371,6 +374,32 @@ impl Libp2pTransportAdapter {
             .await
             .map_err(|_| crate::TransportError::SwarmTaskStopped)?
             .map_err(|e| crate::TransportError::Relay(e.to_string()))
+    }
+
+    /// Close every connection to the peer with this dialable (base58) libp2p
+    /// id. Best-effort: a peer that isn't connected is not an error. Handing
+    /// the command to the swarm worker is bounded by the request timeout.
+    pub async fn disconnect_libp2p(&self, libp2p_id: &str) -> Result<(), TransportError> {
+        let peer: Libp2pPeerId = libp2p_id
+            .parse()
+            .map_err(
+                |e: libp2p::identity::ParseError| TransportError::DialFailed {
+                    peer: libp2p_id.to_string(),
+                    reason: e.to_string(),
+                },
+            )?;
+        match tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.command_tx.send(SwarmCommand::Disconnect { peer }),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(TransportError::ConnectionClosed(
+                "swarm task is not running".into(),
+            )),
+            Err(_) => Err(TransportError::Timeout(REQUEST_TIMEOUT)),
+        }
     }
 
     /// Dial a peer by their libp2p multiaddr.
@@ -1004,9 +1033,14 @@ impl SwarmWorker {
                         Some(SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. }) => {
                             self.on_connection_established(peer_id, endpoint).await;
                         }
-                        Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                        Some(SwarmEvent::ConnectionClosed { peer_id, num_established, .. }) => {
                             info!(peer = %peer_id, "Connection closed");
-                            if let Some(gang_peer_id) = libp2p_to_gang_peer_id(&peer_id) {
+                            // The peer is gone only when its last connection
+                            // closes (e.g. a relayed one can close while a
+                            // DCUtR direct one stays up).
+                            if let (0, Some(gang_peer_id)) =
+                                (num_established, libp2p_to_gang_peer_id(&peer_id))
+                            {
                                 self.connected_peers.write().await.remove(gang_peer_id.as_str());
                                 self.events.publish(TransportEvent::PeerDisconnected {
                                     peer_id: gang_peer_id,
@@ -1097,6 +1131,9 @@ impl SwarmWorker {
 
     async fn handle_command(&mut self, command: SwarmCommand) {
         match command {
+            SwarmCommand::Disconnect { peer } => {
+                let _ = self.swarm.disconnect_peer_id(peer);
+            }
             SwarmCommand::Dial { addr, reply } => {
                 let result = self
                     .swarm
