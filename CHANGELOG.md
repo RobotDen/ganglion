@@ -4,13 +4,6 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
-### Security
-
-- **The event feed follows a restricted peer's view.** A peer whose policy
-  rule limits it with `allowed_capabilities` now sees audit events only for
-  those capabilities, and policy decisions only for its own requests. That
-  matches what it can list. This fixes the 2.6.0 known limitation.
-
 ## [2.6.0] - 2026-11-22
 
 ### Upgrade notes (read first)
@@ -43,6 +36,13 @@ All notable changes to Ganglion will be documented in this file.
 - **CLI exit can take up to about 4 s longer.** Shutting down a transport
   now closes its connections cleanly so replies already sent are not lost.
   (#83)
+- **Upgrade robots and operators together for pairing.** `gang pair` now
+  waits for the robot to confirm it received its enrollment. A 2.5.0
+  `gang join` that keeps serving never confirms, so `gang pair` waits 10 s,
+  prints a warning and then succeeds; the robot is enrolled either way.
+  `gang join --once` confirms by exiting. A 2.5.0 `gang pair` can still make
+  a 2.6.0 `gang join` report ConnectionClosed although the robot was
+  enrolled (the bug fixed below).
 
 ### Security
 
@@ -56,6 +56,10 @@ These fix the robot-side trust gaps found in the November 2026 audit.
   `allowed_capabilities` is enforced, listings and the feed's presence
   snapshot show only allowed capabilities, and an unauthorized caller can't
   tell installed names from missing ones. (#82, #86)
+- **The event feed follows a restricted peer's view.** A peer whose policy
+  rule limits it with `allowed_capabilities` sees audit events only for
+  those capabilities, and policy decisions only for its own requests. That
+  matches what it can list. (#88)
 - **Network-reachable robots no longer run permissive by default
   (SEC-18).** See the upgrade note above. (#81)
 - **Broker calls confined to the declared scope (SEC-19).** Every guest
@@ -127,7 +131,11 @@ These fix the robot-side trust gaps found in the November 2026 audit.
 
 - **`gang join` no longer fails with ConnectionClosed after enrolling.**
   `gang pair` shut down before its reply reached the robot, so the robot
-  exited with an error although the operator had recorded it. (#83)
+  exited with an error although the operator had recorded it. (#83) Waiting
+  until the reply was sent was not enough on macOS, where it could still be
+  lost over the relay (34 of 1200 test runs). `gang join` now hangs up once
+  it has the reply, and `gang pair` waits for that before shutting down
+  (bounded at 10 s). (#89)
 - **`gang config set` no longer drops the telemetry opt-out.** It rewrote
   `config.toml` from its typed struct, which silently removed settings the
   struct doesn't model, including `[telemetry] enabled = false` from
@@ -160,13 +168,6 @@ These fix the robot-side trust gaps found in the November 2026 audit.
   issue. (#69)
 - Release binaries report the `release` install channel to telemetry, and
   builds from source report `source`.
-
-### Known limitation
-
-- For a peer whose policy rule limits it with `allowed_capabilities`, the
-  event feed's policy-decision and audit events may still name capabilities
-  outside that scope. The presence snapshot and listings are already
-  filtered. This will be fixed in the next release.
 
 ## [2.5.0] - 2026-08-20
 
