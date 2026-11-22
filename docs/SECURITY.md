@@ -151,8 +151,11 @@ allowed_patterns = ["echo", "cat"]
 peer_id = "*"
 can_deploy = true
 # can_invoke defaults to true: peers a rule names may also list and run
-# installed capabilities. Set it false for a deploy-only peer, and use
-# allowed_capabilities = ["name", ...] to limit which ones a peer may run.
+# installed capabilities; allowed_capabilities = ["name", ...] limits which
+# ones (and the listing) for that rule. Rules are OR'd, as for can_deploy: a
+# peer may act if ANY matching rule allows it, so this "*" rule grants every
+# peer, and can_invoke = false on a peer's own rule only blocks it when no
+# other matching rule (such as "*") allows invoking.
 ```
 
 ### Fail-closed loading

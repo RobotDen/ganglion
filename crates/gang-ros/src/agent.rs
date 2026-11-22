@@ -546,7 +546,6 @@ impl RobotAgent {
         revoked
     }
 
-    /// List installed capabilities.
     /// Authorize `peer` to list installed capabilities (`name: None`) or to
     /// invoke `name`, which declares `declared` (SEC-17). Mirrors deploy:
     /// with a non-empty trust store the peer must be trusted, and the active
@@ -572,8 +571,22 @@ impl RobotAgent {
         .map_err(anyhow::Error::from)
     }
 
+    /// List installed capabilities.
     pub async fn list_capabilities(&self) -> Vec<InstalledCapability> {
         self.capabilities.read().await.values().cloned().collect()
+    }
+
+    /// The installed capabilities `peer` may invoke: listing reveals names
+    /// and signers, so a peer whose rule restricts it with
+    /// `allowed_capabilities` sees only those (SEC-17). The caller must
+    /// already have passed `authorize_peer(peer, None, ..)`.
+    pub async fn list_capabilities_for(&self, peer: &PeerId) -> Vec<InstalledCapability> {
+        let policy = self.policy.read().expect("policy lock poisoned").clone();
+        self.list_capabilities()
+            .await
+            .into_iter()
+            .filter(|c| policy.authorize_list(peer, Some(&c.name)).is_ok())
+            .collect()
     }
 
     /// Invoke an installed capability.
@@ -646,6 +659,12 @@ impl RobotAgent {
         operator_peer_id: &PeerId,
         export: Option<&str>,
     ) -> Result<Vec<u8>, anyhow::Error> {
+        // SEC-17: refuse an unauthorized caller before looking the name up,
+        // so "not found" vs "denied" can't be used to probe what's installed.
+        if let Err(e) = self.authorize_peer(operator_peer_id, None, &[]) {
+            warn!(name = %name, peer = %operator_peer_id, "Invoke refused: {e}");
+            return Err(e);
+        }
         let caps = self.capabilities.read().await;
         let cap = caps
             .get(name)
@@ -859,17 +878,26 @@ impl RobotAgent {
         Ok(output)
     }
 
+    /// Authorize a peer to read robot state: the event feed (which carries a
+    /// presence snapshot naming the installed capabilities, and policy
+    /// decisions), live topic streams, and the usage bundle. Same rule as
+    /// listing capabilities (SEC-17): trusted when a trust store is set, and
+    /// authorized by a policy peer rule with `can_invoke`.
+    fn authorize_reader(&self, peer: &PeerId) -> Result<(), SubscribeError> {
+        self.authorize_peer(peer, None, &[]).map_err(|e| {
+            warn!(peer = %peer, "Rejecting read of robot state: {e}");
+            SubscribeError::Unauthorized {
+                peer: peer.to_string(),
+            }
+        })
+    }
+
     /// Fetch and reset the local usage bundle (ADR-027) for an authenticated
     /// operator. Same trust check as event subscriptions: with a non-empty
     /// trust store, only trusted peers may pull. Returns `None` when bundles
     /// are disabled, compiled out, or empty — never an error.
     pub fn fetch_usage_bundle(&self, requester: &PeerId) -> Result<Option<String>, SubscribeError> {
-        if !self.trust_store.trusted_peers.is_empty() && !self.trust_store.is_trusted(requester) {
-            warn!(peer = %requester, "Rejecting usage-bundle fetch from untrusted peer");
-            return Err(SubscribeError::Unauthorized {
-                peer: requester.to_string(),
-            });
-        }
+        self.authorize_reader(requester)?;
         Ok(self.usage_bundle.fetch_and_reset())
     }
 
@@ -974,12 +1002,7 @@ impl RobotAgent {
         use gang_core::capability::{AccessPattern, CapabilityGroup, RosAccess};
         use gang_core::topics::TopicVerdict;
 
-        if !self.trust_store.trusted_peers.is_empty() && !self.trust_store.is_trusted(subscriber) {
-            warn!(peer = %subscriber, "Rejecting topic stream from untrusted peer");
-            return Err(SubscribeError::Unauthorized {
-                peer: subscriber.to_string(),
-            });
-        }
+        self.authorize_reader(subscriber)?;
 
         let verdicts: Vec<TopicVerdict> = topics
             .iter()
@@ -1059,12 +1082,7 @@ impl RobotAgent {
         subscriber: &PeerId,
         req: &EventSubscribeRequest,
     ) -> Result<Vec<AgentEvent>, SubscribeError> {
-        if !self.trust_store.trusted_peers.is_empty() && !self.trust_store.is_trusted(subscriber) {
-            warn!(peer = %subscriber, "Rejecting event subscription from untrusted peer");
-            return Err(SubscribeError::Unauthorized {
-                peer: subscriber.to_string(),
-            });
-        }
+        self.authorize_reader(subscriber)?;
 
         let mut out = Vec::new();
         if req.since_seq.is_none() {
@@ -1300,7 +1318,7 @@ impl RobotAgent {
                                 }
                             }
                             Ok(()) => {
-                                let caps = agent.list_capabilities().await;
+                                let caps = agent.list_capabilities_for(&remote_peer).await;
                                 ControlMessage::CapabilityList {
                                     capabilities: caps
                                         .into_iter()
@@ -2296,6 +2314,94 @@ can_deploy = true
             .invoke_capability("diag", &[], &op.peer_id())
             .await
             .unwrap();
+    }
+
+    /// A policy authorizing only `op` (deploy + invoke), diagnostics allowed,
+    /// with `extra` appended to the op's peer rule.
+    fn op_only_agent(dir: &std::path::Path, op: &Keypair, extra: &str) -> RobotAgent {
+        let policy_path = dir.join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            format!(
+                "[[capability_rules]]\ngroup = \"ganglion:diagnostics/collect\"\n\
+                 allowed_patterns = [\"**\"]\n\n[[peer_rules]]\npeer_id = \"{}\"\n\
+                 can_deploy = true\n{extra}",
+                op.peer_id()
+            ),
+        )
+        .unwrap();
+        let mut config = test_config(dir);
+        config.policy_path = Some(policy_path);
+        RobotAgent::new(config).unwrap()
+    }
+
+    #[tokio::test]
+    async fn event_feed_topics_and_usage_bundle_refuse_unauthorized_peer() {
+        // Review r1: the event feed's presence snapshot names installed
+        // capabilities (and the feed carries policy decisions), so it, topic
+        // streams and the usage bundle need the same authorization as list.
+        let dir = TempDir::new().unwrap();
+        let op = Keypair::generate();
+        let agent = op_only_agent(dir.path(), &op, "");
+        deploy_diag(&agent, &op).await;
+
+        let stranger = Keypair::generate().peer_id();
+        assert!(agent.authorize_peer(&stranger, None, &[]).is_err());
+        assert!(
+            agent
+                .build_event_subscription(&stranger, &EventSubscribeRequest::fresh())
+                .await
+                .is_err(),
+            "event feed must not leak to a peer refused at list"
+        );
+        assert!(
+            agent
+                .authorize_topic_stream(&stranger, &["/rosout".into()])
+                .is_err()
+        );
+        assert!(agent.fetch_usage_bundle(&stranger).is_err());
+
+        // The authorized operator still gets the feed with the snapshot.
+        let events = agent
+            .build_event_subscription(&op.peer_id(), &EventSubscribeRequest::fresh())
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::PresenceSnapshot { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn unauthorized_invoke_cannot_probe_installed_names() {
+        // Denied before the lookup: an installed and a missing name give the
+        // same refusal, not "denied" vs "not found".
+        let dir = TempDir::new().unwrap();
+        let op = Keypair::generate();
+        let agent = op_only_agent(dir.path(), &op, "");
+        deploy_diag(&agent, &op).await;
+
+        let stranger = Keypair::generate().peer_id();
+        let installed = agent
+            .invoke_capability("diag", &[], &stranger)
+            .await
+            .unwrap_err();
+        let missing = agent
+            .invoke_capability("nope", &[], &stranger)
+            .await
+            .unwrap_err();
+        assert_eq!(installed.to_string(), missing.to_string());
+    }
+
+    #[tokio::test]
+    async fn listing_honours_allowed_capabilities() {
+        let dir = TempDir::new().unwrap();
+        let op = Keypair::generate();
+        let agent = op_only_agent(dir.path(), &op, "allowed_capabilities = [\"other\"]\n");
+        deploy_diag(&agent, &op).await;
+        assert_eq!(agent.list_capabilities().await.len(), 1);
+        assert!(agent.list_capabilities_for(&op.peer_id()).await.is_empty());
     }
 
     #[tokio::test]

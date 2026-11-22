@@ -88,8 +88,11 @@ pub struct PeerRule {
     /// Whether this peer can deploy capabilities.
     pub can_deploy: bool,
     /// Whether this peer can invoke and list installed capabilities (SEC-17).
-    /// Defaults to true, so every peer a rule names may run what is installed;
-    /// set false for a deploy-only (or explicitly blocked) peer.
+    /// Defaults to true, so every peer a rule names may run what is installed.
+    /// Rules are OR'd, as for `can_deploy`: a peer may invoke if ANY rule
+    /// matching it allows it, so a `"*"` rule with `can_invoke = true` grants
+    /// every peer, and `can_invoke = false` on a peer's own rule only takes
+    /// effect when no other matching rule allows invoking.
     #[serde(default = "default_true")]
     pub can_invoke: bool,
     /// Optional: restrict to specific capability names.
