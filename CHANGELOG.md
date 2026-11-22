@@ -4,6 +4,13 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **The event feed follows a restricted peer's view.** A peer whose policy
+  rule limits it with `allowed_capabilities` now sees audit events only for
+  those capabilities, and policy decisions only for its own requests. That
+  matches what it can list. This fixes the 2.6.0 known limitation.
+
 ## [2.6.0] - 2026-11-22
 
 ### Upgrade notes (read first)

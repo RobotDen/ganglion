@@ -576,6 +576,27 @@ impl RobotAgent {
         self.capabilities.read().await.values().cloned().collect()
     }
 
+    /// Whether `peer` may see `event` on the feed. A peer restricted by
+    /// `allowed_capabilities` must not learn other capabilities' names or
+    /// activity from the feed any more than from a listing: audit records
+    /// are shown only for capabilities it may list, and policy decisions
+    /// (which can't be tied to a capability it's allowed to know) only for
+    /// its own requests. Everything else, and everything for an unrestricted
+    /// peer, is visible.
+    pub fn event_visible_to(&self, peer: &PeerId, event: &AgentEvent) -> bool {
+        let policy = self.policy.read().expect("policy lock poisoned");
+        if policy.has_unrestricted_view(peer) {
+            return true;
+        }
+        match event {
+            AgentEvent::AuditAppended { record, .. } => policy
+                .authorize_list(peer, Some(&record.component_name))
+                .is_ok(),
+            AgentEvent::PolicyDecision { operator_peer, .. } => operator_peer == peer,
+            _ => true,
+        }
+    }
+
     /// The installed capabilities `peer` may invoke: listing reveals names
     /// and signers, so a peer whose rule restricts it with
     /// `allowed_capabilities` sees only those (SEC-17). The caller must
@@ -1113,7 +1134,12 @@ impl RobotAgent {
                 dropped: batch.dropped,
             });
         }
-        out.extend(batch.events);
+        out.extend(
+            batch
+                .events
+                .into_iter()
+                .filter(|e| self.event_visible_to(subscriber, e)),
+        );
         Ok(out)
     }
 
@@ -1697,6 +1723,9 @@ where
         {
             continue;
         }
+        if !agent.event_visible_to(&subscriber, &ev) {
+            continue;
+        }
         match encode_message(&ev) {
             Ok(frame) => {
                 if write_frame(&mut stream, &frame).await.is_err() {
@@ -2231,10 +2260,15 @@ can_deploy = true
 
     /// Deploy a non-WASM diagnostics capability signed and pushed by `kp`.
     async fn deploy_diag(agent: &RobotAgent, kp: &Keypair) {
+        deploy_diag_named(agent, kp, "diag").await
+    }
+
+    /// [`deploy_diag`] under another capability name.
+    async fn deploy_diag_named(agent: &RobotAgent, kp: &Keypair, name: &str) {
         let bytes: &[u8] = b"not-wasm diag";
         let manifest = gang_core::manifest::ComponentManifest {
             schema_version: gang_core::manifest::MANIFEST_SCHEMA_VERSION.into(),
-            name: "diag".into(),
+            name: name.into(),
             version: "0.1.0".into(),
             declared_capabilities: vec![CapabilityGroup::DiagnosticsCollect {
                 version: "1.0".into(),
@@ -2421,6 +2455,87 @@ can_deploy = true
             .flatten()
             .collect();
         assert!(!names.contains(&"diag".to_string()), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn event_feed_hides_other_capabilities_from_restricted_peer() {
+        // A peer limited by allowed_capabilities must not learn other
+        // capabilities' names or activity from the feed: the snapshot,
+        // audit records and policy decisions all follow its allowed view.
+        let dir = TempDir::new().unwrap();
+        let op = Keypair::generate();
+        let viewer = Keypair::generate();
+        let policy_path = dir.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            format!(
+                "[[capability_rules]]\ngroup = \"ganglion:diagnostics/collect\"\n\
+                 allowed_patterns = [\"**\"]\n\n\
+                 [[peer_rules]]\npeer_id = \"{}\"\ncan_deploy = true\n\n\
+                 [[peer_rules]]\npeer_id = \"{}\"\ncan_deploy = false\n\
+                 allowed_capabilities = [\"other\"]\n",
+                op.peer_id(),
+                viewer.peer_id()
+            ),
+        )
+        .unwrap();
+        let mut config = test_config(dir.path());
+        config.policy_path = Some(policy_path);
+        let agent = RobotAgent::new(config).unwrap();
+        deploy_diag_named(&agent, &op, "diag").await;
+        deploy_diag_named(&agent, &op, "other").await;
+        agent
+            .invoke_capability("diag", &[], &op.peer_id())
+            .await
+            .unwrap();
+        agent
+            .invoke_capability("other", &[], &op.peer_id())
+            .await
+            .unwrap();
+
+        let feed = |peer: PeerId| {
+            let agent = &agent;
+            async move {
+                agent
+                    .build_event_subscription(&peer, &EventSubscribeRequest::fresh())
+                    .await
+                    .unwrap()
+            }
+        };
+        let names = |events: &[AgentEvent]| -> (Vec<String>, Vec<String>, usize) {
+            let mut snap = vec![];
+            let mut audited = vec![];
+            let mut decisions = 0;
+            for e in events {
+                match e {
+                    AgentEvent::PresenceSnapshot {
+                        installed_capabilities,
+                        ..
+                    } => snap.extend(installed_capabilities.clone()),
+                    AgentEvent::AuditAppended { record, .. } => {
+                        audited.push(record.component_name.clone())
+                    }
+                    AgentEvent::PolicyDecision { .. } => decisions += 1,
+                    _ => {}
+                }
+            }
+            (snap, audited, decisions)
+        };
+
+        let (snap, audited, decisions) = names(&feed(viewer.peer_id()).await);
+        // Positive control: the allowed capability is visible everywhere.
+        assert!(snap.contains(&"other".to_string()), "{snap:?}");
+        assert!(audited.contains(&"other".to_string()), "{audited:?}");
+        // The other capability and other peers' decisions are hidden.
+        assert!(!snap.contains(&"diag".to_string()), "{snap:?}");
+        assert!(!audited.contains(&"diag".to_string()), "{audited:?}");
+        assert_eq!(decisions, 0, "the operator's policy decisions leaked");
+
+        // The unrestricted operator still sees everything.
+        let (snap, audited, decisions) = names(&feed(op.peer_id()).await);
+        assert!(snap.contains(&"diag".to_string()) && snap.contains(&"other".to_string()));
+        assert!(audited.contains(&"diag".to_string()) && audited.contains(&"other".to_string()));
+        assert!(decisions >= 2, "deploy decisions visible to the operator");
     }
 
     #[tokio::test]
