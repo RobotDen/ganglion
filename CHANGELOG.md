@@ -33,9 +33,11 @@ All notable changes to Ganglion will be documented in this file.
   ROS names, though no ROS broker is wired into the agent yet). A group
   declared with no patterns permits nothing. The fs jail for CLI-started
   agents is now `<data-dir>/sandbox/`, and paths are matched as absolute
-  paths, so `--fs-path` patterns must name that directory on each robot
-  (for example `/home/robot/.gang/agent/sandbox/**`). Components that read
-  or wrote host paths outside it are refused. (#84)
+  paths, so `--fs-path` patterns must name that directory on each robot:
+  `~/.gang/agent/sandbox/` for `gang agent` with its default data dir, and
+  `~/.gang/sandbox/` for a robot running `gang join`, written out in full
+  (for example `/home/robot/.gang/sandbox/**`). Components that read or
+  wrote host paths outside it are refused. (#84)
 - **Other operators lose access until they are authorized.** Invoking,
   listing, `caps`, `logs`, `tui`, `view`, the event feed and
   `telemetry fleet pull` now need a `[[peer_rules]]` entry with
