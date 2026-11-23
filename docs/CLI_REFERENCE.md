@@ -1364,7 +1364,7 @@ Initialize a default config file.
 
 | Flag | Description |
 |------|-------------|
-| `--force` | Overwrite existing config. |
+| `--force` | Reset an existing config to the defaults. Settings it doesn't manage, such as the telemetry opt-out, are kept. |
 
 ### `gang config path`
 

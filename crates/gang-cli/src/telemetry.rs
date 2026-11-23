@@ -29,6 +29,8 @@ use crate::Commands;
 /// Operator commands that may record telemetry. Everything absent — most
 /// notably `agent`, `join`, `relay`, `doctor`, `diagnose`, `test-archetype`,
 /// `demo`, `up`, `mcp` — never touches this module (ADR-026 layer 1).
+/// `telemetry` itself is absent too: `gang telemetry show` and `status` must
+/// never send the report they display.
 #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
 pub const ALLOWED_COMMANDS: &[&str] = &[
     "init",
@@ -48,7 +50,6 @@ pub const ALLOWED_COMMANDS: &[&str] = &[
     "alert",
     "config",
     "capability",
-    "telemetry",
 ];
 
 /// Map a parsed command to its telemetry category — the top-level subcommand
@@ -833,6 +834,7 @@ The full story, field list, and every opt-out: TELEMETRY.md in the repo.
                 "doctor",
                 "diagnose",
                 "test-archetype",
+                "telemetry",
             ] {
                 assert!(
                     !ALLOWED_COMMANDS.contains(&cmd),

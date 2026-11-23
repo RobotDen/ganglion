@@ -172,6 +172,17 @@ These fix the robot-side trust gaps found in the November 2026 audit.
   valid TOML or doesn't match the config schema is left untouched with an
   error, instead of being replaced by defaults plus the one key. (Comments in
   the file are still not preserved.) (#85)
+- **`gang config init --force` and `gang init --force` keep the telemetry
+  opt-out.** They overwrote `config.toml` with the defaults, dropping
+  `[telemetry] enabled = false`, although the malformed-config warnings tell
+  users to run exactly that. They now reset only the settings the operator
+  config owns and keep everything else. If the old file isn't valid TOML,
+  its telemetry setting can't be read, so the new file turns telemetry off
+  and says so. (#90)
+- **`gang telemetry show` and `gang telemetry status` never send.** The
+  `gang telemetry` commands counted as telemetry-recording commands, so
+  `show` or `status` could send the day's report, although `show` says
+  nothing is sent. They are no longer counted. (#90)
 
 - **`ResourceLimits` docs matched to behavior (#49).** `cpu_fuel: 0` was
   documented "unlimited" but has always meant "host default (1e6),

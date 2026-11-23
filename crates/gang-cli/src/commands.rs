@@ -89,17 +89,6 @@ impl OperatorConfig {
             }
         }
     }
-
-    /// Save config to `~/.gang/config.toml`.
-    pub fn save(&self) -> anyhow::Result<()> {
-        let path = gang_core::identity::default_config_dir().join("config.toml");
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let toml_str = toml::to_string_pretty(self)?;
-        std::fs::write(&path, toml_str)?;
-        Ok(())
-    }
 }
 
 /// `gang status` — show version, identity, and capability summary.
@@ -468,13 +457,16 @@ pub async fn init(
                 println!("  Config exists, kept:   {}", config_path.display());
             }
         } else {
-            OperatorConfig::default().save()?;
+            let telemetry_turned_off = write_default_config(&config_path)?;
             config_created = true;
             if !json_output {
                 println!(
                     "  Wrote operator config:     {}  (host_key_policy = strict)",
                     config_path.display()
                 );
+                if telemetry_turned_off {
+                    println!("  {TELEMETRY_TURNED_OFF_NOTE}");
+                }
             }
         }
     } else if !json_output {
@@ -1815,6 +1807,59 @@ fn set_config_key(path: &Path, key: &str, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Printed when `--force` replaced an unreadable config whose telemetry
+/// setting therefore couldn't be kept.
+const TELEMETRY_TURNED_OFF_NOTE: &str = "The old config was not valid TOML, so its telemetry \
+     setting could not be kept: telemetry is now off (`gang telemetry on` re-enables it).";
+
+/// The top-level keys `OperatorConfig` owns. `--force` resets these and keeps
+/// every other key in the file.
+const OPERATOR_CONFIG_KEYS: &[&str] = &[
+    "default_relay",
+    "host_key_policy",
+    "bandwidth_profiles",
+    "alert_webhook",
+    "alert_rules",
+];
+
+/// Write the default operator config to `path`, keeping what `OperatorConfig`
+/// doesn't own, in particular `[telemetry] enabled = false` from
+/// `gang telemetry off`. (Overwriting the file with the defaults dropped that
+/// opt-out.)
+///
+/// A file that isn't valid TOML can't be kept. Since its telemetry setting
+/// can't be read either, telemetry is turned off in the new file, and the
+/// function returns `true` so the caller can say so.
+fn write_default_config(path: &Path) -> anyhow::Result<bool> {
+    let (mut table, unreadable) = match std::fs::read_to_string(path) {
+        Ok(text) => match text.parse::<toml::Table>() {
+            Ok(table) => (table, false),
+            Err(_) => (toml::Table::new(), true),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (toml::Table::new(), false),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    if unreadable {
+        let mut telemetry = toml::Table::new();
+        telemetry.insert("enabled".into(), false.into());
+        table.insert("telemetry".into(), telemetry.into());
+    }
+
+    for key in OPERATOR_CONFIG_KEYS {
+        table.remove(*key);
+    }
+    let toml::Value::Table(defaults) = toml::Value::try_from(OperatorConfig::default())? else {
+        anyhow::bail!("default operator config did not serialize to a table");
+    };
+    table.extend(defaults);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, toml::to_string_pretty(&table)?)?;
+    Ok(unreadable)
+}
+
 /// `gang config init`
 pub async fn config_init(force: bool, format: &OutputFormat) -> anyhow::Result<()> {
     let path = gang_core::identity::default_config_dir().join("config.toml");
@@ -1825,18 +1870,24 @@ pub async fn config_init(force: bool, format: &OutputFormat) -> anyhow::Result<(
         );
     }
 
-    let default_config = OperatorConfig::default();
-    default_config.save()?;
+    let telemetry_turned_off = write_default_config(&path)?;
 
     match format {
         OutputFormat::Json => {
             println!(
                 "{}",
-                serde_json::json!({"status": "initialized", "path": path.display().to_string()})
+                serde_json::json!({
+                    "status": "initialized",
+                    "path": path.display().to_string(),
+                    "telemetry_turned_off": telemetry_turned_off,
+                })
             );
         }
         OutputFormat::Text => {
             println!("Initialized config at {}", path.display());
+            if telemetry_turned_off {
+                println!("{TELEMETRY_TURNED_OFF_NOTE}");
+            }
             println!("Edit the file or use `gang config set <key> <value>`.");
         }
     }
@@ -7467,5 +7518,42 @@ mod config_set_tests {
         assert!(set_config_key(&path, "host_key_policy", "yolo").is_err());
         assert!(set_config_key(&path, "no_such_key", "x").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn operator_config_keys_cover_every_field() {
+        // `--force` resets exactly these keys; a new OperatorConfig field
+        // missing from the list would survive a reset.
+        let full = OperatorConfig {
+            default_relay: Some("/ip4/192.0.2.1/tcp/4001".into()),
+            alert_webhook: Some("http://192.0.2.1/hook".into()),
+            ..OperatorConfig::default()
+        };
+        let toml::Value::Table(table) = toml::Value::try_from(full).unwrap() else {
+            panic!("not a table");
+        };
+        let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
+        let mut expected = OPERATOR_CONFIG_KEYS.to_vec();
+        keys.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn write_default_config_keeps_unowned_keys() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "host_key_policy = \"tofu\"\nextra = 1\n[telemetry]\nenabled = false\n",
+        )
+        .unwrap();
+
+        assert!(!write_default_config(&path).unwrap());
+
+        let table = read(&path);
+        assert_eq!(table["host_key_policy"].as_str(), Some("strict"));
+        assert_eq!(table["extra"].as_integer(), Some(1));
+        assert_eq!(table["telemetry"]["enabled"].as_bool(), Some(false));
     }
 }
