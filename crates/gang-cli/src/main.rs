@@ -844,7 +844,8 @@ enum ConfigAction {
     },
     /// Initialize a default config file.
     Init {
-        /// Overwrite existing config.
+        /// Reset an existing config to the defaults. Settings it doesn't
+        /// manage, such as the telemetry opt-out, are kept.
         #[arg(long)]
         force: bool,
     },
