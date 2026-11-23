@@ -21,9 +21,15 @@ it off.
 > `DO_NOT_TRACK=1` fleet-wide.** Disabling changes nothing about how
 > Ganglion works.
 >
-> Robots themselves need nothing disabled to be safe: the agent's local
-> usage bundle (see below) has **no send path at all** — it is a local file,
-> and only an operator's explicit opt-in ever forwards an aggregate of it.
+> **Robots: turn it off before setting one up.** `gang agent` itself never
+> sends, but preparing a robot uses operator-side commands that do count and
+> can send: `gang init`, `gang policy allow-peer` and `gang policy allow` in
+> [QUICKSTART step 6](docs/QUICKSTART.md#6-connect-a-robot-agent). Run
+> `gang telemetry off` on the robot first, or set `DO_NOT_TRACK=1` in its
+> environment. (`gang join` never sends, so a robot enrolled with
+> `gang pair`/`gang join` alone needs nothing.) The agent's local usage
+> bundle (see below) has **no send path at all**: it is a local file, and
+> only an operator's explicit opt-in ever forwards an aggregate of it.
 
 ## How to disable it (any ONE of these)
 

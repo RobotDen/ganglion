@@ -23,16 +23,41 @@ All notable changes to Ganglion will be documented in this file.
   `~/.gang/policy.toml` (written by `gang init`), and refuses to start with
   a relay and no policy. `gang join` writes a default-deny policy that
   authorizes only the pairing operator when none exists. New flags:
-  `--policy`, `--trust-store` (an explicit trust store must exist) and
-  `--dev-permissive` (throwaway test robots only). `gang agent`'s default
+  `--policy` and `--dev-permissive` (throwaway test robots only), plus
+  `gang agent --trust-store` (an explicit trust store must exist). `gang agent`'s default
   data dir moved from `/tmp/gang-agent` to `~/.gang/agent`, and the
   unsupported `--config` is now an error. (#81)
-- **Re-sign components that use `fs` or `ros`.** Broker calls are now
-  confined to the patterns a component declared. Declare them with the new
-  `gang sign --fs-path PATTERN[:rw]` and `--ros-pattern PATTERN[:rw]`. A
-  group declared with no patterns permits nothing. The fs jail for
-  CLI-started agents is now `<data-dir>/sandbox/`, so components that read
+- **Re-sign components that use `fs`, with absolute sandbox paths.** Broker
+  calls are now confined to the patterns a component declared. Declare them
+  with the new `gang sign --fs-path PATTERN[:rw]` (and `--ros-pattern` for
+  ROS names, though no ROS broker is wired into the agent yet). A group
+  declared with no patterns permits nothing. The fs jail for CLI-started
+  agents is now `<data-dir>/sandbox/`, and paths are matched as absolute
+  paths, so `--fs-path` patterns must name that directory on each robot
+  (for example `/home/robot/.gang/agent/sandbox/**`). Components that read
   or wrote host paths outside it are refused. (#84)
+- **Other operators lose access until they are authorized.** Invoking,
+  listing, `caps`, `logs`, `tui`, `view`, the event feed and
+  `telemetry fleet pull` now need a `[[peer_rules]]` entry with
+  `can_invoke` (default true) and, when the robot's trust store is not
+  empty, an entry in it. A robot enrolled with `gang join` trusts only its
+  pairing operator, so teammates are refused even by a `"*"` rule. Add
+  each one with `gang policy allow-peer <id>` on the robot and to its
+  `trusted_peers.json`. (#82)
+- **Installed capabilities may be revoked on first start.** 2.5.0 robots
+  ran a permissive policy. Under the default-deny policy that `gang join`
+  writes (no capability groups) or that `gang init` writes, capabilities
+  whose groups aren't allowed fail at invoke and are moved to
+  `capabilities/.revoked/` about a minute after start. Before upgrading,
+  allow the groups you use (`gang policy allow <group> <pattern>`). To
+  recover, allow the groups, then move the directory back out of
+  `.revoked/` (dropping its `-<timestamp>` suffix) and restart the agent,
+  or redeploy. (#81, #82)
+- **`gang agent` without `--data-dir` gets a new identity.** The default
+  data dir moved from `/tmp/gang-agent` to `~/.gang/agent`, and the robot's
+  identity key and capabilities live there. Pass
+  `--data-dir /tmp/gang-agent` to keep the old identity and capabilities,
+  or re-register the robot with its operators. (#81)
 - **CLI exit can take up to about 4 s longer.** Shutting down a transport
   now closes its connections cleanly so replies already sent are not lost.
   (#83)
@@ -82,7 +107,8 @@ These fix the robot-side trust gaps found in the November 2026 audit.
   wasmtime (including Cranelift aarch64 miscompile and limit-bypass fixes),
   quinn-proto, rustls, zstd, tokio and hickory (via libp2p 0.56 to 0.57),
   plus a yanked crate. `cargo audit` reports no known vulnerabilities.
-  (#68)
+  (#68) `url` is updated to 2.5.9 for RUSTSEC-2026-0592 (a stack overflow
+  in `Url::origin()`, which Ganglion's own code doesn't call).
 
 ### Added
 
@@ -143,7 +169,7 @@ These fix the robot-side trust gaps found in the November 2026 audit.
   edits the file in place and changes only the given key. A file that isn't
   valid TOML or doesn't match the config schema is left untouched with an
   error, instead of being replaced by defaults plus the one key. (Comments in
-  the file are still not preserved.)
+  the file are still not preserved.) (#85)
 
 - **`ResourceLimits` docs matched to behavior (#49).** `cpu_fuel: 0` was
   documented "unlimited" but has always meant "host default (1e6),
@@ -167,7 +193,24 @@ These fix the robot-side trust gaps found in the November 2026 audit.
   failed nightly chaos runs, and chaos failures are now reported on one
   issue. (#69)
 - Release binaries report the `release` install channel to telemetry, and
-  builds from source report `source`.
+  builds from source report `source`. (#87)
+
+### Known issues
+
+- **Capabilities built with current stable Rust don't run.** A
+  `wasm32-wasip2` component from current stable Rust (1.100) imports WASI
+  0.2.12 interfaces, and the runtime provides WASI 0.2.6, so the robot
+  refuses it with `capability not declared: component imports instance
+  wasi:cli/exit@0.2.12, but a matching implementation was not found`. Build
+  capabilities with `cargo component build --release`, or with Rust 1.88
+  (`cargo +1.88.0 build --target wasm32-wasip2 --release`). 2.5.0 behaves
+  the same. The runtime upgrade is planned for 2.6.1.
+- **The Rust scaffold doesn't build a working capability.** In a project
+  from `gang capability scaffold --language rust`, `make component` fails
+  (`decoding a component is not supported`), and the generated crate doesn't
+  export the capability interface. Start from the Rust example in
+  `docs/CAPABILITY_AUTHOR_GUIDE.md`, or from one of the repository's
+  `gang-capability-*` crates. A fixed scaffold is planned for 2.6.1.
 
 ## [2.5.0] - 2026-08-20
 

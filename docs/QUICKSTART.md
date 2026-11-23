@@ -346,9 +346,12 @@ with Docker.
 
 On the robot, first give the agent a **default-deny policy** that authorizes
 your operator and enables what you will deploy. A robot reachable over a relay
-refuses to start without one:
+refuses to start without one. `gang init` and `gang policy` are operator-side
+commands that can send [telemetry](../TELEMETRY.md), so turn it off on the
+robot first (or set `DO_NOT_TRACK=1` in its environment):
 
 ```console
+$ gang telemetry off                                      # before anything else on a robot
 $ gang init --yes                                         # writes ~/.gang/policy.toml (default-deny)
 $ gang policy allow-peer 12D3-c2ace1a32fd67c0c8c66976336bceead    # your operator's gang id (step 4)
 $ gang policy allow ganglion:diagnostics/collect '**' --wide-open # the group step 8 deploys
@@ -605,15 +608,20 @@ Next steps:
   3. Sign: gang sign my-tool.component.wasm --name my-tool --version 0.1.0
 ```
 
-The generated Makefile drives the rest (requires
-`rustup target add wasm32-wasip2` and
-[wasm-tools](https://github.com/bytecodealliance/wasm-tools)):
+> **Known issues in 2.6.0.** The Rust scaffold's `make component` fails, and
+> the generated crate doesn't export the capability interface yet. Start from
+> the Rust example in
+> [CAPABILITY_AUTHOR_GUIDE.md](CAPABILITY_AUTHOR_GUIDE.md#rust) or from one of
+> the repo's `gang-capability-*` crates. Build with `cargo component build
+> --release`, or with Rust 1.88: components from current stable Rust import
+> WASI interfaces newer than the runtime provides, and robots refuse them. Both
+> are planned for 2.6.1.
+
+Once you have a component, sign and deploy it:
 
 ```bash
-cd my-tool
-make component   # cargo build --target wasm32-wasip2 --release + wasm-tools component new
-make sign        # gang sign my-tool.component.wasm ...
-gang deploy my-robot my-tool.component.wasm
+gang sign my-tool.wasm --name my-tool --version 0.1.0
+gang deploy my-robot my-tool.wasm
 ```
 
 C++, Python, and Go scaffolds exist too (`--language cpp|python|go`). See

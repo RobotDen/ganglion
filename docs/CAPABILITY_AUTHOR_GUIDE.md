@@ -26,6 +26,8 @@ gang deploy robot-42 my-tool.component.wasm
 gang run robot-42 my-tool
 ```
 
+> **2.6.0:** the Rust scaffold's `make component` doesn't work yet. Build Rust capabilities as described under [Rust](#rust) below.
+
 ## Architecture
 
 ```
@@ -92,6 +94,8 @@ to its hard caps — a signer can request but never exceed host policy.
 ### Rust
 
 Rust is the primary authoring language. The `cargo-component` toolchain handles WIT binding generation and component creation in a single step.
+
+> **Known issue in 2.6.0: build with `cargo component` or Rust 1.88.** A plain `cargo build --target wasm32-wasip2` with current stable Rust produces a component that imports newer WASI interfaces (0.2.12) than the runtime provides (0.2.6), and the robot refuses it with `capability not declared: component imports instance wasi:cli/exit@0.2.12 …`. `cargo component build --release` works, and so does `cargo +1.88.0 build --target wasm32-wasip2 --release`. The runtime upgrade is planned for 2.6.1. The Rust scaffold (`gang capability scaffold --language rust`) is also affected: its `make component` fails and its crate doesn't export the capability interface yet, so start from the example below.
 
 **Prerequisites:**
 
