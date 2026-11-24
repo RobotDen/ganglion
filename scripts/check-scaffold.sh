@@ -59,6 +59,7 @@ as relay identity generate >/dev/null
 as relay relay --port 0 > "$WORK/relay.log" 2>&1 &
 PIDS+=($!)
 wait_for "$WORK/relay.log" "Listening on /ip4/127\.0\.0\.1/tcp/[0-9]+"
+wait_for "$WORK/relay.log" "Peer ID \(libp2p/dial\):"
 PORT=$(grep -oE 'Listening on /ip4/127\.0\.0\.1/tcp/[0-9]+' "$WORK/relay.log" | head -1 | grep -oE '[0-9]+$')
 RELAY_ID=$(awk '/Peer ID \(libp2p\/dial\):/ {print $NF; exit}' "$WORK/relay.log")
 RELAY=/ip4/127.0.0.1/tcp/$PORT/p2p/$RELAY_ID
