@@ -54,6 +54,35 @@ fn sign_capabilities_none_declares_no_group() {
 }
 
 #[test]
+fn sign_capabilities_none_cannot_be_combined() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = dir.path().join("identity.key");
+    Keypair::load_or_generate(&key).unwrap();
+    let wasm = dir.path().join("tool.wasm");
+    std::fs::write(&wasm, b"fixture").unwrap();
+
+    for extra in [
+        &["--capabilities", "none,diagnostics"][..],
+        &["--capabilities", "none", "--fs-path", "/tmp/x/**"][..],
+    ] {
+        let mut args = vec![
+            "sign",
+            wasm.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        let out = gang(dir.path(), &args);
+        assert!(!out.status.success(), "{extra:?} must be refused");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("can't be combined"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
 fn rust_scaffold_exports_the_capability_world() {
     let dir = tempfile::tempdir().unwrap();
     let out = gang(

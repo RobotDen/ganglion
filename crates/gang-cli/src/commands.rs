@@ -2497,9 +2497,20 @@ pub async fn sign(
     // Declared capabilities: from --capabilities when provided, otherwise a
     // permissive default set with a loud warning (real WIT-import extraction is
     // not yet wired — see CLI-06).
+    // `--capabilities none`: the component uses no host interface, so it
+    // can't be combined with a group or a pattern flag (each declares one).
+    let declares_none = capabilities.is_some_and(|specs| specs.iter().any(|s| s.trim() == "none"));
+    if declares_none
+        && (capabilities.is_some_and(|specs| specs.len() > 1)
+            || !(http_endpoints.is_empty() && fs_paths.is_empty() && ros_patterns.is_empty()))
+    {
+        anyhow::bail!(
+            "--capabilities none declares no capability group; it can't be combined with \
+             other groups or with --http-endpoint, --fs-path or --ros-pattern"
+        );
+    }
     let declared_capabilities = match capabilities {
-        // `--capabilities none`: the component uses no host interface.
-        Some([only]) if only.trim() == "none" => Vec::new(),
+        _ if declares_none => Vec::new(),
         Some(specs) if !specs.is_empty() => specs
             .iter()
             .map(|s| parse_capability_group(s))

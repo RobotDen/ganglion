@@ -106,8 +106,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch head
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install the scaffold's pinned toolchain
-        run: rustup toolchain install 1.88 --profile minimal --target wasm32-wasip2
       - run: cargo build -p gang
       - run: scripts/check-scaffold.sh target/debug/gang
 
