@@ -205,6 +205,7 @@ enum Commands {
         version: String,
         /// Declared capability groups, comma-separated (e.g.
         /// "diagnostics,logs,ros,fs,artifacts,process,network,metrics,http").
+        /// `none` declares no group (the component uses no host interface).
         /// If omitted, a permissive default set is used with a warning.
         #[arg(long, value_delimiter = ',')]
         capabilities: Option<Vec<String>>,

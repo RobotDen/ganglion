@@ -4,6 +4,27 @@ All notable changes to Ganglion will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Rust capability scaffold builds a capability that runs.** The
+  generated crate had no WIT bindings, so it exported nothing, and
+  `make component` failed. It now generates the bindings and exports `run`
+  (`src/component.rs`), `make component` copies rustc's component output,
+  and a `rust-toolchain.toml` pins Rust 1.88: components from newer Rust
+  import WASI 0.2.12, which the runtime (WASI 0.2.6) refuses.
+
+### Added
+
+- **`gang sign --capabilities none`** declares that a component uses no host
+  interface, instead of falling back to the permissive default set. The Rust
+  scaffold's `make sign` uses it.
+
+### Build and CI
+
+- A "Capability scaffold" CI job scaffolds a Rust capability, builds it, and
+  signs, deploys and runs it over a localhost relay on a default-deny robot
+  (`scripts/check-scaffold.sh`).
+
 ## [2.6.0] - 2026-11-22
 
 ### Upgrade notes (read first)

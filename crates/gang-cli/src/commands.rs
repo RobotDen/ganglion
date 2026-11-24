@@ -2497,7 +2497,20 @@ pub async fn sign(
     // Declared capabilities: from --capabilities when provided, otherwise a
     // permissive default set with a loud warning (real WIT-import extraction is
     // not yet wired — see CLI-06).
+    // `--capabilities none`: the component uses no host interface, so it
+    // can't be combined with a group or a pattern flag (each declares one).
+    let declares_none = capabilities.is_some_and(|specs| specs.iter().any(|s| s.trim() == "none"));
+    if declares_none
+        && (capabilities.is_some_and(|specs| specs.len() > 1)
+            || !(http_endpoints.is_empty() && fs_paths.is_empty() && ros_patterns.is_empty()))
+    {
+        anyhow::bail!(
+            "--capabilities none declares no capability group; it can't be combined with \
+             other groups or with --http-endpoint, --fs-path or --ros-pattern"
+        );
+    }
     let declared_capabilities = match capabilities {
+        _ if declares_none => Vec::new(),
         Some(specs) if !specs.is_empty() => specs
             .iter()
             .map(|s| parse_capability_group(s))
@@ -6458,6 +6471,15 @@ pub async fn capability_scaffold(
     Ok(())
 }
 
+/// Rust toolchain a scaffolded Rust capability builds with. A newer rustc's
+/// `wasm32-wasip2` output imports WASI interfaces newer than the runtime
+/// provides (wasmtime-wasi 36: WASI 0.2.6), and robots refuse to instantiate
+/// it. Raise this together with the wasmtime upgrade.
+const SCAFFOLD_RUST_TOOLCHAIN: &str = "1.88";
+
+/// The wit-bindgen version scaffolded Rust capabilities use (the workspace's).
+const SCAFFOLD_WIT_BINDGEN: &str = "0.60";
+
 fn scaffold_rust(name: &str, dir: &Path) -> anyhow::Result<()> {
     let src_dir = dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
@@ -6472,12 +6494,33 @@ name = "{name}"
 version = "0.1.0"
 edition = "2024"
 
+# A standalone project, even when created inside another Cargo workspace.
+[workspace]
+
+# cdylib: rustc emits the WASM component directly for wasm32-wasip2.
+# rlib: `cargo test` runs the logic natively.
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = "{SCAFFOLD_WIT_BINDGEN}"
+"#
+        ),
+    )?;
+
+    std::fs::write(
+        dir.join("rust-toolchain.toml"),
+        format!(
+            r#"# Components built with a newer Rust import WASI interfaces newer than the
+# Ganglion runtime provides, and robots refuse to run them. Keep this pin
+# until your robots run a Ganglion release that supports a newer one.
+[toolchain]
+channel = "{SCAFFOLD_RUST_TOOLCHAIN}"
+targets = ["wasm32-wasip2"]
 "#
         ),
     )?;
@@ -6487,11 +6530,16 @@ serde_json = "1"
         format!(
             r#"//! {name} — a Ganglion capability.
 //!
-//! Build: cargo build --target wasm32-wasip2 --release
-//! Component: wasm-tools component new target/wasm32-wasip2/release/{crate_name}.wasm -o {name}.component.wasm
-//! Sign: gang sign {name}.component.wasm --name {name} --version 0.1.0
+//! Build: make component   (cargo build --target wasm32-wasip2 --release)
+//! Sign:  make sign       (gang sign … --capabilities none)
+//!
+//! The logic lives in [`run`], so `cargo test` exercises it natively;
+//! `component.rs` exports it as the component's `run` function.
 
 use serde::Serialize;
+
+#[cfg(target_arch = "wasm32")]
+mod component;
 
 #[derive(Serialize)]
 struct Output {{
@@ -6499,7 +6547,8 @@ struct Output {{
     message: String,
 }}
 
-/// Entry point called by the Ganglion runtime.
+/// Entry point called by the Ganglion runtime with the invocation's
+/// arguments. Returns the bytes `gang run` prints, or an error message.
 pub fn run(args: Vec<String>) -> Result<Vec<u8>, String> {{
     let output = Output {{
         status: "ok".into(),
@@ -6515,8 +6564,8 @@ mod tests {{
     #[test]
     fn run_returns_ok() {{
         let result = run(vec!["test".into()]).unwrap();
-        let output: Output = serde_json::from_slice(&result).unwrap();
-        assert_eq!(output.status, "ok");
+        let output: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(output["status"], "ok");
     }}
 }}
 "#
@@ -6524,19 +6573,48 @@ mod tests {{
     )?;
 
     std::fs::write(
+        src_dir.join("component.rs"),
+        r#"//! WASM component entry point (wasm32 builds only): exports the
+//! `ganglion-capability` world's `run` function from `wit/ganglion.wit`.
+//!
+//! To call host interfaces, import them from the generated bindings, e.g.
+//! `use ganglion::capability::diagnostics_collect;`, and declare the group
+//! when signing (`gang sign --capabilities diagnostics`).
+
+wit_bindgen::generate!({
+    world: "ganglion-capability",
+    path: "wit",
+});
+
+struct Component;
+
+impl Guest for Component {
+    fn run(args: Vec<String>) -> Result<Vec<u8>, String> {
+        crate::run(args)
+    }
+}
+
+export!(Component);
+"#,
+    )?;
+
+    std::fs::write(
         dir.join("Makefile"),
         format!(
-            r#".PHONY: build component sign clean
+            r#".PHONY: build component sign test clean
 
+# rustc emits a WASM component directly for wasm32-wasip2; rust-toolchain.toml
+# pins the toolchain the Ganglion runtime can run.
 build:
 	cargo build --target wasm32-wasip2 --release
 
 component: build
-	wasm-tools component new target/wasm32-wasip2/release/{crate_name}.wasm \
-		-o {name}.component.wasm
+	cp target/wasm32-wasip2/release/{crate_name}.wasm {name}.component.wasm
 
+# This sample uses no host interface. When you import one, declare its group
+# instead of `none` (e.g. --capabilities diagnostics).
 sign: component
-	gang sign {name}.component.wasm --name {name} --version 0.1.0
+	gang sign {name}.component.wasm --name {name} --version 0.1.0 --capabilities none
 
 test:
 	cargo test

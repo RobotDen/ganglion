@@ -608,21 +608,22 @@ Next steps:
   3. Sign: gang sign my-tool.component.wasm --name my-tool --version 0.1.0
 ```
 
-> **Known issues in 2.6.0.** The Rust scaffold's `make component` fails, and
-> the generated crate doesn't export the capability interface yet. Start from
-> the Rust example in
-> [CAPABILITY_AUTHOR_GUIDE.md](CAPABILITY_AUTHOR_GUIDE.md#rust) or from one of
-> the repo's `gang-capability-*` crates. Build with `cargo component build
-> --release`, or with Rust 1.88: components from current stable Rust import
-> WASI interfaces newer than the runtime provides, and robots refuse them. Both
-> are planned for 2.6.1.
-
-Once you have a component, sign and deploy it:
+The generated Makefile drives the rest. The project's `rust-toolchain.toml`
+pins Rust 1.88 with the `wasm32-wasip2` target, and rustup installs it on
+first use: components built with a newer Rust import WASI interfaces newer
+than the runtime provides, and robots refuse them.
 
 ```bash
-gang sign my-tool.wasm --name my-tool --version 0.1.0
-gang deploy my-robot my-tool.wasm
+cd my-tool
+make component   # cargo build --target wasm32-wasip2 --release
+make sign        # gang sign my-tool.component.wasm ... --capabilities none
+gang deploy my-robot my-tool.component.wasm
+gang run my-robot my-tool
 ```
+
+The sample uses no host interface, so it is signed with `--capabilities none`
+and runs on a default-deny robot. When it imports one (see the comments in
+`src/component.rs`), declare that group instead.
 
 C++, Python, and Go scaffolds exist too (`--language cpp|python|go`). See
 [CAPABILITY_AUTHOR_GUIDE.md](CAPABILITY_AUTHOR_GUIDE.md) for full authoring
